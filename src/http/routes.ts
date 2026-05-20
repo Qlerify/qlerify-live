@@ -35,6 +35,8 @@ import { EVENTS } from "../events/registry.js";
 import {
   nextStep, currentStepIndex, newDemand, resetDemand, resetAll,
 } from "../simulator/stepper.js";
+import { runAgentTurn } from "../chat/agent.js";
+import { systemPromptSize } from "../chat/system-prompt.js";
 
 export function registerRoutes(app: FastifyInstance) {
   // Shared command wrapper — auth + error mapping
@@ -175,6 +177,31 @@ export function registerRoutes(app: FastifyInstance) {
   });
 
   app.get("/sim/health", async () => ({ ok: true, ts: new Date().toISOString() }));
+
+  // ---------------- Chat assistant ----------------
+  app.get("/chat/info", async () => ({
+    model: process.env.CHAT_MODEL ?? "claude-sonnet-4-6",
+    effort: process.env.CHAT_EFFORT ?? "medium",
+    apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
+    systemPrompt: systemPromptSize(),
+    toolCount: 8,
+  }));
+
+  app.post("/chat", async (req, reply) => {
+    const body = (req.body ?? {}) as { messages?: unknown };
+    if (!Array.isArray(body.messages) || body.messages.length === 0) {
+      return reply.code(400).send({ error: "messages[] required, must be non-empty" });
+    }
+    try {
+      const result = await runAgentTurn(body.messages as any);
+      // Use JSON.stringify explicitly — Fastify's default serializer was
+      // emitting raw 0x0a inside nested string fields in some cases.
+      return reply.type("application/json").send(JSON.stringify(result));
+    } catch (e: any) {
+      req.log.error({ err: e }, "chat turn failed");
+      return reply.code(500).send({ error: "INTERNAL", message: e?.message ?? String(e) });
+    }
+  });
 
   // List all demands with progress (the dashboard's main query).
   app.get("/sim/demands", async () => {

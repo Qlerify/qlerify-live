@@ -1,0 +1,285 @@
+// Generated from Qlerify workflow b0b1362b-ac9c-42b6-a4da-7216627aa405
+// Ericsson HW Flow — 7 bounded contexts × 16 aggregates.
+// Cross-BC references stay opaque (plain string IDs, no @relation across boundaries).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ---------------------------------------------------------------------------
+// Helix BC — demand, build plan, builds, build demand
+// ---------------------------------------------------------------------------
+
+model Demand {
+  id             String   @id
+  customerId     String
+  productName    String
+  qty            Int
+  requestedWeek  String
+  status         String   // NEW | PLANNED | DELIVERED
+  version        Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model BuildPlan {
+  id          String  @id
+  demandId    String
+  versionNo   Int     // model field "version" — renamed to avoid clash with optimistic-lock column
+  status      String  // DRAFT | LOCKED | RELEASED
+  lockedAt    String?
+  releasedAt  String?
+  reason      String? // ETA_CHANGED | ER_APPROVED | PRIORITY_CHANGED | SITE_CHANGED
+  version     Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  builds      Build[]
+}
+
+model Build {
+  id              String   @id
+  buildPlanId     String
+  buildNo         String
+  qty             Int
+  priority        Int?
+  siteId          String?  // cross-BC reference to Compass.ProductionSite (opaque)
+  materialStatus  String   // OPEN | AT_RISK | KIT_READY
+  plannedStart    String
+  actualStart     String?
+  actualEnd       String?
+  status          String   // PLANNED | RELEASED | IN_PROGRESS | RTD | SHIPPED
+  version         Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  buildPlan       BuildPlan    @relation(fields: [buildPlanId], references: [id], onDelete: Cascade)
+  buildDemand     BuildDemand[]
+
+  @@index([buildPlanId])
+  @@index([status])
+  @@index([materialStatus])
+}
+
+model BuildDemand {
+  id            String @id @default(uuid())
+  buildId       String
+  partNumber    String
+  qtyRequired   Int
+  qtyAvailable  Int    @default(0)
+
+  build         Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@unique([buildId, partNumber])
+  @@index([buildId])
+}
+
+// ---------------------------------------------------------------------------
+// PRIM BC — project, BOM, engineering release
+// ---------------------------------------------------------------------------
+
+model Project {
+  id           String  @id
+  demandId     String
+  productName  String
+  status       String  @default("ACTIVE")
+  version      Int     @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  bomItems     BomItem[]
+}
+
+model BomItem {
+  id            String  @id @default(uuid())
+  projectId     String
+  partNumber    String
+  qtyPerUnit    Int
+  designState   String  // DRAFT | DS1 | DS2_PROD
+  frozenAt      String?
+
+  project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([designState])
+}
+
+model EngineeringRelease {
+  id          String  @id @default(uuid())
+  projectId   String  @unique
+  status      String  // OPEN | APPROVED
+  approvedAt  String?
+  version     Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// SAP BC — purchase orders, work orders
+// ---------------------------------------------------------------------------
+
+model PurchaseOrder {
+  id                  String  @id @default(uuid())
+  projectId           String
+  partNumber          String
+  qty                 Int
+  supplierId          String
+  requestedDate       String?
+  confirmedEta        String?
+  actualReceiptDate   String?
+  status              String  // DRAFT | ORDERED | CONFIRMED | RECEIVED
+  version             Int     @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+  @@index([partNumber])
+}
+
+model WorkOrder {
+  id          String  @id @default(uuid())
+  projectId   String
+  buildId     String
+  qty         Int
+  status      String  // CREATED | RELEASED | CLOSED
+  version     Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([buildId])
+  @@index([projectId])
+}
+
+// ---------------------------------------------------------------------------
+// ESTER BC — engineering changes
+// ---------------------------------------------------------------------------
+
+model EngineeringChange {
+  id          String  @id @default(uuid())
+  projectId   String
+  bomItemId   String
+  description String
+  status      String  // OPEN | APPROVED | REJECTED
+  createdAt   String
+  approvedAt  String?
+  version     Int     @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@index([projectId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Compass BC — sites, lines, bookings
+// ---------------------------------------------------------------------------
+
+model ProductionSite {
+  id    String @id
+  name  String
+  lines ProductionLine[]
+}
+
+model ProductionLine {
+  id               String @id
+  siteId           String
+  name             String
+  capacityPerWeek  Int
+
+  site             ProductionSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  bookings         LineBooking[]
+
+  @@index([siteId])
+}
+
+model LineBooking {
+  id            String @id @default(uuid())
+  lineId        String
+  buildId       String
+  plannedStart  String
+  plannedEnd    String
+  status        String // BOOKED | RUNNING | DONE
+  version       Int    @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  line          ProductionLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+
+  @@index([buildId])
+  @@index([lineId])
+}
+
+// ---------------------------------------------------------------------------
+// Test BC — test results
+// ---------------------------------------------------------------------------
+
+model TestResult {
+  id          String @id @default(uuid())
+  buildId     String
+  unitSerial  String
+  testType    String // BOARD | FAI | FA2 | FUNCTIONAL
+  result      String // PASS | FAIL
+  executedAt  String
+
+  @@index([buildId, testType])
+}
+
+// ---------------------------------------------------------------------------
+// Logistics BC — units, shipments
+// ---------------------------------------------------------------------------
+
+model Unit {
+  id          String @id @default(uuid())
+  buildId     String
+  shipmentId  String?
+  serialNo    String
+  status      String // BUILT | PICKED | PACKED | SHIPPED | DELIVERED | LOST
+  version     Int    @default(0)
+  updatedAt   DateTime @updatedAt
+
+  shipment    Shipment? @relation(fields: [shipmentId], references: [id])
+
+  @@index([buildId])
+  @@index([shipmentId])
+}
+
+model Shipment {
+  id          String @id @default(uuid())
+  demandId    String
+  packedAt    String?
+  shippedAt   String?
+  deliveredAt String?
+  status      String // PREPARING | READY | IN_TRANSIT | DELIVERED
+  version     Int    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  units       Unit[]
+
+  @@index([demandId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Simulator support — append-only event log for the demo UI
+// ---------------------------------------------------------------------------
+
+model EventLog {
+  id            String   @id @default(uuid())
+  eventName     String   // e.g. "Hardware Demand Created"
+  eventRef      String   // e.g. "#/domainEvents/HardwareDemandCreated"
+  boundedContext String  // Helix | PRIM | SAP | ESTER | Compass | Test | Logistics
+  aggregateRoot String   // e.g. "Demand"
+  aggregateId   String
+  demandId      String?  // resolved demand the event belongs to (null only for the createDemand event itself before write)
+  role          String
+  payload       String   // JSON-serialized command args
+  occurredAt    DateTime @default(now())
+
+  @@index([occurredAt])
+  @@index([eventRef])
+  @@index([demandId, occurredAt])
+}

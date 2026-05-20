@@ -1,0 +1,74 @@
+{
+  "workflowId": "b0b1362b-ac9c-42b6-a4da-7216627aa405",
+  "projectId": "9879090f-905d-4d8e-a1a0-735d2dad9f1e",
+  "workflowName": "Ericsson HW Flow",
+  "modelHash": "f99e3d107d8d1401e5cc0145d5ad1fa27d354afe6976a8448de7c57708a1855f",
+  "modelFile": ".qlerify/workflow.json",
+  "generatedAt": "2026-05-20T20:12:30Z",
+  "stack": {
+    "runtime": "Node.js + TypeScript",
+    "httpFramework": "Fastify 4",
+    "orm": "Prisma 5",
+    "database": "SQLite (file:./prisma/dev.db)",
+    "testRunner": "Vitest 2",
+    "frontend": "Vanilla JS + Tailwind (CDN) — served statically from /web"
+  },
+  "boundedContexts": ["Helix", "PRIM", "SAP", "ESTER", "Compass", "Test", "Logistics"],
+  "aggregates": {
+    "Helix": ["Demand", "BuildPlan", "Build"],
+    "PRIM": ["Project", "EngineeringRelease"],
+    "SAP": ["PurchaseOrder"],
+    "ESTER": ["EngineeringChange"],
+    "Compass": ["LineBooking"],
+    "Test": ["TestResult"],
+    "Logistics": ["Shipment"]
+  },
+  "ownedEntities": {
+    "Project": ["BomItem"],
+    "Build": ["BuildDemand"],
+    "Shipment": ["Unit"]
+  },
+  "referenceEntities": ["ProductionSite", "ProductionLine", "WorkOrder"],
+  "persistenceDecisions": [
+    "Owned-entity collections are stored in separate tables with FK + ON DELETE CASCADE to the aggregate root (BomItem→Project, BuildDemand→Build, Unit→Shipment). Embedding as JSON would block the read-model queries that filter on child attributes (e.g. List Builds At Risk needs PO ETAs).",
+    "Optimistic locking via a `version` integer column on every aggregate root; child entities update through the root, so they don't need their own version column.",
+    "Cross-bounded-context references (e.g. Build.siteId → Compass.ProductionSite, PurchaseOrder.projectId → PRIM.Project) are stored as plain string FKs without Prisma @relation — honoring the BC boundary.",
+    "Unit gets an optional `shipmentId` FK so the picked-and-packed transition can group units into a shipment in one transactional write. The unit's primary owner remains Build (`buildId`), matching the spec.",
+    "BuildPlan.versionNo (the model field) was renamed in storage to avoid clashing with the optimistic-lock column also named `version`.",
+    "Append-only `EventLog` table records every emitted event (and skipped no-op markers) so the simulator UI can drive step-by-step playback and the audience can see which row just changed."
+  ],
+  "openItems": [
+    {
+      "issue": "Build Plan archival semantics on Update Build Plan",
+      "current": "Creating v(N+1) moves builds from v(N) to v(N+1) and marks v(N) as SUPERSEDED. This keeps the build's FK pointing to exactly one current plan version.",
+      "alternative": "Keep builds attached to v(N) and treat v(N+1) as informational only. Spec §2 says 'previous version archived' without specifying ownership transfer; current choice was made to keep downstream Lock/Release readable."
+    },
+    {
+      "issue": "Material Shortage Identified and Material Kit Completed are derived events",
+      "current": "Wired as subscribers on the in-process event bus. They fire automatically after MaterialETAChanged and MaterialReceivedAtSite respectively.",
+      "alternative": "Could be modeled as scheduled SQL queries that run on a tick; current choice is simpler and matches the spec's 'rules engine = two SQL queries that run after every event'."
+    },
+    {
+      "issue": "Authorization is header-based",
+      "current": "Handlers read role from the x-role HTTP header (or AUTH_ROLE env var). Role→command mapping is enforced inside each handler via assertRole.",
+      "alternative": "Replace src/auth.ts with JWT/OAuth before deploying. Handler code does not need to change."
+    },
+    {
+      "issue": "Validator's MISSING_COLLECTION_IDENTIFIER warning on Update/Lock Build Plan",
+      "current": "Accepted as legitimate. Neither command mutates a specific Build; the validator flags them only because the BuildPlan aggregate declares a `builds` relationship.",
+      "alternative": "If a future delta adds per-build identification to those commands (e.g. partial replan), the warning will need re-evaluation."
+    }
+  ],
+  "fileLayout": {
+    "schema": "prisma/schema.prisma",
+    "seed": "prisma/seed.ts",
+    "shared": ["src/db.ts", "src/errors.ts", "src/auth.ts", "src/util/"],
+    "events": "src/events/ (registry.ts, bus.ts, derived.ts)",
+    "aggregates": "src/{boundedContext}/{aggregate}/commands.ts",
+    "queries": "src/{boundedContext}/queries.ts",
+    "http": "src/http/routes.ts + src/server.ts",
+    "simulator": "src/simulator/ (runner.ts, stepper.ts)",
+    "tests": "tests/{boundedContext}/{aggregate}.test.ts + tests/helpers/world.ts",
+    "frontend": "web/index.html + web/app.js"
+  }
+}

@@ -2,9 +2,15 @@
   "workflowId": "b0b1362b-ac9c-42b6-a4da-7216627aa405",
   "projectId": "9879090f-905d-4d8e-a1a0-735d2dad9f1e",
   "workflowName": "Ericsson HW Flow",
-  "modelHash": "f99e3d107d8d1401e5cc0145d5ad1fa27d354afe6976a8448de7c57708a1855f",
+  "modelHash": "c6af622c20b9e2478ff5d411ec593ff2bdf31788b0f4263f57fb9ec3f4be800a",
   "modelFile": ".qlerify/workflow.json",
   "generatedAt": "2026-05-20T20:12:30Z",
+  "lastSyncedAt": "2026-05-20T22:42:00Z",
+  "syncedFromCode": [
+    "BuildPlan.status: added SUPERSEDED value (set by Update Build Plan on the prior version)",
+    "Unit.shipmentId: added nullable FK populated by Units Picked And Packed",
+    "Change Material ETA: added rejection-branch GWT for equal-or-earlier ETA"
+  ],
   "stack": {
     "runtime": "Node.js + TypeScript",
     "httpFramework": "Fastify 4",

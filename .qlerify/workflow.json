@@ -462,7 +462,8 @@
         }
       ],
       "acceptanceCriteria": [
-        "Given a purchase order is CONFIRMED, When the supplier updates the ETA, Then confirmed_eta is changed to a later date"
+        "Given a purchase order is CONFIRMED, When the supplier updates the ETA to a date strictly later than the current confirmed_eta, Then confirmed_eta is updated to the new value",
+        "Given a purchase order is CONFIRMED, When the supplier submits a new ETA that is equal to or earlier than the current confirmed_eta, Then the change is rejected with a domain error and confirmed_eta is unchanged"
       ]
     },
     "MaterialReceivedAtSite": {
@@ -860,11 +861,12 @@
           },
           {
             "name": "status",
-            "description": "Plan lifecycle status (DRAFT, LOCKED, RELEASED)",
+            "description": "Plan lifecycle status (DRAFT, LOCKED, RELEASED, SUPERSEDED). SUPERSEDED is set on the prior version when Update Build Plan creates a new one — preserving history while keeping a single current plan per demand.",
             "exampleData": [
               "DRAFT",
               "LOCKED",
-              "RELEASED"
+              "RELEASED",
+              "SUPERSEDED"
             ],
             "dataType": "string"
           },
@@ -1191,6 +1193,16 @@
               "BUILT",
               "PACKED",
               "DELIVERED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "shipmentId",
+            "description": "Shipment this unit was packed into; null until Units Picked And Packed fires. Set atomically with the unit's PACKED status transition.",
+            "exampleData": [
+              "ship-A1B2",
+              "ship-C3D4",
+              "ship-E5F6"
             ],
             "dataType": "string"
           }

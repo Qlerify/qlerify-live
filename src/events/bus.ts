@@ -5,6 +5,7 @@
 
 import { prisma } from "../db.js";
 import { findEvent } from "./registry.js";
+import { getBusinessClock } from "./clock.js";
 import type { Role } from "../auth.js";
 
 export interface EmittedEvent {
@@ -115,6 +116,7 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       demandId,
       role: ev.role,
       payload: JSON.stringify(ev.payload),
+      businessAt: getBusinessClock(),
     },
   });
 

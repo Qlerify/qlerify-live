@@ -180,6 +180,7 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/demands", async () => {
     const demands = await prisma.demand.findMany({ orderBy: { createdAt: "desc" } });
     const out: any[] = [];
+    const nowMs = Date.now();
     for (const d of demands) {
       const refs = await prisma.eventLog.findMany({
         where: { demandId: d.id },
@@ -189,9 +190,12 @@ export function registerRoutes(app: FastifyInstance) {
       const last = await prisma.eventLog.findFirst({
         where: { demandId: d.id },
         orderBy: { occurredAt: "desc" },
-        select: { eventName: true, eventRef: true, occurredAt: true, boundedContext: true },
+        select: { eventName: true, eventRef: true, occurredAt: true, businessAt: true, boundedContext: true },
       });
-      out.push({ ...d, progress: refs.length, total: EVENTS.length, lastEvent: last });
+      // dwellSeconds = real wall-clock idleness since the last event the user
+      // triggered (good for "how long ago did I click step forward on this one").
+      const dwellSeconds = last ? Math.round((nowMs - new Date(last.occurredAt).getTime()) / 1000) : null;
+      out.push({ ...d, progress: refs.length, total: EVENTS.length, lastEvent: last, dwellSeconds });
     }
     return out;
   });

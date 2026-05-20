@@ -4,6 +4,7 @@
 
 import { prisma } from "../db.js";
 import { wireDerivedEvents } from "../events/derived.js";
+import { setBusinessClock, businessTimeForStep } from "../events/clock.js";
 import { createDemand } from "../helix/demand/commands.js";
 import { defineBuildQuantity, updateBuildPlan, lockBuildPlan } from "../helix/buildplan/commands.js";
 import {
@@ -69,8 +70,13 @@ export async function newDemand(): Promise<{ id: string; template: typeof DEFAUL
   wireDerivedEvents();
   const existing = await prisma.demand.count();
   const tmpl = DEFAULT_DEMAND_TEMPLATES[existing % DEFAULT_DEMAND_TEMPLATES.length]!;
-  const d = await createDemand(tmpl, "Product Manager");
-  return { id: d.id, template: tmpl };
+  setBusinessClock(businessTimeForStep(0));
+  try {
+    const d = await createDemand(tmpl, "Product Manager");
+    return { id: d.id, template: tmpl };
+  } finally {
+    setBusinessClock(null);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,28 +329,35 @@ export async function nextStep(demandId: string, withDisruptions = true): Promis
     return { index: idx, event: EVENTS[EVENTS.length - 1]!, caption: "(simulation complete)", done: true, demandId };
   }
   const event = EVENTS[idx]!;
-  const before = await prisma.eventLog.count({ where: { eventRef: event.ref, demandId } });
-  const caption = await runStep(idx, demandId, withDisruptions);
-  const after = await prisma.eventLog.count({ where: { eventRef: event.ref, demandId } });
+  const businessAt = businessTimeForStep(idx);
+  setBusinessClock(businessAt);
+  try {
+    const before = await prisma.eventLog.count({ where: { eventRef: event.ref, demandId } });
+    const caption = await runStep(idx, demandId, withDisruptions);
+    const after = await prisma.eventLog.count({ where: { eventRef: event.ref, demandId } });
 
-  // No-op step (skipped or just an observational caption) — leave a marker
-  // so currentStepIndex advances.
-  if (after === before) {
-    await prisma.eventLog.create({
-      data: {
-        eventName: event.name,
-        eventRef: event.ref,
-        boundedContext: event.boundedContext,
-        aggregateRoot: event.aggregateRoot,
-        aggregateId: "",
-        demandId,
-        role: event.role,
-        payload: JSON.stringify({ skipped: true, caption }),
-      },
-    });
+    // No-op step (skipped or just an observational caption) — leave a marker
+    // so currentStepIndex advances.
+    if (after === before) {
+      await prisma.eventLog.create({
+        data: {
+          eventName: event.name,
+          eventRef: event.ref,
+          boundedContext: event.boundedContext,
+          aggregateRoot: event.aggregateRoot,
+          aggregateId: "",
+          demandId,
+          role: event.role,
+          payload: JSON.stringify({ skipped: true, caption }),
+          businessAt,
+        },
+      });
+    }
+
+    return { index: idx, event, caption, done: idx + 1 >= EVENTS.length, demandId };
+  } finally {
+    setBusinessClock(null);
   }
-
-  return { index: idx, event, caption, done: idx + 1 >= EVENTS.length, demandId };
 }
 
 export async function resetDemand(demandId: string) {

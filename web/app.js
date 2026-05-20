@@ -107,16 +107,25 @@ function navigate(hash) {
   }
 }
 
+let dashboardTimer = null;
+
 async function onHashChange() {
   const r = parseHash();
   state.view = r.view;
   state.demandId = r.demandId ?? null;
   state.prev = null;
   state.snapshot = null;
+
+  if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
+
   if (r.view === "detail") {
     await loadDetail();
   } else {
     await loadDashboard();
+    // Poll every 5s so "last activity" pills age in front of the audience.
+    dashboardTimer = setInterval(() => {
+      if (state.view === "dashboard" && !state.busy) loadDashboard().catch(() => {});
+    }, 5000);
   }
 }
 
@@ -158,12 +167,35 @@ async function deleteDemand(demandId, ev) {
   }
 }
 
+// Format a relative time like "3s ago" or "2 min ago" or "1 h ago".
+function relativeTime(secs) {
+  if (secs == null) return "—";
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
+  return `${Math.floor(secs / 86400)} d ago`;
+}
+
+// Traffic-light tone keyed on real wall-clock dwell. Demo-friendly thresholds:
+// active <30s, slow <2min, stalled >=2min. Final + done → grey (complete).
+function staleness(dwellSeconds, isComplete) {
+  if (isComplete) return { dot: "bg-stone-300", label: "complete", textCls: "text-stone-500" };
+  if (dwellSeconds == null)   return { dot: "bg-stone-300", label: "new",      textCls: "text-stone-500" };
+  if (dwellSeconds < 30)      return { dot: "bg-emerald-500 animate-pulse", label: "active",  textCls: "text-emerald-700" };
+  if (dwellSeconds < 120)     return { dot: "bg-amber-500",  label: "slow",   textCls: "text-amber-700"  };
+  return                            { dot: "bg-rose-500",   label: "stalled", textCls: "text-rose-700"  };
+}
+
 function dashboardRow(d) {
   const pct = Math.round((d.progress / d.total) * 100);
   const lastBC = d.lastEvent?.boundedContext ?? "";
-  const lastTime = d.lastEvent ? new Date(d.lastEvent.occurredAt).toLocaleTimeString() : "—";
+  const isComplete = d.status === "DELIVERED";
+  const tone = staleness(d.dwellSeconds, isComplete);
   return `
     <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#demand/${d.id}">
+      <td class="px-4 py-3">
+        <span class="inline-block w-2 h-2 rounded-full ${tone.dot}" title="${tone.label}"></span>
+      </td>
       <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0,16)}…</td>
       <td class="px-4 py-3 text-sm text-stone-700">${d.customerId}</td>
       <td class="px-4 py-3 text-sm font-medium text-stone-900">${d.productName}</td>
@@ -178,8 +210,11 @@ function dashboardRow(d) {
           <div class="text-xs text-stone-500 tabular-nums w-12 text-right">${d.progress}/${d.total}</div>
         </div>
       </td>
-      <td class="px-4 py-3 text-xs text-stone-500">
-        ${d.lastEvent ? `<div class="text-stone-700">${d.lastEvent.eventName}</div><div>${lastBC} · ${lastTime}</div>` : "—"}
+      <td class="px-4 py-3 text-xs">
+        ${d.lastEvent ? `
+          <div class="text-stone-700">${d.lastEvent.eventName}</div>
+          <div class="text-stone-500 text-[11px]">${lastBC} · <span class="${tone.textCls} font-medium">${relativeTime(d.dwellSeconds)}</span></div>
+        ` : `<span class="text-stone-400">no events yet</span>`}
       </td>
       <td class="px-4 py-3 text-right">
         <button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this demand">✕</button>
@@ -213,6 +248,7 @@ function dashboardView() {
           <table class="w-full text-sm">
             <thead class="bg-stone-50 border-b border-stone-200">
               <tr class="text-left text-[11px] uppercase tracking-wide text-stone-500">
+                <th class="px-4 py-2 font-medium w-6"></th>
                 <th class="px-4 py-2 font-medium">id</th>
                 <th class="px-4 py-2 font-medium">customer</th>
                 <th class="px-4 py-2 font-medium">product</th>
@@ -220,7 +256,7 @@ function dashboardView() {
                 <th class="px-4 py-2 font-medium">week</th>
                 <th class="px-4 py-2 font-medium">status</th>
                 <th class="px-4 py-2 font-medium">progress</th>
-                <th class="px-4 py-2 font-medium">last event</th>
+                <th class="px-4 py-2 font-medium">last activity</th>
                 <th class="px-4 py-2"></th>
               </tr>
             </thead>
@@ -420,22 +456,60 @@ function detailHeader() {
   `;
 }
 
+// Build a per-step lookup of the businessAt timestamp recorded when each step fired.
+function businessByStep() {
+  const m = new Map(); // eventRef → ISO businessAt
+  for (const entry of state.log) {
+    if (entry.businessAt && !m.has(entry.eventRef)) m.set(entry.eventRef, entry.businessAt);
+  }
+  return m;
+}
+
+function fmtBizDate(iso) {
+  if (!iso) return null;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function daysBetween(isoA, isoB) {
+  if (!isoA || !isoB) return null;
+  const ms = new Date(isoB).getTime() - new Date(isoA).getTime();
+  return Math.round(ms / 86_400_000);
+}
+
 function timeline() {
   const total = state.events.length;
   const pct = total ? (state.currentIndex / total) * 100 : 0;
+  const biz = businessByStep();
+  let prevBizIso = null;
+
   const items = state.events.map((e, i) => {
     const fired = i < state.currentIndex;
     const isCurrent = i === state.currentIndex - 1;
     const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
     const ringClass = isCurrent ? "ring-2 ring-amber-400" : "";
+
+    const bizIso = biz.get(e.ref);
+    const bizLabel = fired ? fmtBizDate(bizIso) : null;
+    const gapDays = fired && prevBizIso && bizIso ? daysBetween(prevBizIso, bizIso) : null;
+    if (fired && bizIso) prevBizIso = bizIso;
+
+    // Highlight long gaps (>10 days) in amber so the supplier-slip moment pops.
+    const gapTone = gapDays != null && gapDays >= 10 ? "text-amber-700 font-semibold" : "text-stone-500";
+
     return `
-      <div data-step="${i}" class="shrink-0 w-44 rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"}">
+      <div data-step="${i}" class="shrink-0 w-44 rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col">
         <div class="flex items-center justify-between text-[10px] text-stone-500 mb-0.5">
           <span>${i+1}. ${e.boundedContext}</span>
           ${e.derived ? `<span class="text-amber-600 font-semibold">DERIVED</span>` : ""}
         </div>
         <div class="text-[12px] font-medium leading-tight text-stone-800">${e.name}</div>
         <div class="text-[10px] text-stone-500 mt-1">${e.role}</div>
+        ${fired ? `
+          <div class="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
+            <span class="text-stone-700 font-medium">${bizLabel ?? "—"}</span>
+            ${gapDays != null && gapDays > 0 ? `<span class="${gapTone}">+${gapDays}d</span>` : ""}
+          </div>
+        ` : ""}
       </div>
     `;
   }).join("");

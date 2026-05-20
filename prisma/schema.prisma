@@ -277,7 +277,8 @@ model EventLog {
   demandId      String?  // resolved demand the event belongs to (null only for the createDemand event itself before write)
   role          String
   payload       String   // JSON-serialized command args
-  occurredAt    DateTime @default(now())
+  occurredAt    DateTime @default(now())  // real wall-clock time the simulator recorded the event
+  businessAt    DateTime?  // simulated business time — the date the event would have occurred in the real world
 
   @@index([occurredAt])
   @@index([eventRef])

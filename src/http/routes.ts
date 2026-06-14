@@ -31,8 +31,9 @@ import * as testQ from "../test/queries.js";
 import * as logisticsQ from "../logistics/queries.js";
 
 import { prisma } from "../db.js";
-import { EVENTS } from "../events/registry.js";
+import { EVENTS, registryError } from "../events/registry.js";
 import { ontologyView } from "../ontology/model.js";
+import { fetchLatestModel, modelStatus, rollModel, restoreModel, modelFile, getModelSource, writeSourceOverride } from "../ontology/sync.js";
 import {
   nextStep, currentStepIndex, newDemand, resetDemand, resetAll,
 } from "../simulator/stepper.js";
@@ -139,7 +140,82 @@ export function registerRoutes(app: FastifyInstance) {
   // queries. Drives the front-end process graph and any model-aware tooling.
   app.get("/api/ontology", async () => ontologyView());
 
+  // -- MODEL SYNC & VERSION HISTORY --
+  // Pull the latest workflow.json from the Qlerify modeller, snapshot it, and
+  // hot-reload. Version history supports rolling back and forward.
+  app.get("/api/model/status", async () => modelStatus());
+  // Metadata + content for the in-app viewer dialog.
+  app.get("/api/model/file", async (_req, reply) => {
+    try {
+      return modelFile();
+    } catch (err: any) {
+      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
+    }
+  });
+  // Source URL the fetch pulls from (editable override, or the default MCP endpoint).
+  app.get("/api/model/source", async () => getModelSource());
+  app.put("/api/model/source", async (req, reply) => {
+    const url = (req.body as any)?.url;
+    if (url != null && typeof url !== "string") {
+      return reply.code(400).send({ error: "BAD_REQUEST", message: "url must be a string or null" });
+    }
+    try {
+      writeSourceOverride(url ?? null);
+      return getModelSource();
+    } catch (err: any) {
+      return reply.code(400).send({ error: "BAD_URL", message: err?.message ?? String(err) });
+    }
+  });
+  // Raw workflow.json, openable directly in a browser tab (the "link to it").
+  app.get("/api/model/file/raw", async (_req, reply) => {
+    try {
+      return reply.type("application/json").send(modelFile().content);
+    } catch (err: any) {
+      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
+    }
+  });
+  app.post("/api/model/fetch", async (_req, reply) => {
+    try {
+      return await fetchLatestModel();
+    } catch (err: any) {
+      return reply.code(502).send({ error: "FETCH_FAILED", message: err?.message ?? String(err) });
+    }
+  });
+  app.post("/api/model/roll", async (req, reply) => {
+    const dir = (req.body as any)?.direction;
+    if (dir !== "back" && dir !== "forward") {
+      return reply.code(400).send({ error: "BAD_REQUEST", message: 'direction must be "back" or "forward"' });
+    }
+    try {
+      return rollModel(dir);
+    } catch (err: any) {
+      return reply.code(409).send({ error: "ROLL_FAILED", message: err?.message ?? String(err) });
+    }
+  });
+  // Jump straight to any stored version (the inspect dialog's version sidebar).
+  app.post("/api/model/restore", async (req, reply) => {
+    const index = (req.body as any)?.index;
+    if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
+      return reply.code(400).send({ error: "BAD_REQUEST", message: "index must be a non-negative integer" });
+    }
+    try {
+      return restoreModel(index);
+    } catch (err: any) {
+      return reply.code(409).send({ error: "RESTORE_FAILED", message: err?.message ?? String(err) });
+    }
+  });
+
   // -- SIMULATOR SUPPORT --
+  // Health of the event registry vs. the loaded model. When the synced
+  // workflow.json doesn't match the simulator's 28-step sequence, EVENTS is
+  // empty and `error` carries the mismatch — the frontend renders a banner
+  // instead of the process crashing at boot. `registryError` is a live binding,
+  // so this reflects the current state after any hot-reload.
+  app.get("/sim/registry-status", async () => ({
+    ok: registryError == null,
+    error: registryError,
+    eventCount: EVENTS.length,
+  }));
   app.get("/sim/events", async () => EVENTS);
   app.get("/sim/event-log", async (req) => {
     const limit = Number((req.query as any)?.limit ?? 200);

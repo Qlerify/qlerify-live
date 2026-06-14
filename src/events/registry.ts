@@ -14,7 +14,7 @@
 //     rather than a user action.
 
 import type { Role } from "../auth.js";
-import { getOntology } from "../ontology/model.js";
+import { getOntology, onOntologyReload } from "../ontology/model.js";
 
 export interface EventDef {
   name: string;
@@ -75,18 +75,48 @@ const STEP_SEQUENCE: ReadonlyArray<StepOverlay> = [
   { ref: "#/domainEvents/UnitReceivedByCustomer", phase: 5 },
 ];
 
-export const EVENTS: ReadonlyArray<EventDef> = STEP_SEQUENCE.map((step) => {
-  const event = getOntology().requireEventByRef(step.ref);
-  return {
-    name: event.name,
-    ref: event.ref,
-    boundedContext: event.boundedContext as EventDef["boundedContext"],
-    aggregateRoot: event.aggregateRoot,
-    role: event.role as Role,
-    phase: step.phase,
-    ...(step.derived ? { derived: true as const } : {}),
-  };
-});
+function buildEvents(): EventDef[] {
+  return STEP_SEQUENCE.map((step) => {
+    const event = getOntology().requireEventByRef(step.ref);
+    return {
+      name: event.name,
+      ref: event.ref,
+      boundedContext: event.boundedContext as EventDef["boundedContext"],
+      aggregateRoot: event.aggregateRoot,
+      role: event.role as Role,
+      phase: step.phase,
+      ...(step.derived ? { derived: true as const } : {}),
+    };
+  });
+}
+
+// `let` + reassignment makes this an ESM live binding: importers always see the
+// latest array, so a hot-reload of the model (onOntologyReload) is reflected
+// everywhere EVENTS is used without any consumer changes.
+export let EVENTS: ReadonlyArray<EventDef> = [];
+
+// If the loaded model doesn't line up with the simulator's STEP_SEQUENCE (e.g. a
+// different workflow.json got synced in), buildEvents() throws. We must NOT let
+// that crash the process at import time — it would take the whole server down
+// before it can even report the problem. Instead we capture the message here,
+// leave EVENTS as the last good array (empty on first failure), and let the
+// frontend surface it via /sim/registry-status. registryError is a live binding
+// too, so a later hot-reload that fixes the model clears it automatically.
+export let registryError: string | null = null;
+
+function rebuildEvents(): void {
+  try {
+    EVENTS = buildEvents();
+    registryError = null;
+  } catch (err) {
+    registryError = err instanceof Error ? err.message : String(err);
+    // Keep the previous EVENTS so consumers that were already working keep
+    // working until a corrected model is loaded.
+  }
+}
+
+rebuildEvents();
+onOntologyReload(rebuildEvents);
 
 export function findEvent(ref: string): EventDef {
   const ev = EVENTS.find((e) => e.ref === ref);

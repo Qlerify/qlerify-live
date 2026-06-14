@@ -83,6 +83,19 @@ const state = {
   chatBusy: false,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
+  // registry health — non-null message means the loaded model doesn't match
+  // the simulator's event registry; surfaced as a top banner.
+  registryError: null,
+  // model sync / version history
+  model: null,           // ModelStatus from /api/model/status
+  modelBusy: false,
+  modelMsg: null,        // last fetch/roll message to flash in the UI
+  modelFileOpen: false,  // model viewer dialog visibility
+  modelFile: null,       // { path, content } of workflow.json
+  modelSource: null,     // { url, defaultUrl, effective } source config
+  modelSourceInput: "",  // editable source URL field value
+  modelSourceBusy: false,
+  modelSourceEditing: false, // click-to-edit toggle for the source URL
 };
 
 async function api(path, opts = {}) {
@@ -417,6 +430,366 @@ function bindChat() {
 }
 
 // ---------------------------------------------------------------------------
+// Model sync / version history
+// ---------------------------------------------------------------------------
+
+async function loadRegistryStatus() {
+  try {
+    const s = await api("/sim/registry-status");
+    state.registryError = s.ok ? null : s.error;
+  } catch {
+    // A failure here shouldn't blank the banner state; leave it as-is.
+  }
+}
+
+async function loadModelStatus() {
+  try {
+    state.model = await api("/api/model/status");
+  } catch (e) {
+    state.model = null;
+  }
+}
+
+// Refresh everything that is rendered from the Qlerify model after it changes.
+async function reloadFromModel() {
+  await loadModelStatus();
+  // Fetch/roll now happen inside the inspect dialog — keep the shown JSON current.
+  if (state.modelFileOpen) {
+    try { state.modelFile = await api("/api/model/file"); } catch { /* keep previous content */ }
+  }
+  if (state.view === "detail") await loadDetail();
+  else await loadDashboard();
+}
+
+async function fetchModel() {
+  if (state.modelBusy) return;
+  state.modelBusy = true; state.modelMsg = null; render();
+  try {
+    const res = await api("/api/model/fetch", { method: "POST", body: "{}" });
+    state.modelMsg = { ok: true, text: res.message };
+    await reloadFromModel();
+  } catch (e) {
+    state.modelMsg = { ok: false, text: e.message };
+  } finally {
+    state.modelBusy = false; render();
+    flashModelMsg();
+  }
+}
+
+async function rollModel(direction) {
+  if (state.modelBusy) return;
+  state.modelBusy = true; state.modelMsg = null; render();
+  try {
+    const res = await api("/api/model/roll", { method: "POST", body: JSON.stringify({ direction }) });
+    state.modelMsg = { ok: true, text: res.message };
+    await reloadFromModel();
+  } catch (e) {
+    state.modelMsg = { ok: false, text: e.message };
+  } finally {
+    state.modelBusy = false; render();
+    flashModelMsg();
+  }
+}
+
+// Jump straight to a stored version from the version sidebar.
+async function restoreModelVersion(index) {
+  if (state.modelBusy) return;
+  state.modelBusy = true; state.modelMsg = null; render();
+  try {
+    const res = await api("/api/model/restore", { method: "POST", body: JSON.stringify({ index }) });
+    state.modelMsg = { ok: true, text: res.message };
+    await reloadFromModel();
+  } catch (e) {
+    state.modelMsg = { ok: false, text: e.message };
+  } finally {
+    state.modelBusy = false; render();
+    flashModelMsg();
+  }
+}
+
+async function openModelFile() {
+  state.modelFileOpen = true;
+  state.modelFile = null;
+  state.modelSourceEditing = false;
+  render();
+  // Refresh the version list too, so the sidebar reflects the latest history.
+  const [file, source, status] = await Promise.allSettled([api("/api/model/file"), api("/api/model/source"), api("/api/model/status")]);
+  state.modelFile = file.status === "fulfilled" ? file.value : { path: "", content: "", error: file.reason?.message };
+  state.modelSource = source.status === "fulfilled" ? source.value : null;
+  state.modelSourceInput = state.modelSource ? (state.modelSource.workflowUrl || "") : "";
+  if (status.status === "fulfilled") state.model = status.value;
+  render();
+}
+
+function closeModelFile() {
+  state.modelFileOpen = false;
+  render();
+}
+
+async function saveModelSource() {
+  if (state.modelSourceBusy || state.modelBusy) return;
+  const url = state.modelSourceInput.trim();
+  // A value equal to the default link means "use default" → clear the override.
+  const payloadUrl = url && url !== (state.modelSource?.defaultWorkflowUrl ?? "") ? url : null;
+  state.modelSourceBusy = true; render();
+  try {
+    state.modelSource = await api("/api/model/source", { method: "PUT", body: JSON.stringify({ url: payloadUrl }) });
+    state.modelSourceInput = state.modelSource.workflowUrl || "";
+    state.modelSourceEditing = false;
+  } catch (e) {
+    state.modelMsg = { ok: false, text: e.message };
+    state.modelSourceBusy = false; render(); flashModelMsg();
+    return;
+  }
+  state.modelSourceBusy = false;
+  // Pull the model from the new source so it lands as a fresh version with its
+  // source URL recorded — that per-version record replaces the old "override" badge.
+  await fetchModel();
+}
+
+// Compact display form of a workflow URL — keep the tail recognizable (so two
+// workflows are still distinguishable) while hiding the long opaque ids.
+function shortWorkflowUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1] || "";
+    const shortId = last.length > 12 ? `${last.slice(0, 8)}…${last.slice(-4)}` : last;
+    return `${u.host}/…/${shortId}`;
+  } catch {
+    return url.length > 36 ? `${url.slice(0, 18)}…${url.slice(-12)}` : url;
+  }
+}
+
+// Short, human-readable form of a version's ISO timestamp, e.g. "Jun 14, 13:45".
+function formatVersionDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(0, 16).replace("T", " ");
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// Sidebar listing every stored version (newest first), each with a Restore
+// action; the materialized version is highlighted instead.
+function modelVersionSidebar() {
+  const m = state.model;
+  const versions = (m && m.versions) || [];
+  if (versions.length === 0) {
+    return `<aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto p-3 text-[11px] text-stone-400 leading-relaxed">No saved versions yet. Fetch the model to start the history.</aside>`;
+  }
+  // For versions whose source wasn't recorded, fall back to the project's
+  // workflow (name + link) so the row is still actionable rather than a dead end.
+  const fallbackUrl = (state.modelSource && (state.modelSource.defaultWorkflowUrl || state.modelSource.workflowUrl)) || "";
+  const fallbackName = (m && m.workflowName) || "Open workflow";
+  const rows = versions
+    .map((v, i) => {
+      const isCurrent = i === m.current;
+      const sourceCls = v.source === "initial" ? "bg-stone-100 text-stone-500" : "bg-sky-100 text-sky-700";
+      const events = v.summary ? v.summary.events : 0;
+      let srcLine;
+      if (v.sourceUrl) {
+        // Prefer the workflow's name; fall back to the shortened URL if unnamed.
+        const label = v.sourceName || shortWorkflowUrl(v.sourceUrl);
+        const monoCls = v.sourceName ? "" : "mono ";
+        const tip = v.sourceName ? `${v.sourceName} — ${v.sourceUrl}` : v.sourceUrl;
+        srcLine = `<a href="${escapeHtml(v.sourceUrl)}" target="_blank" rel="noopener" class="block text-[10px] ${monoCls}text-sky-700 hover:text-sky-900 truncate mt-0.5" title="Fetched from ${escapeHtml(tip)}">${escapeHtml(label)} ↗</a>`;
+      } else if (fallbackUrl) {
+        srcLine = `<a href="${escapeHtml(fallbackUrl)}" target="_blank" rel="noopener" class="block text-[10px] text-sky-700 hover:text-sky-900 truncate mt-0.5" title="Source not recorded — opens ${escapeHtml(fallbackName)}">${escapeHtml(fallbackName)} ↗</a>`;
+      } else {
+        srcLine = `<div class="text-[10px] text-stone-300 italic mt-0.5">source unknown</div>`;
+      }
+      return `
+        <li class="px-2.5 py-2 rounded-md border ${isCurrent ? "border-amber-300 bg-amber-50" : "border-transparent hover:bg-stone-50"} flex items-start gap-2">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5">
+              <span class="text-[12px] font-semibold tabular-nums">v${i + 1}</span>
+              <span class="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded ${sourceCls}">${escapeHtml(v.source)}</span>
+            </div>
+            <div class="text-[10px] text-stone-500 tabular-nums mt-0.5">${escapeHtml(formatVersionDate(v.savedAt))}</div>
+            <div class="text-[10px] text-stone-400 tabular-nums">${events} events</div>
+            ${srcLine}
+          </div>
+          ${isCurrent
+            ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-200 text-amber-900 shrink-0 mt-0.5">current</span>`
+            : `<button data-restore="${i}" ${state.modelBusy ? "disabled" : ""} class="model-restore-btn text-[10px] px-2 py-1 rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 shrink-0 mt-0.5" title="Restore this version">Restore</button>`}
+        </li>
+      `;
+    })
+    .reverse()
+    .join("");
+  return `
+    <aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto">
+      <div class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-widest text-stone-500 font-semibold sticky top-0 bg-white">Versions</div>
+      <ul class="px-2 pb-3 flex flex-col gap-1">${rows}</ul>
+    </aside>
+  `;
+}
+
+// Inspect-model dialog: fetch / roll versions / browse the raw workflow.json and
+// the configured source URL, all in one place.
+function modelFileDialog() {
+  if (!state.modelFileOpen) return "";
+  const f = state.modelFile;
+  const m = state.model;
+  const body = !f
+    ? `<div class="text-stone-500 text-sm p-6">Loading model…</div>`
+    : f.error
+      ? `<div class="text-rose-700 text-sm p-6">⚠ ${escapeHtml(f.error)}</div>`
+      : `<pre class="mono text-[12px] leading-relaxed whitespace-pre p-4 overflow-auto">${escapeHtml(f.content)}</pre>`;
+  const sizeKb = f && f.content ? Math.round(f.content.length / 1024) : 0;
+  const src = state.modelSource;
+  const effective = src ? src.workflowUrl : "";
+  const versionLabel = m && m.total > 0
+    ? `v${m.current + 1}/${m.total}${m.currentVersion ? ` · ${m.currentVersion.summary.events} events` : ""}`
+    : "not yet versioned";
+  const disBack = state.modelBusy || !m || !m.canBack;
+  const disFwd  = state.modelBusy || !m || !m.canForward;
+  return `
+    <div id="model-file-backdrop" class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6">
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col" role="dialog" aria-modal="true">
+        <div class="px-5 py-3 border-b border-stone-200 flex flex-col gap-2.5">
+          <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify model</div>
+              <div class="text-[12px] text-stone-600 tabular-nums truncate">${escapeHtml(versionLabel)}${m && m.workflowName ? ` · ${escapeHtml(m.workflowName)}` : ""}</div>
+            </div>
+            ${f && f.content ? `<span class="text-[11px] text-stone-400 tabular-nums shrink-0">${sizeKb} KB</span>` : ""}
+            <button id="model-file-close" class="text-stone-400 hover:text-stone-700 text-lg leading-none shrink-0" title="Close">×</button>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button id="btn-model-back" ${disBack ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll back to previous model version">↩</button>
+            <button id="btn-model-fetch" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Fetch the latest model from the Qlerify modeller">${state.modelBusy ? "⏳ Syncing…" : "⤓ Fetch model"}</button>
+            <button id="btn-model-fwd" ${disFwd ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll forward to next model version">↪</button>
+            <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
+            ${effective
+              ? `<a href="${escapeHtml(effective)}" target="_blank" rel="noopener" class="min-w-0 max-w-xs text-[12px] mono text-sky-700 hover:text-sky-900 underline decoration-dotted truncate" title="${escapeHtml(effective)}">${escapeHtml(shortWorkflowUrl(effective))} ↗</a>`
+              : `<span class="text-[12px] text-stone-400 italic">no source configured</span>`}
+            <button id="model-source-edit" class="px-2.5 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium shrink-0" title="Edit the source workflow URL — saving pulls it in as a new version">✎ Edit</button>
+          </div>
+        </div>
+        <div class="flex-1 flex min-h-0">
+          ${modelVersionSidebar()}
+          <div id="model-file-scroll" class="flex-1 overflow-auto bg-stone-50">${body}</div>
+        </div>
+      </div>
+    </div>
+    ${modelSourceEditDialog()}
+  `;
+}
+
+// Secondary modal, layered on top of the inspect dialog, for editing the source URL.
+function modelSourceEditDialog() {
+  if (!state.modelSourceEditing) return "";
+  const src = state.modelSource;
+  const placeholder = src ? (src.defaultWorkflowUrl || "https://app.qlerify.com/workflow/<project>/<workflow>") : "https://app.qlerify.com/workflow/<project>/<workflow>";
+  return `
+    <div id="model-source-backdrop" class="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-6">
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg flex flex-col" role="dialog" aria-modal="true">
+        <div class="px-5 py-3 border-b border-stone-200 flex items-center gap-3">
+          <div class="flex-1 text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Edit model source URL</div>
+          <button id="model-source-cancel-x" class="text-stone-400 hover:text-stone-700 text-lg leading-none" title="Cancel">×</button>
+        </div>
+        <div class="px-5 py-4 flex flex-col gap-3">
+          <input id="model-source-input" type="text" value="${escapeHtml(state.modelSourceInput)}" placeholder="${escapeHtml(placeholder)}" class="w-full text-[12px] mono border border-stone-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400" />
+          <div class="text-[11px] text-stone-400 leading-relaxed">Paste a Qlerify workflow URL. Leave blank — or matching the default — to reset to the workflow in codegen.json.</div>
+          <div class="flex items-center justify-end gap-2">
+            <button id="model-source-cancel" ${state.modelSourceBusy ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Cancel</button>
+            <button id="model-source-save" ${state.modelSourceBusy ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.modelSourceBusy ? "Saving…" : "Save"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+let modelMsgTimer = null;
+function flashModelMsg() {
+  if (modelMsgTimer) clearTimeout(modelMsgTimer);
+  modelMsgTimer = setTimeout(() => { state.modelMsg = null; render(); }, 6000);
+}
+
+// Single dashboard-header entry point. Fetch / version rolling / source editing
+// all now live inside the Inspect model dialog (see modelFileDialog).
+function modelControls() {
+  const m = state.model;
+  const label = m && m.total > 0
+    ? `model v${m.current + 1}/${m.total}${m.currentVersion ? ` · ${m.currentVersion.summary.events} events` : ""}`
+    : "model — not yet versioned";
+  return `
+    <div class="flex items-center gap-1.5 mr-1" title="Qlerify model${m && m.workflowName ? " · " + escapeHtml(m.workflowName) : ""}">
+      <button id="btn-model-view" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Inspect the Qlerify model — fetch, roll versions, view workflow.json">👁 Inspect model</button>
+      <button id="lbl-model-view" class="text-[10px] text-stone-500 hover:text-stone-800 underline decoration-dotted tabular-nums ml-0.5 hidden lg:inline" title="Inspect the Qlerify model">${escapeHtml(label)}</button>
+    </div>
+  `;
+}
+
+// Persistent banner shown when the loaded Qlerify model doesn't match the
+// simulator's event registry (EVENTS is empty server-side). Rendered in flow at
+// the very top so it pushes the view down rather than crashing the app.
+function registryBanner() {
+  if (!state.registryError) return "";
+  return `
+    <div class="bg-rose-600 text-white px-6 py-3 text-sm shadow">
+      <div class="font-semibold">⚠ Loaded Qlerify model doesn't match the simulator</div>
+      <div class="mt-0.5 opacity-90">${escapeHtml(state.registryError)}</div>
+      <div class="mt-1 text-xs opacity-80">The simulator's 28-step event registry couldn't be built from the current <span class="mono">.qlerify/workflow.json</span>. Restore a matching model version, then it will hot-reload and this banner clears.</div>
+    </div>
+  `;
+}
+
+function modelToast() {
+  if (!state.modelMsg) return "";
+  const tone = state.modelMsg.ok ? "bg-emerald-600" : "bg-rose-600";
+  return `
+    <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 ${tone} text-white text-sm px-4 py-2 rounded-lg shadow-lg max-w-lg">
+      ${escapeHtml(state.modelMsg.text)}
+    </div>
+  `;
+}
+
+function bindModelControls() {
+  document.getElementById("btn-model-fetch")?.addEventListener("click", fetchModel);
+  document.getElementById("btn-model-back")?.addEventListener("click", () => rollModel("back"));
+  document.getElementById("btn-model-fwd")?.addEventListener("click", () => rollModel("forward"));
+  document.getElementById("btn-model-view")?.addEventListener("click", openModelFile);
+  document.querySelectorAll(".model-restore-btn").forEach((btn) => {
+    btn.addEventListener("click", () => restoreModelVersion(Number(btn.getAttribute("data-restore"))));
+  });
+  document.getElementById("lbl-model-view")?.addEventListener("click", openModelFile);
+  document.getElementById("model-file-close")?.addEventListener("click", closeModelFile);
+  document.getElementById("model-file-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "model-file-backdrop") closeModelFile();
+  });
+  const openEdit = () => {
+    state.modelSourceEditing = true;
+    state.modelSourceInput = state.modelSource?.workflowUrl || "";
+    render();
+    const el = document.getElementById("model-source-input");
+    if (el) { el.focus(); el.select(); }
+  };
+  const closeEdit = () => {
+    state.modelSourceEditing = false;
+    state.modelSourceInput = state.modelSource?.workflowUrl || "";
+    render();
+  };
+  document.getElementById("model-source-edit")?.addEventListener("click", openEdit);
+  document.getElementById("model-source-cancel")?.addEventListener("click", closeEdit);
+  document.getElementById("model-source-cancel-x")?.addEventListener("click", closeEdit);
+  document.getElementById("model-source-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "model-source-backdrop") closeEdit();
+  });
+  const srcInput = document.getElementById("model-source-input");
+  if (srcInput) {
+    srcInput.addEventListener("input", (e) => { state.modelSourceInput = e.target.value; });
+    srcInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveModelSource(); }
+      else if (e.key === "Escape") { closeEdit(); }
+    });
+  }
+  document.getElementById("model-source-save")?.addEventListener("click", saveModelSource);
+}
+
+// ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
 
@@ -451,7 +824,7 @@ async function onHashChange() {
     await loadDashboard();
     // Poll every 5s so "last activity" pills age in front of the audience.
     dashboardTimer = setInterval(() => {
-      if (state.view === "dashboard" && !state.busy) loadDashboard().catch(() => {});
+      if (state.view === "dashboard" && !state.busy && !state.modelFileOpen) loadDashboard().catch(() => {});
     }, 5000);
   }
 }
@@ -461,9 +834,10 @@ async function onHashChange() {
 // ---------------------------------------------------------------------------
 
 async function loadDashboard() {
-  const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events")]);
+  const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events"), loadRegistryStatus()]);
   state.demands = demands;
   state.events = events;
+  if (!state.model) await loadModelStatus();
   render();
 }
 
@@ -560,6 +934,7 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Ericsson HW Flow — Demands</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All demands in flight</div>
         </div>
+        ${modelControls()}
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New demand</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -602,6 +977,7 @@ function dashboardView() {
 }
 
 function bindDashboard() {
+  bindModelControls();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
@@ -622,6 +998,7 @@ async function loadDetail() {
     api("/sim/event-log?limit=200&demandId=" + encodeURIComponent(state.demandId)),
     api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
     api("/sim/demands"),
+    loadRegistryStatus(),
   ]);
   state.events = events;
   state.prev = state.snapshot;
@@ -778,6 +1155,7 @@ function detailHeader() {
           <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
           <button id="btn-next"  ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
           <button id="btn-all"   ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>
+          ${modelControls()}
           <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
         </div>
       </div>
@@ -918,6 +1296,7 @@ function detailView() {
 }
 
 function bindDetail() {
+  bindModelControls();
   document.getElementById("btn-back")?.addEventListener("click", () => navigate("#"));
   document.getElementById("btn-next")?.addEventListener("click", doNext);
   document.getElementById("btn-all")?.addEventListener("click", doRunAll);
@@ -933,10 +1312,11 @@ function bindDetail() {
 
 function render() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
+  const prevDialogScroll = document.getElementById("model-file-scroll")?.scrollTop ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
 
   if (state.view === "detail") {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${detailView()}</div>${chatPanel()}`;
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${detailView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}`;
     bindDetail();
     bindChat();
 
@@ -956,9 +1336,16 @@ function render() {
       }
     }
   } else {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${dashboardView()}</div>${chatPanel()}`;
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${dashboardView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}`;
     bindDashboard();
     bindChat();
+  }
+
+  // Preserve the model viewer's scroll position across re-renders so polling /
+  // toasts don't yank the user back to the top while they're reading.
+  if (prevDialogScroll) {
+    const dlg = document.getElementById("model-file-scroll");
+    if (dlg) dlg.scrollTop = prevDialogScroll;
   }
 }
 

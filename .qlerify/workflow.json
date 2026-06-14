@@ -25,7 +25,9 @@
       "event": "Hardware Demand Created",
       "role": "Product Manager",
       "follows": [
-        "start"
+        {
+          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/ProjectCreated"
+        }
       ],
       "command": {
         "$ref": "#/schemas/commands/CreateDemand"
@@ -1478,9 +1480,7 @@
           "event": "Project Created",
           "role": "Product Manager",
           "follows": [
-            {
-              "$ref": "#/domainEvents/HardwareDemandCreated"
-            }
+            "start"
           ],
           "command": {
             "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/CreateProject"
@@ -1503,7 +1503,7 @@
           "role": "Designer",
           "follows": [
             {
-              "$ref": "#/externalBoundedContexts/PRIM/domainEvents/ProjectCreated"
+              "$ref": "#/domainEvents/HardwareDemandCreated"
             }
           ],
           "command": {

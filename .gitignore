@@ -7,3 +7,8 @@ prisma/dev.db*
 .DS_Store
 web/dist/
 web/node_modules/
+
+# Runtime model version history (created by the in-app "Fetch model" button)
+.qlerify/history/
+# Optional per-machine model source URL override
+.qlerify/model-source.json

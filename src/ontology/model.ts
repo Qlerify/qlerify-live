@@ -21,12 +21,15 @@
 // linear 28-step ordering, the 5-act `phase` grouping, and the `derived` flag
 // for rules-engine events. Those live as a thin overlay in events/registry.ts.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const QLERIFY_DIR = join(here, "..", "..", ".qlerify");
+/** Absolute path to the .qlerify directory holding workflow.json (and the
+ * model fetch/version history). Exported so the model-sync module writes to
+ * exactly the file this loader reads. */
+export const QLERIFY_DIR = join(here, "..", "..", ".qlerify");
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -342,4 +345,58 @@ export function ontologyView(ontology: Ontology = getOntology()) {
     entities: ontology.entities,
     queries: ontology.queries,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hot reload — re-read the model when .qlerify/workflow.json changes, without
+// restarting the process. Derived snapshots that are captured at import time
+// (events/registry.ts EVENTS, chat/system-prompt.ts SYSTEM_BLOCKS) subscribe
+// via onOntologyReload and rebuild themselves once the new model is in place.
+// ---------------------------------------------------------------------------
+
+const reloadListeners = new Set<() => void>();
+
+/** Register a callback to run after each reload (in registration order, after
+ * the new model is swapped in). Returns an unsubscribe function. */
+export function onOntologyReload(listener: () => void): () => void {
+  reloadListeners.add(listener);
+  return () => reloadListeners.delete(listener);
+}
+
+/** Re-read the model from disk and swap it in. If the file is mid-write or
+ * invalid, loadOntology throws and the previous model is left untouched. */
+export function reloadOntology(): Ontology {
+  const next = loadOntology(); // throws → `cached` unchanged
+  cached = next;
+  for (const listener of reloadListeners) listener();
+  return next;
+}
+
+interface WatchLogger {
+  info?(...args: unknown[]): void;
+  error?(...args: unknown[]): void;
+}
+
+let watching = false;
+
+/** Watch .qlerify for changes to workflow.json and hot-reload on change.
+ * Idempotent and opt-out via ONTOLOGY_WATCH=off. Watching the directory (not
+ * the file) survives atomic-rename saves and re-downloads. Writes are debounced
+ * so a multi-event save reloads once, and a failed parse keeps the old model. */
+export function startOntologyWatch(log?: WatchLogger): void {
+  if (watching || process.env.ONTOLOGY_WATCH === "off") return;
+  watching = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  watch(QLERIFY_DIR, (_event, filename) => {
+    if (filename && filename !== "workflow.json") return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        reloadOntology();
+        log?.info?.("ontology hot-reloaded from .qlerify/workflow.json");
+      } catch (err) {
+        log?.error?.({ err }, "ontology reload failed — keeping previous model");
+      }
+    }, 150);
+  });
 }

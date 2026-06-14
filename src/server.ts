@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
 import { wireDerivedEvents } from "./events/derived.js";
+import { startOntologyWatch } from "./ontology/model.js";
 import { prisma } from "./db.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,7 @@ export async function buildServer() {
 
   registerRoutes(app);
   wireDerivedEvents();
+  startOntologyWatch(app.log);
   return app;
 }
 

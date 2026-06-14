@@ -39,6 +39,9 @@ import {
 } from "../simulator/stepper.js";
 import { runAgentTurn } from "../chat/agent.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
+import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
+import { codegenStatus } from "../kernel/codegen/status.js";
+import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
 export function registerRoutes(app: FastifyInstance) {
   // Shared command wrapper — auth + error mapping
@@ -134,6 +137,40 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/queries/list-shipments", async () => logisticsQ.listShipments());
   app.get("/queries/get-shipment/:id", async (req) => logisticsQ.getShipment((req.params as any).id));
   app.get("/queries/list-units", async (req) => logisticsQ.listUnits((req.query as any)?.buildId));
+
+  // -- GENERATED COMMANDS: introspection --
+  // Backed by the codegen registry (src/commands/registry.generated.ts). These
+  // expose the readable command description and the event-detection predicate the
+  // model-driven vision asks for, without the HTTP layer knowing the command set.
+  app.get("/api/commands", async () =>
+    listRegisteredCommands().map((c) => ({
+      commandName: c.commandName,
+      boundedContext: c.boundedContext,
+      route: `/commands/${c.boundedContext.toLowerCase()}/${c.handlerName.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase()}`,
+      eventRef: c.eventRef,
+      role: c.role,
+    })),
+  );
+  // Codegen drift: which generated commands are current vs. need regeneration
+  // after a model hot-reload (gwt-drift / schema-drift / missing-in-model).
+  app.get("/api/commands/status", async () => codegenStatus());
+  // Human-readable description of what a command does and how detection works.
+  app.get("/commands/:bc/:name/describe", async (req, reply) => {
+    const { name } = req.params as { bc: string; name: string };
+    const reg = getCommandByRoute(name);
+    if (!reg) return reply.code(404).send({ error: "NOT_FOUND", message: `no generated command "${name}"` });
+    return { commandName: reg.commandName, eventRef: reg.eventRef, role: reg.role, describe: reg.DESCRIBE };
+  });
+  // Run the event-detection predicate: given an aggregate id, has the bound
+  // domain event happened? Returns { happened, evidence }.
+  app.post("/commands/:bc/:name/detect", async (req, reply) => {
+    const { name } = req.params as { bc: string; name: string };
+    const reg = getCommandByRoute(name);
+    if (!reg) return reply.code(404).send({ error: "NOT_FOUND", message: `no generated command "${name}"` });
+    const id = (req.body as any)?.id;
+    if (typeof id !== "string" || !id) return reply.code(400).send({ error: "BAD_REQUEST", message: "id required" });
+    return reg.detect({ id });
+  });
 
   // -- ONTOLOGY --
   // The live Qlerify model: domain-event DAG, roles, commands, entities,

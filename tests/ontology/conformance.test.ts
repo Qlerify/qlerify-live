@@ -21,20 +21,28 @@ const ontology = loadOntology();
 const modelRefs = new Set(ontology.events.map((e) => e.ref));
 const VALID_BCS = new Set(ontology.boundedContexts);
 
-// Recursively collect every `*/commands.ts` file under src/.
-function commandFiles(dir: string): string[] {
+// Recursively collect every file matching a predicate under src/.
+function filesMatching(dir: string, match: (name: string) => boolean): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...commandFiles(full));
-    else if (entry.name === "commands.ts") out.push(full);
+    if (entry.isDirectory()) out.push(...filesMatching(full, match));
+    else if (match(entry.name)) out.push(full);
   }
   return out;
 }
 
-// Parse the (assertRole, emit-ref) pair out of every exported handler. The
-// codegen style is regular: one `assertRole(role, "X")` and one
-// `emit({ ref: "#/domainEvents/Y" })` per `export async function`.
+// Parse the (assertRole, emit-ref) pair for every command handler. Two handler
+// styles coexist and both must conform to the model:
+//
+//  1. Legacy single-file: one `assertRole(role, "X")` and one
+//     `emit({ ref: "#/domainEvents/Y" })` inside the same `export async function`
+//     in a `commands.ts`.
+//  2. Generated two-file seam (src/kernel/codegen): the role lives in the
+//     deterministic `{cmd}.gen.ts` skeleton (assertRole) and the emit ref lives
+//     in the AI/hand-authored `{cmd}.logic.ts` apply(). They are paired by the
+//     shared filename stem. A `commands.ts` that is a pure re-export barrel
+//     contributes nothing here — its handlers are counted via their .gen/.logic.
 interface Handler {
   file: string;
   name: string;
@@ -42,23 +50,35 @@ interface Handler {
   ref: string;
 }
 
+const EMIT_REF = /(?:ref|eventRef):\s*"(#\/domainEvents\/[A-Za-z0-9]+)"/;
+
 function parseHandlers(): Handler[] {
   const handlers: Handler[] = [];
-  for (const file of commandFiles(srcDir)) {
+
+  // Style 1 — legacy single-file handlers.
+  for (const file of filesMatching(srcDir, (n) => n === "commands.ts")) {
     const content = readFileSync(file, "utf-8");
     for (const chunk of content.split(/export async function /).slice(1)) {
       const role = chunk.match(/assertRole\(\s*role\s*,\s*"([^"]+)"/);
-      const ref = chunk.match(/ref:\s*"(#\/domainEvents\/[A-Za-z0-9]+)"/);
+      const ref = chunk.match(/emit\(\{[\s\S]*?ref:\s*"(#\/domainEvents\/[A-Za-z0-9]+)"/);
       if (role && ref) {
-        handlers.push({
-          file,
-          name: chunk.slice(0, chunk.indexOf("(")).trim(),
-          role: role[1]!,
-          ref: ref[1]!,
-        });
+        handlers.push({ file, name: chunk.slice(0, chunk.indexOf("(")).trim(), role: role[1]!, ref: ref[1]! });
       }
     }
   }
+
+  // Style 2 — generated .gen.ts (role) paired with sibling .logic.ts (emit ref).
+  for (const genFile of filesMatching(srcDir, (n) => n.endsWith(".gen.ts"))) {
+    const gen = readFileSync(genFile, "utf-8");
+    const role = gen.match(/assertRole\(\s*role\s*,\s*"([^"]+)"/);
+    const name = gen.match(/export async function (\w+)/);
+    const logic = readFileSync(genFile.replace(/\.gen\.ts$/, ".logic.ts"), "utf-8");
+    const ref = logic.match(EMIT_REF);
+    if (role && name && ref) {
+      handlers.push({ file: genFile, name: name[1]!, role: role[1]!, ref: ref[1]! });
+    }
+  }
+
   return handlers;
 }
 

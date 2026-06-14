@@ -209,8 +209,8 @@ async function runStep(index: number, demandId: string, withDisruptions: boolean
         where: { demandId, status: "DRAFT" },
         orderBy: { versionNo: "desc" },
       });
-      await lockBuildPlan({ id: plan.id }, "Configuration Manager");
-      return "🔒 CM locks the build plan — no further changes to build_demand";
+      await lockBuildPlan({ id: plan.id }, "Planner");
+      return "🔒 Planner locks the build plan — no further changes to build_demand";
     }
     case 17: {
       const b = await prisma.build.findFirstOrThrow({

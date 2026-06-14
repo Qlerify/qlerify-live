@@ -32,6 +32,7 @@ import * as logisticsQ from "../logistics/queries.js";
 
 import { prisma } from "../db.js";
 import { EVENTS } from "../events/registry.js";
+import { ontologyView } from "../ontology/model.js";
 import {
   nextStep, currentStepIndex, newDemand, resetDemand, resetAll,
 } from "../simulator/stepper.js";
@@ -132,6 +133,11 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/queries/list-shipments", async () => logisticsQ.listShipments());
   app.get("/queries/get-shipment/:id", async (req) => logisticsQ.getShipment((req.params as any).id));
   app.get("/queries/list-units", async (req) => logisticsQ.listUnits((req.query as any)?.buildId));
+
+  // -- ONTOLOGY --
+  // The live Qlerify model: domain-event DAG, roles, commands, entities,
+  // queries. Drives the front-end process graph and any model-aware tooling.
+  app.get("/api/ontology", async () => ontologyView());
 
   // -- SIMULATOR SUPPORT --
   app.get("/sim/events", async () => EVENTS);

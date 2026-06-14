@@ -51,9 +51,9 @@ describe("Update Build Plan", () => {
 });
 
 describe("Lock Build Plan", () => {
-  it("Given DS2 is frozen and engineering_release is APPROVED and a work_order is CREATED, When the CM locks the latest build_plan, Then build_plan.status becomes LOCKED and locked_at is set", async () => {
+  it("Given DS2 is frozen and engineering_release is APPROVED and a work_order is CREATED, When the planner locks the latest build_plan, Then build_plan.status becomes LOCKED and locked_at is set", async () => {
     const w = await givenUpTo("after_priority");
-    const locked = await lockBuildPlan({ id: w.planId }, "Configuration Manager");
+    const locked = await lockBuildPlan({ id: w.planId }, "Planner");
     expect(locked.status).toBe("LOCKED");
     expect(locked.lockedAt).toBeTruthy();
     const wo = await prisma.workOrder.findFirst({ where: { buildId: w.buildId } });
@@ -65,14 +65,14 @@ describe("Lock Build Plan", () => {
     // after_build_qty: BuildPlan exists (so we can target it), but BOM is still at DS1
     const w = await givenUpTo("after_build_qty");
     await expect(
-      lockBuildPlan({ id: w.planId }, "Configuration Manager"),
+      lockBuildPlan({ id: w.planId }, "Planner"),
     ).rejects.toThrow(/BOM not frozen at DS2/);
   });
 
   it("rejects when engineering release is not approved", async () => {
     const w = await givenUpTo("after_bom_ds2");
     await expect(
-      lockBuildPlan({ id: w.planId }, "Configuration Manager"),
+      lockBuildPlan({ id: w.planId }, "Planner"),
     ).rejects.toThrow(/engineering release not approved/);
   });
 });

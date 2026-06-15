@@ -11,7 +11,9 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { QLERIFY_DIR, reloadOntology, getOntology } from "../ontology/model.js";
-import { applyModelTables, type ApplyResult } from "./projection-store.js";
+import { applyModelTables, setMeta, type ApplyResult } from "./projection-store.js";
+import { dataModelSignature } from "./sim.js";
+import { resetTransactionalState } from "../simulator/runner.js";
 
 export type ApplyPhase = "idle" | "loading-model" | "rebuilding-overlay" | "rebuilding-tables" | "done" | "error";
 
@@ -75,9 +77,15 @@ export async function applyModel(opts: { resetOverlay?: boolean } = {}): Promise
       reloadOntology();
     }
 
-    // 3) Drop + recreate the projection tables to match the model.
-    status = { ...status, phase: "rebuilding-tables", message: "Rebuilding projection tables…" };
+    // 3) Clean slate: reset ALL transactional data so a model switch doesn't
+    // carry the previous model's rows. resetTransactionalState clears the Ericsson
+    // Prisma tables + the shared EventLog (keeps the site/line seeds); the gen_
+    // projection tables are wiped by the drop/recreate below.
+    status = { ...status, phase: "rebuilding-tables", message: "Resetting demo data + rebuilding tables…" };
+    await resetTransactionalState();
     const result = await applyModelTables(getOntology());
+    // Mark the data as belonging to the now-applied model.
+    await setMeta("dataModel", dataModelSignature());
 
     status = {
       ...status,

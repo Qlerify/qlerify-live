@@ -9,6 +9,8 @@ import { existsSync } from "node:fs";
 import { registerRoutes } from "./http/routes.js";
 import { wireDerivedEvents } from "./events/derived.js";
 import { startOntologyWatch } from "./ontology/model.js";
+import { getMeta, setMeta } from "./twin/projection-store.js";
+import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +27,15 @@ export async function buildServer() {
   registerRoutes(app);
   wireDerivedEvents();
   startOntologyWatch(app.log);
+
+  // Claim the existing transactional data for the currently-loaded model if it
+  // isn't marked yet, so a later switch to a DIFFERENT model is detected and
+  // triggers a clean-slate rebuild (instead of showing the previous model's rows).
+  try {
+    if ((await getMeta("dataModel")) === null) await setMeta("dataModel", dataModelSignature());
+  } catch (err) {
+    app.log.warn({ err }, "data-model marker init skipped");
+  }
   return app;
 }
 

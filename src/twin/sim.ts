@@ -24,12 +24,25 @@ export function isEricssonModel(): boolean {
   return !!getOntology().eventByKey("HardwareDemandCreated");
 }
 
-/** Whether the projection tables are out of sync with the loaded model, i.e. a
- * rebuild (apply) is needed before the model can run. False for the Ericsson
- * model (it runs on Prisma tables, not the gen_ projections) and true for a
- * generic model whose entities don't all have a projection table yet. The UI
- * uses this to auto-rebuild on a model change instead of a manual button. */
+/** A stable signature of the loaded model — used as the "which model does the
+ * transactional data belong to" marker. Changes when the bounded context or the
+ * entity set changes (i.e. a genuine model switch). */
+export function dataModelSignature(): string {
+  const o = getOntology();
+  return o.primaryBoundedContext + "|" + o.entities.map((e) => e.name).sort().join(",");
+}
+
+/** Whether a rebuild (apply) is needed before the model can run cleanly. True
+ * when the transactional data belongs to a DIFFERENT model (a switch → clean
+ * slate), or — for a generic model — when its projection tables are missing /
+ * drifted. False for the Ericsson model whose data already matches. The UI uses
+ * this to auto-rebuild on a model change instead of a manual button. */
 export async function rebuildNeeded(): Promise<boolean> {
+  // Model switch: the data in the tables is from a previously-loaded model, so a
+  // clean-slate rebuild is needed (this is what makes switching back to Ericsson
+  // not show the previous session's rows). Null marker = data unclaimed yet.
+  const dataModel = await store.getMeta("dataModel");
+  if (dataModel !== null && dataModel !== dataModelSignature()) return true;
   if (isEricssonModel()) return false;
   const ont = getOntology();
   const existing = new Set(await store.listProjectionTables());

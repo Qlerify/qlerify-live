@@ -197,3 +197,29 @@ function sqlValue(v: unknown): unknown {
   if (v === undefined) return null;
   return v;
 }
+
+// ---------------------------------------------------------------------------
+// App metadata key-value table (e.g. which model the current data belongs to).
+// Not a projection (no gen_ prefix) and not a Prisma model, so it survives both
+// applyModelTables and the Prisma reset — exactly what a data-ownership marker
+// needs.
+// ---------------------------------------------------------------------------
+
+async function ensureMetaTable(): Promise<void> {
+  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "_app_meta" ("key" TEXT PRIMARY KEY, "value" TEXT)`);
+}
+
+export async function getMeta(key: string): Promise<string | null> {
+  await ensureMetaTable();
+  const rows = await prisma.$queryRawUnsafe<Array<{ value: string }>>(`SELECT value FROM "_app_meta" WHERE key = ?`, key);
+  return rows[0]?.value ?? null;
+}
+
+export async function setMeta(key: string, value: string): Promise<void> {
+  await ensureMetaTable();
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "_app_meta" (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    key,
+    value,
+  );
+}

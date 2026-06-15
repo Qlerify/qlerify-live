@@ -9,6 +9,10 @@ import { prisma } from "../db.js";
 import { EVENTS } from "../events/registry.js";
 import { STEP_DURATIONS_HOURS, businessTimeForStep } from "../events/clock.js";
 import { currentStepIndex, nextStep, newDemand } from "../simulator/stepper.js";
+import { getOntology } from "../ontology/model.js";
+import { listAdapters, getAdapter } from "../packs/registry.js";
+import { applyFieldMap } from "../packs/types.js";
+import { adapterCfg, authorAdapterBody } from "../packs/author.js";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -126,6 +130,70 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["confirmed"],
     },
   },
+  // ---- Adapter Connection Doctor (Part 2.3) — diagnose + repair source adapters ----
+  {
+    name: "list_adapters",
+    description:
+      "List every registered source adapter (id, kind, bounded context, target entity, provenance mode). Use to find the adapter the user is asking about when troubleshooting a connection.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_adapter_config",
+    description:
+      "Return an adapter's configuration WITHOUT any secret: kind, bounded context, target entity, mode, endpoint, the credential KEY name (credentialsRef), and whether a generated body exists. Use to inspect how an adapter is wired before diagnosing.",
+    input_schema: {
+      type: "object",
+      properties: { adapterId: { type: "string" } },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "check_adapter_credential",
+    description:
+      "Check whether the adapter's credential is PRESENT (a boolean — does the env var named by credentialsRef have a value). The secret value is NEVER returned. Use to triage auth failures: present + 401 → likely an expired/invalid token; absent → the credential simply isn't set.",
+    input_schema: {
+      type: "object",
+      properties: { adapterId: { type: "string" } },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "run_adapter_healthcheck",
+    description:
+      "Run the adapter's healthcheck and return { ok, detail }. Use to confirm whether the source is reachable right now.",
+    input_schema: {
+      type: "object",
+      properties: { adapterId: { type: "string" } },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "adapter_dry_run",
+    description:
+      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        limit: { type: "number", description: "Rows to attempt (default 3)." },
+      },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "regenerate_adapter_body",
+    description:
+      "WRITE — Have AI (re)author the adapter's integration code, optionally from an error report (the self-heal repair). Stop-and-show: it writes + registers a NEW body but does NOT run or promote it — the user tests it afterwards. Requires explicit confirmation: summarize the fix you'll attempt, ask 'Shall I regenerate it?', wait for yes, then call with `confirmed: true`.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        errorReport: { type: "string", description: "The error + redacted trace from adapter_dry_run/healthcheck to repair against (optional)." },
+        confirmed: { type: "boolean", description: "Must be `true`, set only after the user confirmed." },
+      },
+      required: ["adapterId", "confirmed"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -169,6 +237,18 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleNextStep(args);
       case "create_demand":
         return await handleCreateDemand(args);
+      case "list_adapters":
+        return ok(handleListAdapters());
+      case "get_adapter_config":
+        return ok(handleGetAdapterConfig(String(args.adapterId ?? "")));
+      case "check_adapter_credential":
+        return ok(handleCheckAdapterCredential(String(args.adapterId ?? "")));
+      case "run_adapter_healthcheck":
+        return ok(await handleRunAdapterHealthcheck(String(args.adapterId ?? "")));
+      case "adapter_dry_run":
+        return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3)));
+      case "regenerate_adapter_body":
+        return await handleRegenerateAdapterBody(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -324,4 +404,76 @@ async function handleCreateDemand(args: Record<string, any>) {
   }
   const result = await newDemand();
   return ok({ demandId: result.id, template: result.template });
+}
+
+// ---------------------------------------------------------------------------
+// Adapter Connection Doctor (Part 2.3)
+// ---------------------------------------------------------------------------
+
+function handleListAdapters() {
+  return {
+    adapters: listAdapters().map((a) => ({
+      id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+    })),
+  };
+}
+
+function handleGetAdapterConfig(adapterId: string) {
+  const cfg = adapterCfg(adapterId);
+  if (!cfg) return { error: `no adapter "${adapterId}"` };
+  return {
+    id: cfg.id, kind: cfg.kind, boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity,
+    mode: cfg.mode, endpoint: cfg.endpoint ?? null, credentialsRef: cfg.credentialsRef ?? null,
+    hasBody: !!cfg.bodyPath, bodyPath: cfg.bodyPath ?? null,
+    // The secret is NEVER returned by this tool.
+  };
+}
+
+function handleCheckAdapterCredential(adapterId: string) {
+  const cfg = adapterCfg(adapterId);
+  if (!cfg) return { error: `no adapter "${adapterId}"` };
+  if (!cfg.credentialsRef) return { credentialsRef: null, present: false, note: "no credential key configured for this adapter" };
+  return { credentialsRef: cfg.credentialsRef, present: !!process.env[cfg.credentialsRef] }; // boolean only — value never read
+}
+
+async function handleRunAdapterHealthcheck(adapterId: string) {
+  const a = getAdapter(adapterId);
+  if (!a) return { error: `no adapter "${adapterId}"` };
+  try {
+    return await a.healthcheck();
+  } catch (e: any) {
+    return { ok: false, detail: e?.message ?? String(e) };
+  }
+}
+
+async function handleAdapterDryRun(adapterId: string, limit: number) {
+  const a = getAdapter(adapterId);
+  if (!a) return { error: `no adapter "${adapterId}"` };
+  const entity = getOntology().entity(a.targetEntity);
+  try {
+    const fieldMap = await a.mapping();
+    const { rows } = await a.pull({ limit: limit > 0 ? limit : 3 });
+    const mapped = (rows[a.targetEntity] ?? []).map((r) => applyFieldMap(r, fieldMap));
+    const missingRequired = entity
+      ? entity.required.filter((f) => mapped.length === 0 || mapped.some((r) => r[f] === undefined || r[f] === null || r[f] === ""))
+      : [];
+    return { ok: true, count: mapped.length, sample: mapped.slice(0, 2), missingRequired };
+  } catch (e: any) {
+    // The error report the doctor reasons about (and can pass to regenerate).
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+}
+
+async function handleRegenerateAdapterBody(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Summarize the repair, get the user's explicit yes, then call again with confirmed=true.");
+  }
+  const adapterId = String(args.adapterId ?? "");
+  if (!adapterId) return err("adapterId required");
+  if (!process.env.ANTHROPIC_API_KEY) return err("ANTHROPIC_API_KEY not set — cannot author/repair an adapter body");
+  const r = await authorAdapterBody(adapterId, typeof args.errorReport === "string" ? args.errorReport : undefined);
+  return ok({
+    regenerated: true, adapterId, bodyPath: r.bodyPath, skipped: r.skipped,
+    note: "New body written + registered, but NOT run or promoted (stop-and-show). Tell the user to Test it from the workbench, then promote if it passes.",
+  });
 }

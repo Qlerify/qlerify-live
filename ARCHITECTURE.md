@@ -574,3 +574,74 @@ merge) · crypto-shredding PII at `emit()` — *must* precede the first real-PII
 - **Credential storage** — env-var `CredentialResolver` (dev) for Part 2; a minimal encrypted
   `.qlerify/adapters/<id>.secret` (master key, mirroring the MCP-creds pattern) if live demo needs it;
   KeyVault proper stays Part 5.
+
+### Part 2.3 (refined, 2026-06-15) — Per-BC adapter workbench + AI-codegen-and-run (catalog demoted)
+
+User redirected 2.3 away from a catalog-first chat wizard: give **each bounded context a dedicated page**
+(`#bc/<Name>`, index `#bcs`) to configure its adapter (endpoints/credentials), verify the connection,
+get AI troubleshooting on a failing endpoint, see data-update history, test the adapter, **let AI WRITE
+the adapter and run/test it live (user-friendly Lambda)**, see commands+queries in action, see raw
+ingestion, and see raw data interpreted as events. Rationale (Staffan): with every attribute in the
+model, AI writes bespoke integration code, so off-the-shelf recipes (the catalog) are demoted to optional
+seed material. **Security stance (Staffan, locked):** the PoC runs behind an enterprise firewall,
+single-tenant → accept **in-process execution of AI-generated code now**, with a credible path to higher
+security later. Designed via a design+adversarial workflow that **empirically tested two runtime claims
+under tsx**.
+
+**Strictly additive:** new module + new routes + ONE guarded `loadPacks` branch + a new `web/app.js`
+render branch. Ericsson `#` and `#demand/<id>` untouched; demo stays green.
+
+**Build order (HARD gate):**
+- **Slice 1 — page shell + simulated happy path (ZERO AI / credentials / dynamic import).** Proves
+  routing/state/render additivity + the data sink end-to-end against the existing `sap-purchase-order`
+  simulated adapter. De-risks the only thing likely to break the green demo, in isolation.
+- **Slice 2 — the AI-codegen-and-run crux**, dropped into a host that already works.
+- Post-crux polish (drift self-heal, golden-fixture diff, Connection Doctor, GWT contract probe,
+  raw→events AI narration) stays parked until the crux loop works on one adapter.
+
+**The page (Slice 1).** Facade `src/http/bc-routes.ts` (mounted by `registerRoutes`), all PROJECTIONS over
+existing substrate (`ontologyView` filtered by BC, `listAdapters`, `provenanceMeta.byContext[bc]`, the
+`gen_` store, `EventLog`, the command registry) — no new tables; one optional `endpoint?` on
+`AdapterConfig`. `:bc` validated vs `getOntology().boundedContexts` (404 `UNKNOWN_BC`). Routes:
+`GET /api/bc` (index), `GET /api/bc/:bc` (overview), `POST /api/bc/:bc/adapter/:id/verify` (healthcheck),
+`POST .../test` (dry-run `pull()` + field-diff, NO insert), `GET .../raw` (gen_<Entity> rows w/
+`_provenance`), `GET .../history`. `web/app.js`: `#bcs` + `#bc/<Name>` routing before the dashboard
+fallback; `bcListView` + `bcWorkbenchView` (tabs Overview / Connection / Test / Raw / Commands+Queries /
+Raw-as-Events); a header nav link. The existing `POST /api/adapters/:id/pull` is the "ingest for real"
+sink. *Det:* all of Slice 1. *AI:* none.
+
+**The crux — AI writes AND runs the adapter (Slice 2).** `.gen`/`.logic` discipline. HOST (hand-written)
+`createAuthoredAdapter(cfg)` in `src/packs/adapters/authored.ts` implements the full `SourceAdapter`; BODY
+(AI-authored) ONE file exporting `async fetchRows(ctx: AdapterRunContext)`. The body sees ONLY a
+capability-restricted `ctx` (`ctx.fetch` = native fetch wrapped with ~8s AbortController timeout + size
+cap + secret redaction + trace; `ctx.secret` resolved at run via `envCredentialResolver`; `ctx.entity`;
+`ctx.limit`) — never `process.env`/raw fetch/`prisma`/`fs`. Returned rows wrap into
+`RowsByEntity[targetEntity]` → existing `ingestPull` consumes unchanged. AI authoring reuses `ai.ts` as
+`src/packs/codegen/adapter-ai.ts`.
+
+Execution model = **in-process dynamic import** (the proven `loadPacks` seam), with two NON-NEGOTIABLE
+fixes the adversarial pass verified under tsx:
+- **FIX 1 (cache-bust): the `?v=<mtimeMs>` query trick DOES NOT WORK under tsx** — tsx keys its transpile
+  cache by file PATH and ignores the query, so a regenerate would silently run STALE code. So: write each
+  regeneration to a **UNIQUE FILE PATH** (`<id>.<contentHash>.logic.ts`) and import that; track the
+  "current body path" in the sidecar. Bonus: regenerate is idempotent (same hash → skip) + audit trail.
+- **FIX 2 (enforcement, not just prompt): a ~15-line static DENY-SCAN** of the generated body before its
+  first import (reject `child_process`/`node:fs`/`process.env`/`eval`/disallowed imports), AND **register
+  authored adapters LAZILY** (import the body inside `pull()`/`healthcheck()`, NEVER at `loadPacks` boot)
+  so a bad/hostile/syntactically-broken body can never reach the boot path or the green demo — only its own
+  panel errors. Plus: code shown in the viewer + explicit human click before first run; regenerate is
+  confirmation-gated (the 3-layer invariant); test-live = a non-persisting `pull({limit:1})` graded
+  against the model's required-fields/types BEFORE any real `ingestPull`.
+
+**Path to higher security (honest).** The capability-ctx + deny-scan + lazy-register + confirmation-gate is
+the minimum-viable LOCAL-dev posture (accepted for the firewalled PoC). Hosted/shared needs real isolation:
+a per-adapter `worker_threads` (or subprocess) runner with no inherited env, an egress allow-list, the
+secret passed over the channel. NOTE (verified): this is **NOT a zero-change flag-flip** — a worker can't
+load `.ts` without its own tsx bootstrap; the adapter CONTRACT (`ctx`/`fetchRows`) is unchanged but the
+runner is real work. Credentials: env-only now (the secret POSTed once to set `process.env[credentialsRef]`,
+only the KEY stored in the sidecar); encrypted `.qlerify/adapters/<id>.secret` behind `envCredentialResolver`
+is the next increment (zero call-site change).
+
+**Raw + raw-as-events (viewer; real Part 5 split deferred).** Raw panel = `gen_<Entity>` rows. Raw-as-events
+= each row through the codegen `detect()` predicate (read-only, emits nothing), with a model required-field
+heuristic fallback (clearly labeled) for non-codegen BCs.

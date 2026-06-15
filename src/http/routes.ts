@@ -18,6 +18,8 @@ import {
 import { provenanceMeta } from "../twin/provenance.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { ingestPull } from "../packs/ingest.js";
+import { registerBcRoutes } from "./bc-routes.js";
+import { registerAdapterCodeRoutes } from "./adapter-routes.js";
 
 // Commands
 import * as demand from "../helix/demand/commands.js";
@@ -48,6 +50,7 @@ import {
 } from "../simulator/stepper.js";
 import { runAgentTurn } from "../chat/agent.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
+import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
 import { swapPreview } from "../kernel/codegen/swap.js";
@@ -420,13 +423,17 @@ export function registerRoutes(app: FastifyInstance) {
     }
   });
 
+  // ---------------- Per-BC workbench (Part 2.3) ----------------
+  registerBcRoutes(app);
+  registerAdapterCodeRoutes(app);
+
   // ---------------- Chat assistant ----------------
   app.get("/chat/info", async () => ({
     model: process.env.CHAT_MODEL ?? "claude-sonnet-4-6",
     effort: process.env.CHAT_EFFORT ?? "medium",
     apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
     systemPrompt: systemPromptSize(),
-    toolCount: 8,
+    toolCount: TOOLS.length,
   }));
 
   app.post("/chat", async (req, reply) => {

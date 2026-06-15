@@ -12,3 +12,8 @@ web/node_modules/
 .qlerify/history/
 # Optional per-machine model source URL override
 .qlerify/model-source.json
+
+# AI-authored adapter bodies (Part 2.3) — generated, not source-controlled
+src/packs/*/generated/
+# Adapter sidecars (credentials KEYs + config; per-machine)
+.qlerify/adapters/

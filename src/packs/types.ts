@@ -78,6 +78,15 @@ export interface AdapterConfig {
   limits?: { pageSize?: number; limit?: number };
   lastPullAt?: string;
   fixturesDir?: string;
+  // --- AI-authored adapter (Part 2.3, Slice 2) ---
+  /** Configured source endpoint (passed to the body as ctx.endpoint). */
+  endpoint?: string;
+  /** Repo-relative path of the CURRENT generated body. Each regeneration writes a
+   * UNIQUE path (content-hash suffix) — the `?v=mtime` cache-bust does NOT work
+   * under tsx, so a fresh path is how the host sees new code. */
+  bodyPath?: string;
+  /** sha256 of the prompt that produced the current body (provenance/drift). */
+  bodyPromptHash?: string;
 }
 
 /** Resolves a credentialsRef to the actual secret. Dev = env var; KeyVault later

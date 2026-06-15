@@ -108,6 +108,16 @@ const state = {
   prev: null,
   currentIndex: 0,
   withDisruptions: true,
+  // per-BC adapter workbench (Part 2.3)
+  bc: null,           // current bounded context (#bc/<Name>)
+  bcList: null,       // /api/bc index
+  bcData: null,       // /api/bc/:bc overview
+  bcTab: "overview",  // overview | connection | test | raw
+  bcVerify: null,
+  bcTest: null,
+  bcRaw: null,
+  bcCode: null,
+  bcBusy: false,
   // chat
   chatOpen: false,
   chatMessages: [],      // Anthropic.MessageParam[]
@@ -175,6 +185,19 @@ async function sendChat() {
       { type: "text", text: `[Context: viewing demand ${state.demandId} — ${desc}. When the user says "this demand", "it", or refers to a step without naming a demand, they mean this one.]` },
       { type: "text", text },
     ];
+  } else if (state.view === "bc" && state.bc) {
+    const a = (state.bcData && state.bcData.adapters || [])[0];
+    let ctx = `[Context: viewing bounded context ${state.bc}`;
+    if (a) {
+      ctx += ` — adapter ${a.id} (${a.kind}, mode ${a.mode}), target entity ${a.targetEntity}`;
+      if (state.bcVerify) ctx += `. Last verify: ${state.bcVerify.ok ? "ok" : "FAILED"}${state.bcVerify.detail ? " — " + state.bcVerify.detail : ""}`;
+      if (state.bcTest && state.bcTest.error) ctx += `. Last dry-run error: ${state.bcTest.error}`;
+      else if (state.bcTest && state.bcTest.diff) ctx += `. Last dry-run: ${state.bcTest.diff.ok ? "matched the model" : "shape mismatch"}`;
+    } else {
+      ctx += ` — no adapter configured yet`;
+    }
+    ctx += `. When the user says "this adapter", "it", or refers to the connection, they mean this one.]`;
+    content = [{ type: "text", text: ctx }, { type: "text", text }];
   } else {
     content = text;
   }
@@ -858,8 +881,12 @@ function bindModelControls() {
 // ---------------------------------------------------------------------------
 
 function parseHash() {
-  const m = (location.hash || "").match(/^#demand\/([\w-]+)/);
-  return m ? { view: "detail", demandId: m[1] } : { view: "dashboard" };
+  const h = location.hash || "";
+  let m;
+  if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
+  if (h.startsWith("#bcs")) return { view: "bcs" };
+  if ((m = h.match(/^#demand\/([\w-]+)/))) return { view: "detail", demandId: m[1] };
+  return { view: "dashboard" };
 }
 
 function navigate(hash) {
@@ -877,6 +904,7 @@ async function onHashChange() {
   const r = parseHash();
   state.view = r.view;
   state.demandId = r.demandId ?? null;
+  state.bc = r.bc ?? null;
   state.prev = null;
   state.snapshot = null;
 
@@ -884,6 +912,10 @@ async function onHashChange() {
 
   if (r.view === "detail") {
     await loadDetail();
+  } else if (r.view === "bcs") {
+    await loadBcList();
+  } else if (r.view === "bc") {
+    await loadBc(r.bc);
   } else {
     await loadDashboard();
     // Poll every 5s so "last activity" pills age in front of the audience.
@@ -1053,6 +1085,7 @@ function dashboardView() {
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         ${modelControls()}
+        <button data-go="#bcs" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Bounded contexts / adapters">🔌 Systems</button>
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1100,6 +1133,304 @@ function bindDashboard() {
   document.querySelectorAll("[data-delete]").forEach((el) => {
     el.addEventListener("click", (ev) => deleteDemand(el.dataset.delete, ev));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Per-BC adapter workbench (Part 2.3, Slice 1) — read/projection over existing
+// substrate; zero AI / credentials / dynamic code (that is Slice 2).
+// ---------------------------------------------------------------------------
+
+async function loadBcList() {
+  await loadMeta();
+  try { state.bcList = await api("/api/bc"); } catch { state.bcList = []; }
+  render();
+}
+
+async function loadBc(bc) {
+  await loadMeta();
+  state.bcVerify = null; state.bcTest = null; state.bcRaw = null; state.bcCode = null;
+  if (!state.bcTab) state.bcTab = "overview";
+  try { state.bcData = await api("/api/bc/" + encodeURIComponent(bc)); }
+  catch (e) { state.bcData = { error: e.message, name: bc }; }
+  render();
+}
+
+async function loadBcCode() {
+  const adapter = (state.bcData && state.bcData.adapters || [])[0];
+  if (!adapter) return;
+  state.bcBusy = true; render();
+  try { state.bcCode = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code`); }
+  catch { state.bcCode = { exists: false, source: "", hasKey: false }; }
+  finally { state.bcBusy = false; render(); }
+}
+
+async function loadBcRaw() {
+  state.bcBusy = true; render();
+  try { state.bcRaw = await api(`/api/bc/${encodeURIComponent(state.bc)}/raw?limit=100`); }
+  catch { state.bcRaw = { tableMissing: true, entity: null, rows: [] }; }
+  finally { state.bcBusy = false; render(); }
+}
+
+function bcHeader(title, subtitle, back) {
+  return `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4 flex items-center gap-4">
+        ${back ? `<button data-go="${back}" class="text-stone-400 hover:text-stone-700 text-lg leading-none" title="Back">←</button>` : ""}
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(subtitle)}</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(title)}</div>
+        </div>
+        <button data-go="#" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Dashboard</button>
+        <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
+      </div>
+    </header>`;
+}
+
+function bcListView() {
+  const list = state.bcList || [];
+  const cards = list.map((b) => `
+    <button data-go="#bc/${encodeURIComponent(b.name)}" class="text-left rounded-lg border border-stone-200 bg-white hover:border-amber-300 hover:bg-amber-50 transition-colors p-4 flex flex-col gap-2">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold text-stone-900">${escapeHtml(b.name)}</div>
+        ${provChip(b.provenance && b.provenance.mode)}
+      </div>
+      <div class="text-xs text-stone-500">${b.eventCount} events · ${b.entityCount} entities · ${b.adapterCount} adapter${b.adapterCount === 1 ? "" : "s"}</div>
+      ${b.provenance && b.provenance.adapter ? `<div class="text-[11px] text-stone-400 mono">${escapeHtml(b.provenance.adapter)}</div>` : ""}
+    </button>`).join("");
+  return `
+    ${bcHeader("Bounded contexts", "Each system, its adapter, and its live data", "#")}
+    <main class="flex-1 overflow-auto p-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards || `<div class="text-stone-400">No bounded contexts.</div>`}</div>
+    </main>`;
+}
+
+const BC_TABS = [["overview", "Overview"], ["connection", "Connection"], ["code", "Adapter code"], ["test", "Test"], ["raw", "Raw data"]];
+
+function bcWorkbenchView() {
+  const d = state.bcData;
+  if (!d) return bcHeader("Loading…", "", "#bcs");
+  if (d.error) return `${bcHeader(d.name || "Bounded context", "Adapter workbench", "#bcs")}<main class="p-6"><div class="text-rose-600">${escapeHtml(d.error)}</div></main>`;
+  const adapter = (d.adapters || [])[0];
+  const tabs = BC_TABS.map(([id, label]) => `
+    <button data-bctab="${id}" class="px-3 py-2 text-sm border-b-2 ${state.bcTab === id ? "border-amber-500 text-stone-900 font-medium" : "border-transparent text-stone-500 hover:text-stone-700"}">${label}</button>`).join("");
+  return `
+    ${bcHeader(d.name, "Adapter workbench", "#bcs")}
+    <div class="px-6 pt-3 flex items-center gap-3 border-b border-stone-200 bg-white">
+      <div class="flex items-center gap-2 text-sm text-stone-600">data source ${provChip(d.provenance && d.provenance.mode)}${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no adapter</span>`}</div>
+      <div class="flex-1"></div>
+      <div class="flex gap-1">${tabs}</div>
+    </div>
+    <main class="flex-1 overflow-auto p-6">${bcTabContent(d, adapter)}</main>`;
+}
+
+function bcTabContent(d, adapter) {
+  switch (state.bcTab) {
+    case "connection": return bcConnectionPanel(d, adapter);
+    case "code": return bcCodePanel(d, adapter);
+    case "test": return bcTestPanel(d, adapter);
+    case "raw": return bcRawPanel(d, adapter);
+    default: return bcOverviewPanel(d);
+  }
+}
+
+function bcNoAdapter() {
+  return `<div class="text-stone-400 text-sm">This bounded context has no adapter yet. (AI-authored adapters arrive in Slice 2.)</div>`;
+}
+
+function bcOverviewPanel(d) {
+  const evRows = (d.events || []).map((e) => `
+    <tr class="border-t border-stone-100">
+      <td class="px-3 py-2 text-stone-700">${escapeHtml(e.name)}</td>
+      <td class="px-3 py-2 text-stone-500">${escapeHtml(e.role || "")}</td>
+      <td class="px-3 py-2 mono text-xs text-stone-500">${escapeHtml(e.aggregateRoot || "")}</td>
+      <td class="px-3 py-2">${e.derived ? `<span class="text-amber-600 text-xs font-semibold">DERIVED</span>` : ""}</td>
+    </tr>`).join("");
+  const chips = (arr, cls) => (arr || []).map((x) => `<span class="inline-block px-2 py-1 mr-1 mb-1 rounded ${cls} text-xs">${escapeHtml(x.name)}</span>`).join("") || `<span class="text-stone-400 text-sm">none</span>`;
+  return `
+    <div class="space-y-6 max-w-4xl">
+      <section><div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Entities</div><div>${chips(d.entities, "bg-sky-50 text-sky-700")}</div></section>
+      <section><div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Commands</div><div>${chips(d.commands, "bg-stone-100 text-stone-700")}</div></section>
+      <section>
+        <div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Events (${(d.events || []).length})</div>
+        <div class="rounded-lg border border-stone-200 bg-white overflow-hidden"><table class="w-full text-sm"><tbody>${evRows}</tbody></table></div>
+      </section>
+    </div>`;
+}
+
+function bcConnectionPanel(d, adapter) {
+  if (!adapter) return bcNoAdapter();
+  const v = state.bcVerify;
+  const status = v == null ? `<span class="text-stone-400">not checked</span>`
+    : v.ok ? `<span class="text-emerald-700">● connected</span> <span class="text-stone-500">${escapeHtml(v.detail || "")}</span>`
+    : `<span class="text-rose-600">● not connected</span> <span class="text-stone-500">${escapeHtml(v.detail || "")}</span>`;
+  return `
+    <div class="max-w-2xl space-y-4">
+      <div class="rounded-lg border border-stone-200 bg-white p-4">
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="font-medium text-stone-900">${escapeHtml(adapter.id)}</div>
+            <div class="text-xs text-stone-500">kind: ${escapeHtml(adapter.kind)} · target: ${escapeHtml(adapter.targetEntity)} · mode: ${escapeHtml(adapter.mode)}</div>
+          </div>
+          <button id="bc-verify" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 shrink-0">Verify connection</button>
+        </div>
+        <div class="mt-3 text-sm">${status}${v && v.at ? `<span class="text-stone-400 text-xs ml-2">${new Date(v.at).toLocaleTimeString()}</span>` : ""}</div>
+      </div>
+
+      <div class="rounded-lg border border-stone-200 bg-white p-4 space-y-3">
+        <div class="text-xs uppercase tracking-wide text-stone-500 font-semibold">Endpoint &amp; credentials</div>
+        <label class="block text-xs text-stone-500">Endpoint URL
+          <input id="bc-endpoint" type="text" placeholder="https://…/odata/PurchaseOrders" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300" />
+        </label>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block text-xs text-stone-500">Credential key (env var)
+            <input id="bc-credref" type="text" placeholder="SAP_API_TOKEN" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300 mono" />
+          </label>
+          <label class="block text-xs text-stone-500">Secret
+            <input id="bc-secret" type="password" placeholder="••••••••" autocomplete="off" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300" />
+          </label>
+        </div>
+        <div class="flex gap-2">
+          <button id="bc-config-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Save endpoint</button>
+          <button id="bc-cred-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Set credential</button>
+        </div>
+        <div class="text-[11px] text-stone-400">The secret is never echoed, written to disk, or sent to chat — only the key name is remembered (dev: kept in process env; encrypted-at-rest store is the next increment). The AI-authored adapter reads it as <span class="mono">ctx.secret</span>.</div>
+      </div>
+    </div>`;
+}
+
+function bcCodePanel(d, adapter) {
+  if (!adapter) return bcNoAdapter();
+  const c = state.bcCode;
+  const hasKey = c ? c.hasKey : false;
+  const src = c && c.exists ? c.source : "";
+  const genLabel = c && c.exists ? "Regenerate with AI" : "Generate with AI";
+  return `
+    <div class="max-w-4xl space-y-3">
+      <div class="flex items-center gap-3 flex-wrap">
+        <button id="bc-generate" ${(!hasKey || state.bcBusy) ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">${genLabel}</button>
+        <span class="text-xs text-stone-400">${hasKey
+          ? "AI writes fetchRows(ctx) from the model attributes; it is shown here and only runs when you Test it (stop-and-show)."
+          : "set ANTHROPIC_API_KEY in .env to let AI author the adapter live."}</span>
+      </div>
+      ${c && c.bodyPath ? `<div class="text-[11px] mono text-stone-400">${escapeHtml(c.bodyPath)}</div>` : ""}
+      ${src
+        ? `<pre class="rounded-lg border border-stone-200 bg-stone-50 p-3 text-[11px] leading-relaxed overflow-auto mono text-stone-800" style="max-height:60vh">${escapeHtml(src)}</pre>`
+        : `<div class="text-stone-400 text-sm">No adapter body yet${hasKey ? " — click Generate to have AI write one against the PurchaseOrder schema." : "."}</div>`}
+    </div>`;
+}
+
+function bcTestPanel(d, adapter) {
+  if (!adapter) return bcNoAdapter();
+  const t = state.bcTest;
+  let result = "";
+  if (t && !t.error) {
+    const checklist = ((t.diff && t.diff.requiredStatus) || []).map((r) => `
+      <span class="inline-flex items-center gap-1 px-2 py-1 mr-1 mb-1 rounded text-xs ${r.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}">${r.ok ? "✓" : "✗"} ${escapeHtml(r.field)}</span>`).join("");
+    const cols = t.rows && t.rows.length ? Object.keys(t.rows[0]) : [];
+    const head = cols.map((c) => `<th class="px-2 py-1 text-left font-medium text-stone-500">${escapeHtml(c)}</th>`).join("");
+    const body = (t.rows || []).map((row) => `<tr class="border-t border-stone-100">${cols.map((c) => `<td class="px-2 py-1 text-stone-700">${escapeHtml(String(row[c] ?? ""))}</td>`).join("")}</tr>`).join("");
+    const extra = (t.diff && t.diff.extraFields) || [];
+    result = `
+      <div class="mt-4 space-y-3">
+        <div class="text-sm">${t.diff && t.diff.ok ? `<span class="text-emerald-700 font-medium">✓ matches the model</span>` : `<span class="text-rose-600 font-medium">✗ mismatch</span>`} <span class="text-stone-500">${t.count} row(s), nothing written</span></div>
+        <div>${checklist}</div>
+        ${extra.length ? `<div class="text-xs text-amber-700">extra unmapped fields: ${extra.map(escapeHtml).join(", ")}</div>` : ""}
+        <div class="rounded-lg border border-stone-200 bg-white overflow-auto"><table class="text-xs w-full"><thead class="bg-stone-50"><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+      </div>`;
+  } else if (t && t.error) {
+    result = `<div class="mt-4 text-rose-600 text-sm">${escapeHtml(t.error)}</div>`;
+  }
+  return `
+    <div class="max-w-4xl">
+      <div class="flex items-center gap-3 flex-wrap">
+        <button id="bc-test" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Test adapter (dry run)</button>
+        <button id="bc-ingest" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Ingest for real →</button>
+        <span class="text-xs text-stone-400">dry run pulls + grades against the model without writing; ingest lands rows in the projection store</span>
+      </div>
+      ${result}
+    </div>`;
+}
+
+function bcRawPanel(d, adapter) {
+  const r = state.bcRaw;
+  let body = `<div class="text-stone-400 text-sm">Click <b>Load raw rows</b> to read the ingestion table.</div>`;
+  if (r) {
+    if (r.tableMissing) body = `<div class="text-stone-400 text-sm">No ingestion table for <span class="mono">${escapeHtml(r.entity || d.defaultEntity || "")}</span> yet — run an ingest from the Test tab.</div>`;
+    else if (!r.rows.length) body = `<div class="text-stone-400 text-sm">Table <span class="mono">gen_${escapeHtml(r.entity)}</span> is empty.</div>`;
+    else {
+      const cols = Object.keys(r.rows[0]);
+      const head = cols.map((c) => `<th class="px-2 py-1 text-left font-medium text-stone-500">${escapeHtml(c)}</th>`).join("");
+      const rowsHtml = r.rows.map((row) => `<tr class="border-t border-stone-100">${cols.map((c) => c === "_provenance" ? `<td class="px-2 py-1">${provChip(row[c])}</td>` : `<td class="px-2 py-1 text-stone-700">${escapeHtml(String(row[c] ?? ""))}</td>`).join("")}</tr>`).join("");
+      body = `<div class="rounded-lg border border-stone-200 bg-white overflow-auto"><table class="text-xs w-full"><thead class="bg-stone-50"><tr>${head}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
+    }
+  }
+  return `
+    <div class="max-w-5xl space-y-3">
+      <div class="flex items-center gap-3">
+        <button id="bc-raw" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Load raw rows</button>
+        <span class="text-xs text-stone-400">verbatim <span class="mono">gen_${escapeHtml(d.defaultEntity || "")}</span> projection rows, including provenance</span>
+      </div>
+      ${body}
+    </div>`;
+}
+
+function bindBcList() {
+  document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.go)));
+}
+
+function bindBcWorkbench() {
+  document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.go)));
+  const adapter = (state.bcData && state.bcData.adapters || [])[0];
+  document.querySelectorAll("[data-bctab]").forEach((el) => el.addEventListener("click", async () => {
+    state.bcTab = el.dataset.bctab; render();
+    if (state.bcTab === "code" && !state.bcCode) await loadBcCode();
+  }));
+  document.getElementById("bc-generate")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    state.bcBusy = true; render();
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code/generate`, { method: "POST", body: "{}" }); await loadBc(state.bc); state.bcTab = "code"; await loadBcCode(); }
+    catch (e) { alert("Generate failed: " + e.message); state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-config-save")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    const endpoint = document.getElementById("bc-endpoint")?.value || "";
+    const credentialsRef = document.getElementById("bc-credref")?.value || "";
+    state.bcBusy = true; render();
+    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/config`, { method: "PUT", body: JSON.stringify({ endpoint, credentialsRef }) }); }
+    catch (e) { alert("Save failed: " + e.message); }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-cred-save")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    const credentialsRef = document.getElementById("bc-credref")?.value || "";
+    const secret = document.getElementById("bc-secret")?.value || "";
+    if (!credentialsRef || !secret) { alert("Enter a credential key and secret."); return; }
+    state.bcBusy = true; render();
+    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/credential`, { method: "PUT", body: JSON.stringify({ credentialsRef, secret }) }); }
+    catch (e) { alert("Failed: " + e.message); }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-verify")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    state.bcBusy = true; render();
+    try { state.bcVerify = await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/verify`, { method: "POST", body: "{}" }); }
+    catch (e) { state.bcVerify = { ok: false, detail: e.message }; }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-test")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    state.bcBusy = true; render();
+    try { state.bcTest = await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/test`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); }
+    catch (e) { state.bcTest = { error: e.message }; }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-ingest")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    state.bcBusy = true; render();
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); state.bcTab = "raw"; await loadBcRaw(); }
+    catch (e) { alert("Ingest failed: " + e.message); state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-raw")?.addEventListener("click", loadBcRaw);
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,6 +1904,16 @@ function render() {
         }
       }
     }
+  } else if (state.view === "bcs") {
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${bcListView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    bindBcList();
+    bindChat();
+    bindRebuildOverlay();
+  } else if (state.view === "bc") {
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${bcWorkbenchView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    bindBcWorkbench();
+    bindChat();
+    bindRebuildOverlay();
   } else {
     root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${dashboardView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
     bindDashboard();

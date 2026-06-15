@@ -370,3 +370,53 @@ version bump and **left status untouched**; detect flipped true; an update on a 
 **Net:** "drop in a new command, no AI" → it WORKS (create/update + emit) instead of throwing; the
 AI/hand `.logic.ts` is now an *enhancement* (guards, transitions, cross-aggregate effects), not a
 prerequisite for the command to function.
+
+---
+
+## Reality check vs the kernel+packs goal (2026-06-15) — read before Part 2
+
+The §1 "Kernel + Packs" target is **NOT yet realized**. Current state:
+
+- **No `src/packs/` directory exists.** Bounded contexts are still flat dirs at `src/` root
+  (`helix/`, `prim/`, `sap/`, …) — the original layout. No `Pack` interface, no `loadPacks()`.
+- **No pack has all its layers.** Per-pack `adapter/`, `widgets/`, `ingestion/`, `pack.manifest.json`
+  do not exist anywhere. Only a global `.qlerify/codegen.commands.json`.
+- **Only SAP Purchase Order uses the command seam** (`.gen.ts`+`.logic.ts` with `detect`/`DESCRIBE`,
+  4 commands). The other 6 bounded contexts are **1,564 lines of hand-written domain logic** with no
+  seam (Helix: 0 `apply`/`detect`/`DESCRIBE`).
+- **Widgets:** only *global* runtime-interpreted rendering in `web/app.js` — no per-pack widget files.
+
+### The architecture EVOLVED — what a "pack" is for changed
+Increment 1c's **generic base command** means a model **runs with zero generated files** (validate →
+upsert from example data → emit, straight from the model). So packs are no longer required to *run* a
+system — they're the **optional authored layer**: faithful logic (`.logic.ts`), the adapter, and
+custom widgets, used when the generic default isn't enough. SAP PO is the one pilot of that layer.
+
+### What exists toward the goal
+- ✅ Kernel codegen engine (`src/kernel/codegen/`): introspect → emit `.gen`/`.logic` + manifest.
+- ✅ Generic runtime (`src/commands/base.ts` + `src/twin/`): runs any model generically.
+- ✅ One command-seam pilot (SAP PO).
+- ❌ `src/packs/{bc}/` organization, `Pack` interface, `loadPacks()`.
+- ❌ adapter / widgets / ingestion layers (Parts 2/4/5).
+- ❌ 6 of 7 BCs not converted to the seam.
+
+### Next major iteration: Part 2 — Adapters = the first real pack
+Building the adapter layer for ONE system end-to-end is what should **force `src/packs/{bc}/`, the
+`Pack` interface, and `loadPacks()` into existence** — making Part 2 the first complete pack. Helix and
+the others migrate into that structure incrementally afterward.
+- **Prerequisite / first sub-step:** the code→model WRITE-PATH. `src/ontology/sync.ts` is PULL-ONLY
+  today (MCP `get_workflow`); the adapter model-correction loop (firstName vs first-name) needs MCP
+  `update_*` write tools with review-then-apply + conflict handling.
+- **Canonical example:** the IAM/"Identity & Access" model maps to AWS Cognito user-creation (the
+  original example): introspect Cognito → propose field mapping → generate adapter → test → correct
+  the model. Adapter design detail is in §"Part 2 — Adapters" above (SourceAdapter interface
+  introspect/mapping/pull/push/healthcheck; FDE AI loop in the chat-agent harness; `mode:
+  simulated|recorded|live`).
+
+### Related milestone (after Part 2/3): retire the Ericsson dual-track
+The Ericsson domain is hand-coded (1,564 lines + `isEricssonModel()` branching in 11 places + the
+28-step `stepper` + the typed Prisma schema + the 105 tests) — it's the **faithful reference app**, not
+debt to rush. End-state: Ericsson becomes `workflow.json` + authored `.logic.ts` (the SAP-PO pattern,
+extended), the generic engine runs it, and `isEricssonModel()` + the bespoke stepper disappear. Costs:
+(a) needs authored `.logic.ts` to stay faithful (Part 3); (b) moving Ericsson off typed Prisma onto the
+raw-SQL `gen_` store means rebuilding the relational read-models. A deliberate later increment.

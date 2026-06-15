@@ -111,6 +111,13 @@ export async function tableExists(logical: string): Promise<boolean> {
   return Number(rows[0]?.n ?? 0) > 0;
 }
 
+/** Column names of a projection table (empty set if it doesn't exist). Used to
+ * detect schema drift — a model whose entity gained a field needs a rebuild. */
+export async function tableColumns(logical: string): Promise<Set<string>> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(`PRAGMA table_info(${phys(logical)})`);
+  return new Set(rows.map((r) => r.name));
+}
+
 // ---------------------------------------------------------------------------
 // Generic row operations (parameterized values; identifiers validated). The
 // `table` argument is the LOGICAL entity name; phys() maps it to gen_<name>.

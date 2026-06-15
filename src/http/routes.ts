@@ -13,7 +13,7 @@ import { kebabCase } from "../kernel/codegen/introspect.js";
 import { applyModel, applyStatus } from "../twin/apply.js";
 import {
   isEricssonModel, genericNewInstance, genericStep, genericCurrentStep,
-  genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll,
+  genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
 } from "../twin/sim.js";
 
 // Commands
@@ -374,6 +374,9 @@ export function registerRoutes(app: FastifyInstance) {
       // Whether the hand-written Ericsson simulator drives this model, or the
       // model-generic simulator. The frontend renders the dashboard accordingly.
       ericsson: isEricssonModel(),
+      // True when the projection tables don't match the model yet — the UI
+      // auto-rebuilds (with the loader) so no manual "Rebuild" button is needed.
+      rebuildNeeded: await rebuildNeeded(),
     };
   });
   // Generic per-run detail (root row + events + rows created in the run) — used

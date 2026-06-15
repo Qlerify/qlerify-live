@@ -24,6 +24,23 @@ export function isEricssonModel(): boolean {
   return !!getOntology().eventByKey("HardwareDemandCreated");
 }
 
+/** Whether the projection tables are out of sync with the loaded model, i.e. a
+ * rebuild (apply) is needed before the model can run. False for the Ericsson
+ * model (it runs on Prisma tables, not the gen_ projections) and true for a
+ * generic model whose entities don't all have a projection table yet. The UI
+ * uses this to auto-rebuild on a model change instead of a manual button. */
+export async function rebuildNeeded(): Promise<boolean> {
+  if (isEricssonModel()) return false;
+  const ont = getOntology();
+  const existing = new Set(await store.listProjectionTables());
+  for (const e of ont.entities) {
+    if (!existing.has(e.name)) return true; // entity has no projection table
+    const cols = await store.tableColumns(e.name);
+    if (e.fields.some((f) => !cols.has(f.name))) return true; // a field column is missing
+  }
+  return false;
+}
+
 function isCreateEvent(event: OntologyEvent, ont: Ontology): boolean {
   const seen = new Set<string>();
   const stack = [...event.predecessors];

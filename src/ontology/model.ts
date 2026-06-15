@@ -333,10 +333,13 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   const boundedContexts = contexts.map(([bc]) => bc).sort();
   // An overlay whose event keys don't match this model belongs to a PREVIOUSLY
   // loaded model — its title/rootAggregate overrides are stale and must be
-  // ignored (the model-switch "stale labels" bug). The override only applies
-  // when the overlay is actually for this model (at least one event key matches).
+  // ignored (the model-switch "stale labels" bug). Require a MAJORITY of the
+  // overlay's keys to resolve: a single shared event key (e.g. ProjectCreated,
+  // present in both the Ericsson and IAM models) must NOT make a foreign
+  // overlay look like it belongs here.
   const overlayKeys = Object.keys(overlayEvents);
-  const overlayForThisModel = overlayKeys.length === 0 || overlayKeys.some((k) => eventByKey.has(k));
+  const matchingKeys = overlayKeys.filter((k) => eventByKey.has(k)).length;
+  const overlayForThisModel = overlayKeys.length === 0 || matchingKeys / overlayKeys.length >= 0.5;
   const title = (overlayForThisModel && overlay.title) || primaryBoundedContext;
 
   function topologicalOrder(): string[] {

@@ -699,7 +699,6 @@ function modelFileDialog() {
           <div class="flex items-center gap-1.5">
             <button id="btn-model-back" ${disBack ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll back to previous model version">↩</button>
             <button id="btn-model-fetch" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Fetch the latest model from the Qlerify modeller, then rebuild (drop & recreate projection tables)">${state.modelBusy ? "⏳ Syncing…" : "⤓ Fetch model"}</button>
-            <button id="btn-model-rebuild" class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Rebuild from the currently loaded model — drop & recreate the projection tables (use after editing workflow.json directly)">⟳ Rebuild</button>
             <button id="btn-model-fwd" ${disFwd ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll forward to next model version">↪</button>
             <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
             ${effective
@@ -790,7 +789,6 @@ function modelToast() {
 
 function bindModelControls() {
   document.getElementById("btn-model-fetch")?.addEventListener("click", fetchModel);
-  document.getElementById("btn-model-rebuild")?.addEventListener("click", () => rebuildModel({ fetch: false }));
   document.getElementById("btn-model-back")?.addEventListener("click", () => rollModel("back"));
   document.getElementById("btn-model-fwd")?.addEventListener("click", () => rollModel("forward"));
   document.getElementById("btn-model-view")?.addEventListener("click", openModelFile);
@@ -889,7 +887,17 @@ async function loadMeta() {
     const meta = await api("/sim/meta");
     state.meta = meta;
     document.title = `${meta.title} — Live`;
+    maybeAutoRebuild();
   } catch { /* keep defaults */ }
+}
+
+// Auto-rebuild: when the model changed and its projection tables are out of sync
+// (rebuildNeeded), apply it with the loader — no manual "Rebuild" button needed.
+// Guarded so it never re-enters mid-rebuild or loops after a failure.
+function maybeAutoRebuild() {
+  if (state.meta.rebuildNeeded && !state.rebuilding && !state.rebuildError) {
+    rebuildModel({ fetch: false });
+  }
 }
 
 async function createDemand() {

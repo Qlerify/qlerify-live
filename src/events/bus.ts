@@ -6,6 +6,7 @@
 import { prisma } from "../db.js";
 import { findEvent } from "./registry.js";
 import { getBusinessClock } from "./clock.js";
+import { provenanceFor, type ProvMode } from "../twin/provenance.js";
 import type { Role } from "../auth.js";
 
 export interface EmittedEvent {
@@ -13,6 +14,10 @@ export interface EmittedEvent {
   aggregateId: string;
   role: Role;
   payload: Record<string, unknown>;
+  // Where this fact came from. Adapters set it explicitly (recorded/live);
+  // omitted → defaults to the emitting bounded context's configured mode
+  // (`simulated` until an adapter claims the BC). See twin/provenance.ts.
+  provenance?: ProvMode;
 }
 
 // Walks the aggregate graph from any root → owning Demand.
@@ -124,6 +129,7 @@ export function subscribeAll(fn: Subscriber) {
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
   const demandId = scopeOverride ?? (await resolveDemandId(def.aggregateRoot, ev.aggregateId, ev.payload));
+  const provenance = ev.provenance ?? (await provenanceFor(def.boundedContext));
 
   await prisma.eventLog.create({
     data: {
@@ -136,6 +142,7 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       role: ev.role,
       payload: JSON.stringify(ev.payload),
       businessAt: getBusinessClock(),
+      provenance,
     },
   });
 

@@ -13,6 +13,7 @@
 import { prisma } from "../db.js";
 import { newId } from "../util/ids.js";
 import { withScope } from "../events/bus.js";
+import { provenanceFor } from "./provenance.js";
 import { setBusinessClock, genericBusinessTimeForStep } from "../events/clock.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent } from "../ontology/model.js";
@@ -214,6 +215,7 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
         eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
         aggregateRoot: event.aggregateRoot, aggregateId: "", demandId: instanceId,
         role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt,
+        provenance: await provenanceFor(event.boundedContext),
       },
     });
   } finally {
@@ -268,7 +270,7 @@ export async function genericListInstances(): Promise<any[]> {
   for (const row of rows) {
     const id = String(row.id);
     const progressRows = await prisma.eventLog.findMany({ where: { demandId: id }, distinct: ["eventRef"], select: { eventRef: true } });
-    const last = await prisma.eventLog.findFirst({ where: { demandId: id }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true } });
+    const last = await prisma.eventLog.findFirst({ where: { demandId: id }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
     out.push({ ...row, progress: progressRows.length, total, lastEvent: last });
   }
   return out;

@@ -5,6 +5,7 @@
 import { prisma } from "../db.js";
 import { wireDerivedEvents } from "../events/derived.js";
 import { setBusinessClock, businessTimeForStep } from "../events/clock.js";
+import { provenanceFor } from "../twin/provenance.js";
 import { getOntology } from "../ontology/model.js";
 import { DomainError } from "../errors.js";
 import { createDemand } from "../helix/demand/commands.js";
@@ -370,6 +371,7 @@ export async function nextStep(demandId: string, withDisruptions = true): Promis
           role: event.role,
           payload: JSON.stringify({ skipped: true, caption }),
           businessAt,
+          provenance: await provenanceFor(event.boundedContext),
         },
       });
     }

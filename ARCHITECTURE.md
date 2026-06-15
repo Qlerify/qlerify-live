@@ -420,3 +420,157 @@ debt to rush. End-state: Ericsson becomes `workflow.json` + authored `.logic.ts`
 extended), the generic engine runs it, and `isEricssonModel()` + the bespoke stepper disappear. Costs:
 (a) needs authored `.logic.ts` to stay faithful (Part 3); (b) moving Ericsson off typed Prisma onto the
 raw-SQL `gen_` store means rebuilding the relational read-models. A deliberate later increment.
+
+---
+
+## Part 2 (refined, 2026-06-15) — Adapters = the first real pack
+
+Refines §3 Part 2 / Part 2a and the "Next major iteration" reality-check note, after a
+design+adversarial workflow against the user's notes (wizard / catalog / connectors / credentials /
+load-limits / simulated-vs-real). **Decisions this session (Staffan):**
+
+- **(a) Ericsson stays the committed, tested baseline.** A CRM model had been swapped into the working
+  tree (uncommitted) — `npm test` was red and `codegen.json` (still `Hardware Development Flow 2`,
+  `cfb69e…`) pointed at a different workflow than the loaded one. Reverted to Ericsson: suite green,
+  `codegen.json` identity consistent with the loaded model again.
+- **(b) First real adapter = SAP → Purchase Orders (OData).** It reuses the one BC that already has the
+  command seam (the SAP PO `.gen`/`.logic` pilot), so the first end-to-end adapter vertical stays
+  *inside the green Ericsson model* with no test/codegen disruption. The canonical field-mismatch shifts
+  from `firstName` to SAP naming (`PurchasingDocument`/`NetPriceAmount`/`Supplier` vs the model's
+  `poNumber`/`price`/`vendor`). **AWS Cognito / "load users" (the original note-8 example) becomes a
+  catalog recipe + a later target**, reachable once the test suite is made model-agnostic so an identity
+  model can run live.
+- **(c) Write-path is ALIAS-FIRST.** Adapters normalize source field names in their own `fieldMap` on
+  pull (data flows, *no* model mutation); the code→model MCP push (`update_*` + review + conflict guard)
+  is built **later as a one-click "rename in the model?" escalation**, not a Part 2 prerequisite. This
+  reverses the earlier "build the write-path first" lock *for Part 2 only* — it is now safe to build
+  whenever, because `codegen.json` matches the loaded model. The escalation is what keeps the
+  *informs-the-model* differentiator; alias keeps ingestion unblocked.
+
+Notes 1–4 are already shipped (verified): easy model update (`sync.ts fetchLatestModel` +
+`model.ts reloadOntology/onOntologyReload`); clear old tables + create new (`projection-store.ts
+applyModelTables` drops/recreates every `gen_<Entity>`); immediate simulation (`twin/sim.ts
+genericNewInstance/genericStep`). Net-new effort is notes 5–10.
+
+**INVARIANT — Part 2 is strictly ADDITIVE:** packs are *added*; no BC dir is deleted, no static boot
+import (`routes.ts` Ericsson imports lines ~20–37) is removed, no command call-site is edited. So the
+demo stays green throughout, and `loadPacks()` must use **dynamic `import()`** (never a static boot
+import) to avoid the dangling-import trap. Ericsson retirement (§"retire the dual-track") is explicitly
+OUT of Part 2.
+
+### Sub-step sequencing (each keeps the demo green, independently testable)
+
+**2.1 — Provenance substrate (FIRST; §4 #5).** Before any real pull, every fact carries provenance so
+synthetic data can never read as real. `Provenance = { mode: 'simulated'|'recorded'|'live', adapter?,
+at? }` (`src/twin/provenance.ts`). Adapter *mode* (config) is per-adapter/per-BC in `_app_meta`
+(`adapterModes`, default `simulated` for any BC without an adapter); the *stamp* is **per-event**, so
+"which **steps** are real vs simulated" (note 10) falls out for free even for a single-BC model.
+Stamped at the single chokepoint `emit()`: `ev.provenance ?? provenanceFor(def.boundedContext)` —
+back-fills the entire existing demo as `simulated` truthfully with **zero command-call-site edits**.
+Storage = two additive columns, **no new tables, no RawEvent/BusinessEvent split (that stays Part 5)**:
+`EventLog.provenance String?` (event-stream truth → timeline) + a `_provenance TEXT` platform column on
+every `gen_` table (current-state truth → detail cards), added in `createTableSql` beside
+`version`/`createdAt`/`updatedAt`. `/sim/meta` gains a `provenance` block (per-BC `{mode, adapter, at,
+eventCount}` + `liveStepCount`/`totalSteps`). UI reuses the `PHASE_TONE`/`DERIVED` patterns:
+`simulated` = diagonal-hatch tint + muted **SIM** chip (colorblind-safe); `recorded` = solid sky
+**REC**; `live` = solid emerald **LIVE** — on timeline, detail cards, last-event caption, dashboard
+rows, plus a legend + "X of N steps live" rollup. Switching a BC's mode never rewrites history.
+*Det:* the stamp + columns + meta + UI. *AI:* none.
+
+**2.2 — Pack skeleton + `SourceAdapter` + `SimulatedAdapter` + `loadPacks()`.** The increment that
+forces `src/packs/{bc}/` + the `Pack` interface into existence. `SourceAdapter = { id, kind, mode } +
+introspect / mapping / pull / push / healthcheck`; `pull()` returns rows **keyed by model entity**
+(already field-mapped) so the generic base command (`commands/base.ts`) + `store.insert()` consume them
+unchanged. `SimulatedAdapter` is the default impl and **reuses the simulator's own row synthesis**
+(extract `synthesizeRow(entity, ont, seed)` from `sim.ts` — simulated-pull and sim stay one impl).
+Sidecar `.qlerify/adapters/<id>.json` (`{ id, kind, boundedContext, targetEntity, phase, mode,
+connectionOptionId, credentialsRef, fieldMap, limits, lastPullAt, fixturesDir }`); `credentialsRef` is a
+KEY, never the secret. `loadPacks.ts` globs `src/packs/*/pack.manifest.json` and **dynamically
+`import()`s** each pack, called fail-soft beside the existing generated-command side-effect import and
+re-run on `onOntologyReload`. **Cut from the original plan:** *no per-adapter `.gen.ts`/`.logic.ts`
+codegen in v1* — a registry-object `SimulatedAdapter` proves the `Pack` interface with a fraction of the
+surface; the two-file codegen seam is reintroduced only when a real connector *body* (live SAP OData
+calls) is authored. *Det:* interface, `applyFieldMap`, secret-resolution stub, `withScope` push
+envelope, `loadPacks`. *AI:* field-map pairs (later, pull/push body).
+
+**2.3 — Catalog (note 6) + wizard (notes 5,7,8).** Static `RECIPES` catalog
+(`src/packs/_catalog/recipes.ts`, read-only, `reusableAsIs:false`): SAP-OData deep + thin REST + CSV
+stubs. Each `SourceRecipe` carries `options[]` (choose-one connection methods) + `credentials[]` with
+`whereToFind` text the agent narrates **verbatim**, plus sample fixtures (runs simulated with zero
+creds) and a `remoteSchema` carrying the intentional naming mismatch that seeds the correction loop.
+`copyCatalogEntry(kind,{bc,id})` forks a recipe into a live sidecar (`simulated`) + `src/packs/<bc>/`
+and **immediately re-validates the inherited `fieldMap` against THIS model** (staleness check, like
+`staleOverlayKeys`) — copy-then-diverge is the default. **Wizard runs IN the existing
+confirmation-gated chat harness** — no new state machine; phase lives in the sidecar (`draft →
+introspected → mapped → built → tested → populated`, read fresh per tool call → stateless-per-turn).
+New model-generic tools on `TOOLS`: `adapter_list_recipes` / `adapter_introspect` (read) +
+`adapter_map_fields` / `adapter_build` / `adapter_test` / `adapter_pull` (all `confirmed:true`-gated,
+the `handleNextStep` pattern). System prompt gains an "Adapter Wizard Policy" block (hot-reloads via
+`onOntologyReload`). Build + test already render as `tool_use` `<details>` blocks → **you see it built
+and tested for free.** Thin in-app surface: a "Connect a system" button + a progress rail that seeds
+the chat and mirrors `phase` from `/api/adapters/:id`. **One required change from the review:** the
+single credential step gets a **real password input in the rail** — never a secret typed into a chat
+turn.
+
+**2.4 — "Test on the fly" = the mode ladder as oracle (Part 2a).** `adapter_test` needs no live system;
+each rung is its own oracle: **simulated** — synthesize rows, assert every `required` field on
+`targetEntity` is fillable + types coerce (zero creds); **recorded** — one real `healthcheck()` +
+1-page `pull()` captured to `.qlerify/adapters/<id>/fixtures/`, diffed against the model shape (a
+mismatch → an alias proposal, optionally the write-path escalation); **live** — only after recorded
+passes. **Fold-in creative: the GWT acceptance criteria ARE the oracle** — replay the pull through the
+generic base command and assert each fired event's `acceptanceCriteria` holds, rendering a green/red
+checklist *derived from the model* (criteria already on every `OntologyEvent` + already in the system
+prompt; `genericDetect` already yields happened/evidence). The ladder IS the wizard's forward progress;
+`adapter_test` flips `mode` on success.
+
+**2.5 — Coherent loading (note 9) — simulated coherence FIRST.** The review's correction: for Part 2
+the coherence you actually *see* is **simulated-data** coherence, not live pagination — today `sim.ts`
+builds every row from `exampleData[0]`, so synthesized rows are identical. v1 = **deterministic
+seeded-RNG cross-FK coherence** (a synthesized PurchaseOrder links to a real synthesized Vendor/Project
+via the `xxxId` FK convention + `relatedEntity` passthrough that `SchemaField` currently drops) + a flat
+per-entity `limit`. The full breadth-first **load-plan executor** (root-anchored FK fan-out, per-source
+`pageSize`/`limit`/`joinKey`, cursors/watermarks in `_app_meta`, resumable + idempotent) is real but
+defers to the **live/recorded** pulls — it's a production data-pipeline, premature for synthesized rows.
+When it lands, `applyModel` must also clear `adapter:*` meta keys so a model swap can't resume stale
+cursors. *Det:* seeded synth, `relatedEntity` passthrough, the later executor. *AI:* none.
+
+**Deferred — code→model write-path (the escalation; locked decision §4 #1, now Part 2-later).** Built
+when we want the model to *learn*: `ModelCorrection` op-algebra → `proposeCorrections` (pure preview,
+field-level before/after, exact MCP payload) → conflict guard (`409 STALE_MODEL` vs the live model hash)
+→ batched `update_*` → re-`fetchSpecification()` (Qlerify owns the bytes; `workflow.json` stays a
+verbatim round-trip) → `appendVersion(provenance: 'adapter-sync')` → `materialize()` + `reloadOntology`.
+**Prerequisite the review flagged: `codegen.json` identity must track the LOADED model, not a pinned
+constant** (it now matches because we're on Ericsson; revisit if/when an identity model is the live one).
+
+### Creative ideas (note 11)
+
+**Fold in:** GWT acceptance criteria as the adapter's test oracle (the model IS the spec; 2.4) ·
+synthesized **storyline backfill** — a simulated adapter pours a believable *history* (backdated
+`DRAFT→ORDERED→RECEIVED` across instances via `genericStep` + `clock.ts`) so a freshly-connected model
+"breathes" before any credential; real pulls flip slices amber→green — **hard dependency: EventLog
+idempotency / per-stream unique constraint (§4 #2) must land first, else re-running the backfill
+double-fires the whole history** · field-mismatch → one-click model suggestion (the write-path
+escalation).
+
+**My additions:** provenance **on the process-DAG diagram** (live/sim/stale + last-pull freshness on
+each step → the model diagram doubles as an ops dashboard) · **adapter-from-a-curl/screenshot** (paste a
+`curl`/API-doc/screenshot → the agent drafts introspect + fieldMap + pull body via the vision/agent
+harness; lowers the note-7 "new connector" barrier).
+
+**Optional:** mode-ladder **reconciliation diff** ("47 simulated, 44 matched real on email, 3 differ" —
+cheap because sim + live share the `gen_` shape).
+
+**Park (features in their own right):** counterfactual model fork (branch model+data, what-if, diff,
+merge) · crypto-shredding PII at `emit()` — *must* precede the first real-PII live pull regardless
+(Increment 5).
+
+### Open questions still to resolve (non-blocking)
+- **Provenance granularity** — resolved: *mode* per-BC, *stamp* per-event (per-step legibility for free).
+- **Correction default** — resolved: alias by default, rename as the one-click escalation (don't drift
+  the canonical diagram to every source's naming).
+- **EventLog idempotency** — guard (sidecar `lastPullAt` + id-keyed projection upsert) is enough for
+  simulated/recorded; the §4 #2 unique constraint becomes a HARD dependency the moment storyline-backfill
+  (high-volume replay) is built.
+- **Credential storage** — env-var `CredentialResolver` (dev) for Part 2; a minimal encrypted
+  `.qlerify/adapters/<id>.secret` (master key, mirroring the MCP-creds pattern) if live demo needs it;
+  KeyVault proper stays Part 5.

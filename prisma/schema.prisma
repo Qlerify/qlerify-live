@@ -279,6 +279,7 @@ model EventLog {
   payload       String   // JSON-serialized command args
   occurredAt    DateTime @default(now())  // real wall-clock time the simulator recorded the event
   businessAt    DateTime?  // simulated business time — the date the event would have occurred in the real world
+  provenance    String?  // simulated | recorded | live — where this fact came from (null = legacy → simulated)
 
   @@index([occurredAt])
   @@index([eventRef])

@@ -8,7 +8,8 @@ import { existsSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
 import { wireDerivedEvents } from "./events/derived.js";
-import { startOntologyWatch } from "./ontology/model.js";
+import { startOntologyWatch, onOntologyReload } from "./ontology/model.js";
+import { loadPacks } from "./packs/loadPacks.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
@@ -27,6 +28,18 @@ export async function buildServer() {
   registerRoutes(app);
   wireDerivedEvents();
   startOntologyWatch(app.log);
+
+  // Discover + register source-system packs (additive, fail-soft, dynamic import).
+  // Re-run on every ontology reload so a swapped model re-resolves its adapters.
+  try {
+    const n = await loadPacks(app.log);
+    app.log.info(`loaded ${n} adapter(s) from packs`);
+  } catch (err) {
+    app.log.warn({ err }, "pack loading skipped");
+  }
+  onOntologyReload(() => {
+    loadPacks(app.log).catch((err) => app.log.warn({ err }, "pack reload failed"));
+  });
 
   // Claim the existing transactional data for the currently-loaded model if it
   // isn't marked yet, so a later switch to a DIFFERENT model is detected and

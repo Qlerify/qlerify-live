@@ -63,6 +63,30 @@ const PHASE_TONE = {
   5: "border-emerald-400",
 };
 
+// Provenance (Part 2.1): where a fact came from. Colorblind-safe — the dashed
+// border + 3-letter label distinguish modes without relying on hue alone.
+const PROV_STYLE = {
+  simulated: { label: "SIM",  chip: "bg-stone-100 text-stone-500 border border-dashed border-stone-300", title: "Simulated — synthesized locally, no real source connected" },
+  recorded:  { label: "REC",  chip: "bg-sky-100 text-sky-700 border border-sky-200",                     title: "Recorded — captured from a real source, replayed offline" },
+  live:      { label: "LIVE", chip: "bg-emerald-100 text-emerald-700 border border-emerald-200",         title: "Live — pulled from the connected source system" },
+};
+// Small provenance chip; unstamped/legacy facts read as simulated.
+function provChip(mode) {
+  const s = PROV_STYLE[mode] || PROV_STYLE.simulated;
+  return `<span class="text-[9px] font-semibold px-1 py-px rounded ${s.chip}" title="${s.title}">${s.label}</span>`;
+}
+// Faint diagonal hatch so simulated step cards read as "ghosted" vs solid real
+// data (Tailwind has no hatch utility → inline style). "" for real modes.
+function provHatch(mode) {
+  return mode && mode !== "simulated"
+    ? ""
+    : "background-image:repeating-linear-gradient(45deg,rgba(120,113,108,0.06) 0 6px,transparent 6px 12px);";
+}
+// The configured mode for a bounded context (from /sim/meta), default simulated.
+function provModeForBC(bc) {
+  return state.meta.provenance?.byContext?.[bc]?.mode || "simulated";
+}
+
 const state = {
   // global
   view: "dashboard",     // "dashboard" | "detail"
@@ -965,7 +989,7 @@ function dashboardRow(d, cols) {
             <div class="text-xs text-stone-500 tabular-nums w-12 text-right">${d.progress}/${d.total}</div>
           </div>
         </td>
-        <td class="px-4 py-3 text-xs">${d.lastEvent ? `<div class="text-stone-700">${escapeHtml(d.lastEvent.eventName)}</div>` : `<span class="text-stone-400">no events yet</span>`}</td>
+        <td class="px-4 py-3 text-xs">${d.lastEvent ? `<div class="text-stone-700 flex items-center gap-1.5">${escapeHtml(d.lastEvent.eventName)} ${provChip(d.lastEvent.provenance)}</div>` : `<span class="text-stone-400">no events yet</span>`}</td>
         <td class="px-4 py-3 text-right"><button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this run">✕</button></td>
       </tr>`;
   }
@@ -993,7 +1017,7 @@ function dashboardRow(d, cols) {
       </td>
       <td class="px-4 py-3 text-xs">
         ${d.lastEvent ? `
-          <div class="text-stone-700">${d.lastEvent.eventName}</div>
+          <div class="text-stone-700 flex items-center gap-1.5">${d.lastEvent.eventName} ${provChip(d.lastEvent.provenance)}</div>
           <div class="text-stone-500 text-[11px]">${lastBC} · <span class="${tone.textCls} font-medium">${relativeTime(d.dwellSeconds)}</span></div>
         ` : `<span class="text-stone-400">no events yet</span>`}
       </td>
@@ -1312,11 +1336,17 @@ function timeline() {
     // Highlight long gaps (>10 days) in amber so the supplier-slip moment pops.
     const gapTone = gapDays != null && gapDays >= 10 ? "text-amber-700 font-semibold" : "text-stone-500";
 
+    // Each step's source mode = its bounded context's configured mode.
+    const provMode = provModeForBC(e.boundedContext);
+
     return `
-      <div data-step="${i}" class="shrink-0 w-44 rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col">
+      <div data-step="${i}" class="shrink-0 w-44 rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col" style="${provHatch(provMode)}">
         <div class="flex items-center justify-between text-[10px] text-stone-500 mb-0.5">
           <span>${i+1}. ${e.boundedContext}</span>
-          ${e.derived ? `<span class="text-amber-600 font-semibold">DERIVED</span>` : ""}
+          <span class="flex items-center gap-1">
+            ${e.derived ? `<span class="text-amber-600 font-semibold">DERIVED</span>` : ""}
+            ${provChip(provMode)}
+          </span>
         </div>
         <div class="text-[12px] font-medium leading-tight text-stone-800">${e.name}</div>
         <div class="text-[10px] text-stone-500 mt-1">${e.role}</div>
@@ -1329,8 +1359,17 @@ function timeline() {
       </div>
     `;
   }).join("");
+  const prov = state.meta.provenance;
+  const legend = prov ? `
+      <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
+        <span class="font-semibold text-stone-600">${prov.steps.real} of ${prov.steps.total} steps from a real source</span>
+        <span class="flex items-center gap-1">${provChip("live")} live</span>
+        <span class="flex items-center gap-1">${provChip("recorded")} recorded</span>
+        <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>
+      </div>` : "";
   return `
     <section class="border-b border-stone-200 bg-stone-50">
+      ${legend}
       <div id="timeline-scroll" class="px-6 py-3 overflow-x-auto">
         <div class="inline-flex flex-col gap-2" style="width: max-content;">
           <div class="grid gap-0" style="grid-template-columns: repeat(${total}, 11rem);">${items}</div>
@@ -1355,7 +1394,7 @@ function lastEventCaption() {
       <div class="flex items-start gap-4">
         <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold pt-0.5">Last event</div>
         <div class="flex-1">
-          <div class="font-medium text-stone-900">${last.eventName}</div>
+          <div class="font-medium text-stone-900 flex items-center gap-2">${last.eventName} ${provChip(last.provenance)}</div>
           <div class="text-sm text-stone-600 mt-0.5">
             <span class="mono text-stone-500">${last.boundedContext}</span> · ${last.role} ·
             <span class="text-stone-500">${new Date(last.occurredAt).toLocaleTimeString()}</span>

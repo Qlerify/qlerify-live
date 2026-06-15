@@ -15,6 +15,9 @@ import {
   isEricssonModel, genericNewInstance, genericStep, genericCurrentStep,
   genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
 } from "../twin/sim.js";
+import { provenanceMeta } from "../twin/provenance.js";
+import { listAdapters, getAdapter } from "../packs/registry.js";
+import { ingestPull } from "../packs/ingest.js";
 
 // Commands
 import * as demand from "../helix/demand/commands.js";
@@ -363,6 +366,10 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/meta", async () => {
     const o = getOntology();
     const singular = o.rootAggregate;
+    // Per-BC event counts feed the provenance rollup ("X of N steps real").
+    const counts = await prisma.eventLog.groupBy({ by: ["boundedContext"], _count: { _all: true } });
+    const eventCountByContext: Record<string, number> = {};
+    for (const c of counts) eventCountByContext[c.boundedContext] = c._count._all;
     return {
       title: o.title,
       primaryBoundedContext: o.primaryBoundedContext,
@@ -377,11 +384,41 @@ export function registerRoutes(app: FastifyInstance) {
       // True when the projection tables don't match the model yet — the UI
       // auto-rebuilds (with the loader) so no manual "Rebuild" button is needed.
       rebuildNeeded: await rebuildNeeded(),
+      // Where each bounded context's data comes from + a per-step real/simulated
+      // rollup. Drives the dashboard provenance badges + legend (Part 2.1).
+      provenance: await provenanceMeta(o.boundedContexts, o.events, eventCountByContext),
     };
   });
   // Generic per-run detail (root row + events + rows created in the run) — used
   // by the dashboard detail view for non-Ericsson models.
   app.get("/sim/instance/:id", async (req) => genericInstanceDetail((req.params as any).id));
+
+  // ---------------- Source adapters (Part 2.2) ----------------
+  // Registered packs' adapters. Additive + model-generic; the registry is filled
+  // by loadPacks() at boot and on every ontology reload.
+  app.get("/api/adapters", async () =>
+    listAdapters().map((a) => ({
+      id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+    })),
+  );
+  app.get("/api/adapters/:id", async (req, reply) => {
+    const a = getAdapter((req.params as any).id);
+    if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
+    return {
+      id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+      introspect: await a.introspect(), mapping: await a.mapping(), health: await a.healthcheck(),
+    };
+  });
+  // Pull a bounded batch into the ingestion (gen_) tables, stamped with the
+  // adapter's provenance mode.
+  app.post("/api/adapters/:id/pull", async (req, reply) => {
+    try {
+      const limit = Number((req.body as any)?.limit ?? 10);
+      return await ingestPull((req.params as any).id, { limit });
+    } catch (err: any) {
+      return reply.code(400).send({ error: "PULL_FAILED", message: err?.message ?? String(err) });
+    }
+  });
 
   // ---------------- Chat assistant ----------------
   app.get("/chat/info", async () => ({
@@ -424,7 +461,7 @@ export function registerRoutes(app: FastifyInstance) {
       const last = await prisma.eventLog.findFirst({
         where: { demandId: d.id },
         orderBy: { occurredAt: "desc" },
-        select: { eventName: true, eventRef: true, occurredAt: true, businessAt: true, boundedContext: true },
+        select: { eventName: true, eventRef: true, occurredAt: true, businessAt: true, boundedContext: true, provenance: true },
       });
       // dwellSeconds = real wall-clock idleness since the last event the user
       // triggered (good for "how long ago did I click step forward on this one").

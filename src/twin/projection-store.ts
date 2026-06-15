@@ -68,6 +68,10 @@ function createTableSql(entity: EntitySchema): string {
   if (!declared.has("version")) cols.push(`${ident("version")} INTEGER NOT NULL DEFAULT 0`);
   if (!declared.has("createdAt")) cols.push(`${ident("createdAt")} TEXT`);
   if (!declared.has("updatedAt")) cols.push(`${ident("updatedAt")} TEXT`);
+  // Provenance of the current row state (simulated | recorded | live). Null →
+  // falls back to the bounded context's mode at read time. Written by adapters
+  // when they pull real data; synthesized rows leave it null (= simulated).
+  if (!declared.has("_provenance")) cols.push(`${ident("_provenance")} TEXT`);
   return `CREATE TABLE ${phys(entity.name)} (${cols.join(", ")})`;
 }
 
@@ -100,6 +104,14 @@ export async function applyModelTables(ontology: Ontology): Promise<ApplyResult>
     created.push(entity.name);
   }
   return { dropped, created };
+}
+
+/** Create the projection table for ONE entity if it doesn't exist yet (additive;
+ * never drops). Used by adapters that ingest into an entity's gen_ table without
+ * a full model apply. */
+export async function ensureTable(entity: EntitySchema): Promise<void> {
+  if (await tableExists(entity.name)) return;
+  await prisma.$executeRawUnsafe(createTableSql(entity));
 }
 
 /** Does a projection table exist for this logical entity name? */

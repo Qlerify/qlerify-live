@@ -221,3 +221,152 @@ call); the generator only writes the .gen skeleton, so a brand-new command still
 
 **Next:** Increment 2 (model write-path) per §5, or migrate a second bounded context to prove
 the generator generalizes beyond SAP.
+
+### Increment 1b — STATUS: DONE (2026-06-14) — "swap reconfigures everything deterministic"
+
+Goal: a full ontology swap reconfigures everything that *can* be model-derived; only the
+AI/hand-written business code remains to (re)author, and it's auto-stubbed so the app still
+compiles and boots. Plus an irreversible-drop warning before any projection table is dropped.
+
+Built and verified:
+- **Overlay sidecar** `.qlerify/overlay.json` (order/phase/derived keyed by event key), merged +
+  validated inside `loadOntology` (stale keys fail loudly like a dangling `$ref`), hot-reloaded
+  (watch extended to overlay.json). `OntologyEvent` gains `order/phase/derived`; new
+  `Ontology.linearOrder()` (overlay order → topological fallback).
+- **`registry.ts` fully model-derived** — the hardcoded 28-entry `STEP_SEQUENCE` is GONE; `EVENTS`
+  is built from `linearOrder()` + overlay phase/derived. `EventDef` relaxed to `string`/`number`.
+- **`auth.ts` roles model-derived** — the 16-string `Role` union is GONE (`type Role = string`);
+  runtime validates against `getOntology().roles`.
+- **Conformance test model-relative** — no more magic 28/7/16; asserts internal consistency
+  (linearOrder covers events, every role ∈ model.roles, EVENTS ≡ model events in linear order).
+- **Prisma schema generator** `src/kernel/codegen/schema.ts` — emits a valid `schema.prisma` from
+  `ontology.entities` (type map, required→nullable, version+timestamps, string FKs, EventLog infra
+  table preserved verbatim with a generic `scopeId`). Output passes `prisma validate`.
+- **Swap orchestrator** `src/kernel/codegen/swap.ts` + `npm run swap` — read-only `swapPreview()`
+  diffs current tables vs the new model (dropped / created / kept), the CLI prints a prominent
+  **IRREVERSIBLE drop warning** and is a safe DRY RUN unless `--yes`; `applySwap()` writes schema +
+  a fresh overlay + regenerates skeletons for every BC. `GET /api/model/swap-preview` feeds the UI.
+- **Generator stubs `.logic.ts`** for any command without one (throwing `apply`, `detect→false`,
+  stub `DESCRIBE`) so a freshly-swapped domain compiles/boots; never overwrites real logic.
+- **Dynamic command routes** — generated commands mount from the codegen registry
+  (`registry.generated.ts` now carries handler + route); the 4 hand-listed SAP routes were removed.
+
+Proven: tsc clean · **105/105 tests** · happy path 34 events · SAP routes mount dynamically and
+serve over HTTP · swap dry-run on a **different domain** (healthcare Patient/Appointment) correctly
+flags all 16 Ericsson tables as permanently-dropped + the 2 new as created, with roles/events/
+linearOrder fully model-derived — then restored byte-clean.
+
+**The deterministic "except" boundary** (what a swap does NOT auto-generate — the AI/hand bucket,
+listed by the swap warning): `*.logic.ts` bodies, `src/{bc}/queries.ts`, `simulator/{runner,
+stepper}.ts`, `events/derived.ts`, `events/bus.ts` `resolveDemandId` (still demand-specific), and
+`web/app.js` panels. These are statically imported on the boot path, so completing a real swap to
+a new domain still requires regenerating/removing them — that's the next increment (pack-loader +
+generalized scope resolver + the queries/widget generators from Parts 4/5).
+
+**Next:** generalize the boot path (pack-loader so deleting old BC files doesn't break boot) +
+`bus.ts` scope resolver from the model, OR Increment 2 (model write-path).
+
+### Increment 1d — STATUS: DONE (2026-06-14) — live model apply (drop/create tables on swap)
+
+Goal: swapping the model rebuilds everything LIVE — drop/create projection tables in-process, no
+`prisma generate`, no restart — with a loader. Insight (user's): projection tables are disposable,
+so manage them with raw SQL decoupled from Prisma's typed client.
+
+- **Raw-SQL projection store** `src/twin/projection-store.ts` — model-driven CREATE/DROP TABLE +
+  generic row ops (find/insert/update with optimistic version) via `$executeRawUnsafe`/
+  `$queryRawUnsafe`. `applyModelTables()` drops every projection table (keeps EventLog) and creates
+  the current model's entity tables. In-process, synchronous, no restart.
+- **`base.ts` → projection store** — the generic base command now persists via raw SQL (not typed
+  prisma delegates), so a freshly-applied model's tables are usable immediately. `resolveBinding`
+  is async + checks the raw table exists.
+- **Live apply** `src/twin/apply.ts` + `POST /api/model/apply` + `GET /api/model/apply-status` —
+  reloads ontology, writes a fresh overlay (clears stale keys), drops/recreates tables; a tiny
+  status object backs the loader.
+- **Generic command route** `POST /commands/:bc/:name` — dispatches ANY model command via the base
+  command (role + required-field checks from the model), so a swapped model is runnable with ZERO
+  codegen/restart. Static (generated/authored) routes take precedence.
+- **Stale overlay made non-fatal** (model.ts) — a leftover overlay no longer blocks a swapped model
+  from loading; `staleOverlayKeys` surfaced at `/sim/registry-status`.
+- **Model-driven labels** — `ontology.title` / `rootAggregate` (+ overlay `title`/`rootAggregate`
+  overrides) exposed via `/sim/meta`; the dashboard header/buttons/footer/tab-title follow the model.
+- **Frontend loader** `web/app.js` — full-screen overlay while fetching + rebuilding; "⤓ Fetch
+  model" now fetches+applies, new "⟳ Rebuild" applies the already-loaded model (for manual
+  workflow.json swaps); polls apply-status for live phase text.
+- **`/sim` simulator guard** — the Ericsson-wired stepper returns a clean 422 (not a 500) on a
+  non-Ericsson model.
+
+Proven on the live IAM (Identity & Access) model: apply dropped 16 Ericsson tables + created 6 IAM
+tables in-process; `RegisterAccount` ran via the generic route (status seeded from exampleData,
+event logged, wrong role → 403); page + loader + apply-status all work. Ericsson regression: tsc
+clean, 105/105 tests, happy path 34 events.
+
+### Increment 1e — STATUS: DONE (2026-06-14) — model-generic simulator (dashboard runs any model)
+
+Goal: the dashboard's "+ New" / step-through / detail work for ANY loaded model, not just Ericsson.
+
+- **Event scope override** `src/events/bus.ts` — `setScopeOverride`/`withScope(id, fn)`; `emit()` uses
+  it (else `resolveDemandId`). The generic sim runs a whole "run" with the root-instance id pinned, so
+  events group under it in EventLog (like Ericsson per-demand scoping) without the hardcoded FK-walk.
+- **Generic simulator** `src/twin/sim.ts` — `genericNewInstance` (create the root aggregate via its
+  create-command, scoped), `genericStep` (walk `linearOrder`, synthesize each command's args from
+  exampleData + an **FK-by-name heuristic** `xxxId`→instance-of-`Xxx`, inject the run's id for
+  update-shaped events, dispatch via the generic base command, soft-fail one step on error),
+  `genericListInstances`, `genericInstanceDetail`, `genericCurrentStep`, `isEricssonModel()`.
+- **`/sim` routes branched** — `/sim/demands` (GET+POST), `/sim/next`, `/sim/current-step`,
+  `/sim/run-all`, `/sim/reset` use the generic sim when `!isEricssonModel()`; new `/sim/instance/:id`;
+  `/sim/meta` carries an `ericsson` flag. Ericsson path unchanged.
+- **Generic dashboard UI** `web/app.js` — when `meta.ericsson===false`: list columns derived from the
+  root-aggregate rows; a generic detail view (root card + run event timeline + per-aggregate row
+  tables) reusing the `btn-back/next/all/reset` ids so the existing bindings drive it.
+
+Proven on the live IAM model: "+ New" created an Account; Run-all stepped all 8 events (Account
+created→confirmed→logged-in, then User/Org/Project/TeamMember/Workflow created and **FK-linked** by
+the heuristic); list + detail render generically. Ericsson regression: tsc, 105/105 tests, happy path
+34 events.
+
+**Fix (2026-06-15):** raw-SQL projection tables are namespaced with a `gen_` prefix
+(`src/twin/projection-store.ts`) so they can NEVER collide with Prisma-managed tables. Before this,
+`applyModelTables` dropped/recreated tables like `Demand`/`Project` as raw-SQL tables (TEXT
+`createdAt`), corrupting Prisma's DateTime reads (P2023) and colliding when a generic model reused a
+Prisma table name. Now `Demand` (Prisma) and `gen_Demand` (raw-SQL projection) are distinct; callers
+pass the logical entity name and the store maps to `gen_<name>`. Also: the dashboard ✕ now uses a
+dedicated `POST /sim/delete` + `genericDeleteInstance` which deletes the root row DIRECTLY by id (not
+only via the event log), so items always delete even if their events are missing/mismatched.
+
+**Limits (honest):** generic stepping synthesizes plausible data, not authored business linkage —
+`status` never advances (base never guesses lifecycle), and FK linking is name-heuristic only. For
+faithful behavior, author a command's `.logic.ts`. The whole IAM workflow now runs from the
+dashboard; richer per-aggregate detail/forms are future polish.
+
+### Increment 1c — STATUS: DONE (2026-06-14) — generic base command (no more throwing stubs)
+
+Goal: a brand-new command with no authored `.logic.ts` should WORK (not throw) by falling back to a
+deterministic base that uses the command's attributes + the entity's `exampleData`. Design hardened
+by a 3-stance + adversarial-synthesis workflow (`generic-base-command-design`).
+
+- **`src/commands/base.ts`** — `genericApply/genericDetect/genericDescribe(commandName, …)`, reading
+  the LIVE ontology by command name on every call (hot-reload-correct). **Create-vs-update** is
+  decided by hard evidence: a row for `args.id` → UPDATE; "command carries id" is the primary shape
+  signal; the DAG-root test is only a tie-breaker (it mis-classifies updates like OrderMaterial whose
+  sole predecessor belongs to another aggregate). **CREATE** builds a full row (args → columns,
+  remaining required columns from `exampleData[0]` type-coerced, id generated if absent), **seeds
+  `status` from `exampleData[0]`** (the canonical initial state; required everywhere → NOT-NULL would
+  else fire); an unfillable required column → soft `DomainError` (422), never a raw NOT-NULL 500.
+  **UPDATE** patches only the command's own non-id/non-status fields under an optimistic lock and
+  **never advances `status`** (lifecycle transitions stay authored logic). Everything emits via the
+  existing `emit()`, so log/fan-out/scope are identical to authored commands (unknown aggregate →
+  `demandId` null, no crash).
+- **Generator change** — `emit.ts` `logicStubContent` now writes a thin **delegating** stub
+  (`return genericApply(COMMAND, ctx)`), not a throwing one. Authoring a real `.logic.ts` (importing
+  nothing from base) cleanly overrides it; the generator never overwrites an existing logic file.
+
+Proven by integration test (temporary `Clinic`/`Patient` domain, then restored byte-clean): a
+brand-new `RegisterPatient` (no id, no status supplied) created a Patient with `status="REGISTERED"`
+seeded from exampleData, auto-id, emitted `PatientRegistered`; `AssignWard` updated `ward` with a
+version bump and **left status untouched**; detect flipped true; an update on a missing id raised
+`NotFoundError` (no phantom create); exactly one row existed. 13/13 assertions. Full suite still
+105/105, tsc clean, happy path OK.
+
+**Net:** "drop in a new command, no AI" → it WORKS (create/update + emit) instead of throwing; the
+AI/hand `.logic.ts` is now an *enhancement* (guards, transitions, cross-aggregate effects), not a
+prerequisite for the command to function.

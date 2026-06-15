@@ -53,6 +53,13 @@ export function businessTimeForStep(stepIdx: number): Date {
   return new Date(SIM_BASE_MS + hours * 3_600_000);
 }
 
+// An arbitrary (non-Ericsson) model has no curated per-step durations, so the
+// generic simulator advances one business day per step from the same base — so
+// every step still carries a distinct, readable business date in the timeline.
+export function genericBusinessTimeForStep(stepIdx: number): Date {
+  return new Date(SIM_BASE_MS + stepIdx * 24 * 3_600_000);
+}
+
 // Module-level "current simulated time" — set by the stepper before each
 // step body runs, read by emit() when it writes the EventLog row. Cleared
 // after the step so out-of-band emits (e.g. derived-event subscribers

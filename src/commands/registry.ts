@@ -6,13 +6,18 @@
 // the HTTP layer having to know which commands exist — it asks the registry.
 
 import type { DetectInput, DetectResult } from "./runtime.js";
+import type { Role } from "../auth.js";
 
 export interface CommandRegistration {
   commandName: string; // OrderMaterial
   boundedContext: string; // SAP
   handlerName: string; // orderMaterial
+  route: string; // /commands/sap/order-material
   eventRef: string; // #/domainEvents/MaterialOrdered
   role: string; // Buyer
+  /** The generated command handler — lets the HTTP layer mount routes for any
+   * generated command without the route table naming it explicitly. */
+  handler: (args: any, role: Role) => Promise<unknown>;
   detect: (input: DetectInput) => Promise<DetectResult>;
   DESCRIBE: string;
 }

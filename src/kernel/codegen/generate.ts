@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { QLERIFY_DIR } from "../../ontology/model.js";
 import { descriptorsForBoundedContext, sha256 } from "./introspect.js";
-import { genContent, barrelContent, registryContent } from "./emit.js";
+import { genContent, barrelContent, registryContent, logicStubContent } from "./emit.js";
 import { buildLogicPrompt } from "./ai.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -62,9 +62,14 @@ export function generateBoundedContext(bc: string): GenerateResult {
     const genStatus = writeIfChanged(join(ROOT, genRel), genContent(d));
     track(genRel, genStatus);
 
+    // Author the AI/hand region only if absent — NEVER overwrite real logic.
+    // A fresh command (e.g. after a model swap) gets a throwing stub so the app
+    // still compiles and boots; the stub is then replaced by hand or codegen:ai.
     const logicRel = `${d.dir}/${d.kebab}.logic.ts`;
     if (!existsSync(join(ROOT, logicRel))) {
-      warnings.push(`missing logic file ${logicRel} — author apply()/detect()/DESCRIBE (codegen ai or by hand)`);
+      writeIfChanged(join(ROOT, logicRel), logicStubContent(d));
+      written.push(logicRel);
+      warnings.push(`${logicRel} — generic base command in effect (works as-is); author apply()/detect() to add guards/cross-aggregate effects (npm run codegen:ai -- ${d.commandName} ${bc})`);
     }
 
     const prevRec = prev.commands?.[d.commandName];

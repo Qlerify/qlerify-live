@@ -69,8 +69,16 @@ const state = {
   demands: [],
   events: [],
   busy: false,
+  // model-derived UI labels (filled from /sim/meta); defaults keep the UI sane
+  // before the first fetch / if the endpoint is unavailable.
+  meta: { title: "Workflow", rootAggregate: "Item", rootAggregatePlural: "Items", boundedContextCount: 0, aggregateCount: 0, eventCount: 0 },
+  // model rebuild overlay (drop/recreate projection tables on swap)
+  rebuilding: false,
+  rebuildPhase: "",
+  rebuildError: null,
   // detail view
   demandId: null,
+  instance: null,   // generic (non-Ericsson) per-run detail from /sim/instance
   log: [],
   snapshot: null,
   prev: null,
@@ -101,7 +109,7 @@ const state = {
 async function api(path, opts = {}) {
   const headers = { "x-role": role, ...(opts.headers || {}) };
   if (opts.body != null) headers["Content-Type"] = "application/json";
-  const res = await fetch(API + path, { ...opts, headers });
+  const res = await fetch(API + path, { cache: "no-store", ...opts, headers });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${path}: ${text}`);
@@ -461,19 +469,51 @@ async function reloadFromModel() {
   else await loadDashboard();
 }
 
-async function fetchModel() {
-  if (state.modelBusy) return;
-  state.modelBusy = true; state.modelMsg = null; render();
+// Fetch a new model AND rebuild everything (drop/recreate the projection tables
+// to match it), behind a loader. `fetch:false` just rebuilds the already-loaded
+// model — used after a manual workflow.json swap.
+async function rebuildModel({ fetch = true } = {}) {
+  if (state.rebuilding) return;
+  state.rebuilding = true;
+  state.rebuildError = null;
+  state.rebuildPhase = fetch ? "Fetching the latest model…" : "Loading model…";
+  render();
+  let poll = null;
   try {
-    const res = await api("/api/model/fetch", { method: "POST", body: "{}" });
-    state.modelMsg = { ok: true, text: res.message };
+    if (fetch) await api("/api/model/fetch", { method: "POST", body: "{}" });
+    state.rebuildPhase = "Rebuilding — dropping & recreating projection tables…";
+    render();
+    // Poll the server's apply phase so the loader shows real progress.
+    poll = setInterval(async () => {
+      try {
+        const s = await api("/api/model/apply-status");
+        if (s && s.message && state.rebuilding) { state.rebuildPhase = s.message; render(); }
+      } catch { /* ignore */ }
+    }, 300);
+    const res = await api("/api/model/apply", { method: "POST", body: "{}" });
+    clearInterval(poll); poll = null;
+    state.rebuildPhase = (res.status && res.status.message) || "Done.";
+    render();
     await reloadFromModel();
-  } catch (e) {
-    state.modelMsg = { ok: false, text: e.message };
-  } finally {
-    state.modelBusy = false; render();
+    state.rebuilding = false;
+    state.modelMsg = { ok: true, text: `Model applied — dropped ${(res.dropped || []).length}, created ${(res.created || []).length} table(s).` };
+    render();
     flashModelMsg();
+  } catch (e) {
+    if (poll) clearInterval(poll);
+    state.rebuildError = e.message;
+    render();
   }
+}
+
+function dismissRebuild() {
+  state.rebuilding = false;
+  state.rebuildError = null;
+  render();
+}
+
+async function fetchModel() {
+  return rebuildModel({ fetch: true });
 }
 
 async function rollModel(direction) {
@@ -658,7 +698,8 @@ function modelFileDialog() {
           </div>
           <div class="flex items-center gap-1.5">
             <button id="btn-model-back" ${disBack ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll back to previous model version">↩</button>
-            <button id="btn-model-fetch" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Fetch the latest model from the Qlerify modeller">${state.modelBusy ? "⏳ Syncing…" : "⤓ Fetch model"}</button>
+            <button id="btn-model-fetch" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Fetch the latest model from the Qlerify modeller, then rebuild (drop & recreate projection tables)">${state.modelBusy ? "⏳ Syncing…" : "⤓ Fetch model"}</button>
+            <button id="btn-model-rebuild" class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Rebuild from the currently loaded model — drop & recreate the projection tables (use after editing workflow.json directly)">⟳ Rebuild</button>
             <button id="btn-model-fwd" ${disFwd ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll forward to next model version">↪</button>
             <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
             ${effective
@@ -749,6 +790,7 @@ function modelToast() {
 
 function bindModelControls() {
   document.getElementById("btn-model-fetch")?.addEventListener("click", fetchModel);
+  document.getElementById("btn-model-rebuild")?.addEventListener("click", () => rebuildModel({ fetch: false }));
   document.getElementById("btn-model-back")?.addEventListener("click", () => rollModel("back"));
   document.getElementById("btn-model-fwd")?.addEventListener("click", () => rollModel("forward"));
   document.getElementById("btn-model-view")?.addEventListener("click", openModelFile);
@@ -834,11 +876,20 @@ async function onHashChange() {
 // ---------------------------------------------------------------------------
 
 async function loadDashboard() {
-  const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events"), loadRegistryStatus()]);
+  const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events"), loadRegistryStatus(), loadMeta()]);
   state.demands = demands;
   state.events = events;
   if (!state.model) await loadModelStatus();
   render();
+}
+
+// Model-derived UI labels — fetched once and reused; failures keep the defaults.
+async function loadMeta() {
+  try {
+    const meta = await api("/sim/meta");
+    state.meta = meta;
+    document.title = `${meta.title} — Live`;
+  } catch { /* keep defaults */ }
 }
 
 async function createDemand() {
@@ -858,11 +909,13 @@ async function createDemand() {
 
 async function deleteDemand(demandId, ev) {
   ev.stopPropagation();
-  if (!confirm("Reset this demand and remove all its data?")) return;
+  if (!confirm("Remove this item and all its data?")) return;
   state.busy = true; render();
   try {
-    await api("/sim/reset", { method: "POST", body: JSON.stringify({ demandId }) });
+    await api("/sim/delete", { method: "POST", body: JSON.stringify({ demandId }) });
     await loadDashboard();
+  } catch (e) {
+    alert("Delete failed: " + e.message);
   } finally {
     state.busy = false; render();
   }
@@ -887,8 +940,27 @@ function staleness(dwellSeconds, isComplete) {
   return                            { dot: "bg-rose-500",   label: "stalled", textCls: "text-rose-700"  };
 }
 
-function dashboardRow(d) {
-  const pct = Math.round((d.progress / d.total) * 100);
+function dashboardRow(d, cols) {
+  const pct = Math.round((d.progress / d.total) * 100) || 0;
+  // Generic (non-Ericsson): columns derived from the row's own fields.
+  if (cols) {
+    const cells = cols.map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
+    return `
+      <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#demand/${d.id}">
+        <td class="px-4 py-3"><span class="inline-block w-2 h-2 rounded-full bg-stone-300"></span></td>
+        <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0, 16)}…</td>
+        ${cells}
+        <td class="px-4 py-3">${d.status ? pill(d.status, d.status) : "—"}</td>
+        <td class="px-4 py-3 w-64">
+          <div class="flex items-center gap-2">
+            <div class="flex-1 h-1.5 bg-stone-200 rounded overflow-hidden"><div class="h-1.5 bg-amber-400 transition-all" style="width:${pct}%"></div></div>
+            <div class="text-xs text-stone-500 tabular-nums w-12 text-right">${d.progress}/${d.total}</div>
+          </div>
+        </td>
+        <td class="px-4 py-3 text-xs">${d.lastEvent ? `<div class="text-stone-700">${escapeHtml(d.lastEvent.eventName)}</div>` : `<span class="text-stone-400">no events yet</span>`}</td>
+        <td class="px-4 py-3 text-right"><button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this run">✕</button></td>
+      </tr>`;
+  }
   const lastBC = d.lastEvent?.boundedContext ?? "";
   const isComplete = d.status === "DELIVERED";
   const tone = staleness(d.dwellSeconds, isComplete);
@@ -924,18 +996,32 @@ function dashboardRow(d) {
   `;
 }
 
+// Generic list columns derived from the root-aggregate rows (non-Ericsson models).
+function genericColumns(rows) {
+  const reserved = new Set(["id", "version", "createdAt", "updatedAt", "status", "progress", "total", "lastEvent", "dwellSeconds"]);
+  const first = rows[0] || {};
+  return Object.keys(first).filter((k) => !reserved.has(k)).slice(0, 4);
+}
+
 function dashboardView() {
-  const rows = state.demands.map(dashboardRow).join("");
+  const m = state.meta;
+  const ericsson = m.ericsson !== false;
+  const cols = ericsson ? null : genericColumns(state.demands);
+  const rows = state.demands.map((d) => dashboardRow(d, cols)).join("");
   const empty = state.demands.length === 0;
+  const plural = m.rootAggregatePlural, singular = m.rootAggregate;
+  const headerCells = ericsson
+    ? `<th class="px-4 py-2 font-medium">customer</th><th class="px-4 py-2 font-medium">product</th><th class="px-4 py-2 font-medium">qty</th><th class="px-4 py-2 font-medium">week</th>`
+    : (cols || []).map((c) => `<th class="px-4 py-2 font-medium">${escapeHtml(c)}</th>`).join("");
   return `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-6">
         <div class="flex-1">
-          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Ericsson HW Flow — Demands</div>
-          <div class="text-stone-900 text-xl font-semibold leading-tight">All demands in flight</div>
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         ${modelControls()}
-        <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New demand</button>
+        <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
@@ -943,8 +1029,8 @@ function dashboardView() {
       ${empty ? `
         <div class="max-w-md mx-auto mt-16 text-center">
           <div class="text-stone-400 text-5xl mb-3">∅</div>
-          <div class="text-lg font-medium text-stone-700">No demands yet</div>
-          <div class="text-sm text-stone-500 mt-1">Click <b>+ New demand</b> to start a fresh customer order through the workflow.</div>
+          <div class="text-lg font-medium text-stone-700">No ${escapeHtml(plural.toLowerCase())} yet</div>
+          <div class="text-sm text-stone-500 mt-1">Click <b>+ New ${escapeHtml(singular.toLowerCase())}</b> to start a fresh instance through the workflow.</div>
         </div>
       ` : `
         <div class="rounded-lg border border-stone-200 bg-white overflow-hidden">
@@ -953,10 +1039,7 @@ function dashboardView() {
               <tr class="text-left text-[11px] uppercase tracking-wide text-stone-500">
                 <th class="px-4 py-2 font-medium w-6"></th>
                 <th class="px-4 py-2 font-medium">id</th>
-                <th class="px-4 py-2 font-medium">customer</th>
-                <th class="px-4 py-2 font-medium">product</th>
-                <th class="px-4 py-2 font-medium">qty</th>
-                <th class="px-4 py-2 font-medium">week</th>
+                ${headerCells}
                 <th class="px-4 py-2 font-medium">status</th>
                 <th class="px-4 py-2 font-medium">progress</th>
                 <th class="px-4 py-2 font-medium">last activity</th>
@@ -969,9 +1052,9 @@ function dashboardView() {
       `}
     </main>
     <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
-      <span>Generated from Qlerify workflow <span class="mono">b0b1362b…</span>.</span>
+      <span>Generated from the live Qlerify model.</span>
       <span class="mx-2">·</span>
-      <span>${state.events.length} events · ${BC_PANELS.length} systems · 16 aggregates</span>
+      <span>${state.events.length} events · ${state.meta.boundedContextCount} systems · ${state.meta.aggregateCount} aggregates</span>
     </footer>
   `;
 }
@@ -992,6 +1075,24 @@ function bindDashboard() {
 // ---------------------------------------------------------------------------
 
 async function loadDetail() {
+  await loadMeta();
+  // Generic (non-Ericsson): per-run detail from the model-generic simulator.
+  if (state.meta.ericsson === false) {
+    const [instance, events, cur] = await Promise.all([
+      api("/sim/instance/" + encodeURIComponent(state.demandId)),
+      api("/sim/events"),
+      api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
+      loadRegistryStatus(),
+    ]);
+    state.instance = instance;
+    state.events = events;
+    // newest-first so lastEventCaption() / businessByStep read the latest first
+    // (matches the Ericsson /sim/event-log desc ordering).
+    state.log = (instance.events || []).slice().reverse();
+    state.currentIndex = cur.index;
+    render();
+    return;
+  }
   const [events, snapshot, log, cur, demands] = await Promise.all([
     api("/sim/events"),
     api("/sim/snapshot?demandId=" + encodeURIComponent(state.demandId)),
@@ -1278,6 +1379,7 @@ function bcPanel(panel) {
 }
 
 function detailView() {
+  if (state.meta.ericsson === false) return genericDetailView();
   return `
     ${detailHeader()}
     ${timeline()}
@@ -1288,12 +1390,70 @@ function detailView() {
       </div>
     </main>
     <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
-      <span>Generated from Qlerify workflow <span class="mono">b0b1362b…</span>.</span>
+      <span>Generated from the live Qlerify model.</span>
       <span class="mx-2">·</span>
-      <span>${state.events.length} events · ${BC_PANELS.length} systems · 16 aggregates</span>
+      <span>${state.events.length} events · ${state.meta.boundedContextCount} systems · ${state.meta.aggregateCount} aggregates</span>
     </footer>
   `;
 }
+
+// Model-generic per-run detail: header (reuses the btn-back/next/all/reset ids so
+// the existing bindings work), the run's events, and the rows it created.
+function genericDetailView() {
+  const inst = state.instance || {};
+  const root = inst.root || {};
+  const total = state.events.length;
+  const m = state.meta;
+  const reserved = new Set(["id", "version", "createdAt", "updatedAt"]);
+  const rootFields = Object.entries(root).filter(([k]) => !reserved.has(k));
+  const rootCard = `
+    <div class="rounded-lg border border-stone-200 bg-white p-4">
+      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold mb-2">${escapeHtml(m.rootAggregate)}</div>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+        ${rootFields.map(([k, v]) => `<div><div class="text-[11px] text-stone-500">${escapeHtml(k)}</div><div class="text-sm text-stone-800 break-words">${k === "status" ? pill(String(v), String(v)) : escapeHtml(String(v ?? "—"))}</div></div>`).join("")}
+      </div>
+    </div>`;
+  const entityCards = Object.entries(inst.entities || {})
+    .filter(([agg]) => agg !== m.rootAggregate)
+    .map(([agg, rows]) => genericEntityCard(agg, rows)).join("");
+  return `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4 flex items-center gap-4">
+        <button id="btn-back" class="p-1.5 -ml-1 rounded text-stone-500 hover:text-stone-900 hover:bg-stone-100" title="Back to dashboard">←</button>
+        <div class="flex-1 min-w-0">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} · ${root.id ? escapeHtml(String(root.id).slice(0, 16)) + "…" : ""}</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(m.rootAggregate)} ${root.status ? pill(String(root.status), String(root.status)) : ""}</div>
+        </div>
+        <div class="text-sm text-stone-500 mr-2 tabular-nums">step <span class="font-semibold text-stone-800">${state.currentIndex}</span> / ${total}</div>
+        <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
+        <button id="btn-next" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
+        <button id="btn-all" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>
+        <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
+      </div>
+    </header>
+    ${timeline()}
+    ${lastEventCaption()}
+    <main class="flex-1 overflow-auto p-6 flex flex-col gap-4">
+      ${rootCard}
+      ${entityCards ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">${entityCards}</div>` : ""}
+    </main>`;
+}
+
+function genericEntityCard(agg, rows) {
+  const reserved = new Set(["version", "createdAt", "updatedAt"]);
+  const cols = rows[0] ? Object.keys(rows[0]).filter((k) => !reserved.has(k)).slice(0, 5) : [];
+  return `
+    <div class="rounded-lg border border-stone-200 bg-white p-3">
+      <div class="font-semibold text-stone-800 text-sm mb-2">${escapeHtml(agg)} <span class="text-stone-400 font-normal">(${rows.length})</span></div>
+      <table class="w-full text-xs">
+        <thead><tr class="text-left text-stone-400">${cols.map((c) => `<th class="py-1 pr-2 font-medium">${escapeHtml(c)}</th>`).join("")}</tr></thead>
+        <tbody class="divide-y divide-stone-100">
+          ${rows.map((r) => `<tr>${cols.map((c) => `<td class="py-1 pr-2 text-stone-700 ${c === "id" ? "mono text-stone-400" : ""}">${c === "status" ? pill(String(r[c]), String(r[c])) : escapeHtml(String(c === "id" ? String(r[c]).slice(0, 10) + "…" : (r[c] ?? "—")))}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 
 function bindDetail() {
   bindModelControls();
@@ -1310,15 +1470,46 @@ function bindDetail() {
 // Render dispatcher
 // ---------------------------------------------------------------------------
 
+// Full-screen loader shown while a model is being applied (tables dropped &
+// recreated). Also surfaces an error with a dismiss button.
+function rebuildOverlay() {
+  if (!state.rebuilding && !state.rebuildError) return "";
+  if (state.rebuildError) {
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm">
+        <div class="bg-white rounded-xl shadow-2xl border border-stone-200 px-8 py-7 w-[440px] text-center">
+          <div class="text-rose-500 text-4xl mb-3">⚠️</div>
+          <div class="text-stone-900 font-semibold mb-1">Rebuild failed</div>
+          <div class="text-sm text-stone-600 mb-4 break-words">${escapeHtml(state.rebuildError)}</div>
+          <button id="btn-rebuild-dismiss" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Dismiss</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm">
+      <div class="bg-white rounded-xl shadow-2xl border border-stone-200 px-8 py-7 w-[440px] text-center">
+        <div class="mx-auto mb-4 h-10 w-10 rounded-full border-[3px] border-stone-200 border-t-amber-500 animate-spin"></div>
+        <div class="text-stone-900 font-semibold mb-1">Rebuilding from the model</div>
+        <div class="text-sm text-stone-600 min-h-[20px]">${escapeHtml(state.rebuildPhase || "Working…")}</div>
+        <div class="text-[11px] text-stone-400 mt-3">Dropping &amp; recreating projection tables · in-process, no restart</div>
+      </div>
+    </div>`;
+}
+
+function bindRebuildOverlay() {
+  document.getElementById("btn-rebuild-dismiss")?.addEventListener("click", dismissRebuild);
+}
+
 function render() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
   const prevDialogScroll = document.getElementById("model-file-scroll")?.scrollTop ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
 
   if (state.view === "detail") {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${detailView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}`;
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${detailView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
     bindDetail();
     bindChat();
+    bindRebuildOverlay();
 
     const scroller = document.getElementById("timeline-scroll");
     if (scroller) scroller.scrollLeft = prevScroll;
@@ -1336,9 +1527,10 @@ function render() {
       }
     }
   } else {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${dashboardView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}`;
+    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${dashboardView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
     bindDashboard();
     bindChat();
+    bindRebuildOverlay();
   }
 
   // Preserve the model viewer's scroll position across re-renders so polling /

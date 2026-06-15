@@ -6,26 +6,12 @@ import { AuthError } from "./errors.js";
 import type { FastifyRequest } from "fastify";
 import { getOntology } from "./ontology/model.js";
 
-// The compile-time Role union must stay in sync with the model's roles; the
-// runtime set of valid roles is sourced from the ontology (see
-// tests/ontology/conformance.test.ts, which locks the two together).
-export type Role =
-  | "Product Manager"
-  | "Designer"
-  | "Configuration Manager"
-  | "Planner"
-  | "Supply Planner"
-  | "Buyer"
-  | "Supplier"
-  | "Production Planner"
-  | "Goods Receiving"
-  | "Production"
-  | "Test Engineer"
-  | "Quality Engineer"
-  | "Warehouse"
-  | "Logistics"
-  | "Customer"
-  | "Automation";
+// Roles are model-derived: the valid set is whatever the live ontology declares
+// (getOntology().roles), so swapping the model swaps the roles with zero code
+// change. The type is therefore an open `string` rather than a hardcoded union;
+// the runtime guard below — and the conformance test — enforce that every role
+// in play actually exists in the model.
+export type Role = string;
 
 export function roleFromRequest(req: FastifyRequest): Role {
   const headerRole = (req.headers["x-role"] || "").toString();

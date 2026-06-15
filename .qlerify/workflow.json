@@ -1,3276 +1,795 @@
 {
   "$schema": "https://app.qlerify.com/schemas/domain-model/v1.json",
   "version": 1,
-  "boundedContext": "Helix",
+  "boundedContext": "Identity & Access",
   "roles": [
-    "Product Manager",
-    "Designer",
-    "Configuration Manager",
-    "Planner",
-    "Supply Planner",
-    "Buyer",
-    "Supplier",
-    "Automation",
-    "Production Planner",
-    "Goods Receiving",
-    "Production",
-    "Test Engineer",
-    "Quality Engineer",
-    "Warehouse",
-    "Logistics",
-    "Customer"
+    "User",
+    "Automation"
   ],
   "domainEvents": {
-    "HardwareDemandCreated": {
-      "event": "Hardware Demand Created",
-      "role": "Product Manager",
+    "AccountRegistered": {
+      "event": "Account Registered",
+      "role": "User",
       "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/ProjectCreated"
-        }
+        "start"
       ],
       "command": {
-        "$ref": "#/schemas/commands/CreateDemand"
+        "$ref": "#/schemas/commands/RegisterAccount"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/Demand"
+        "$ref": "#/schemas/entities/Account"
       },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListDemands",
-          "description": "List Demands"
-        }
-      ],
       "acceptanceCriteria": [
-        "Given a customer hardware need exists, When the product manager submits a new demand, Then a demand row is created with status NEW"
+        "Given a visitor provides a valid email, password and required profile fields and agrees to the terms, When they submit sign-up, Then a Cognito account is created in UNCONFIRMED state and a confirmation-code email is sent.",
+        "Given an email that is already registered, When the visitor submits sign-up, Then sign-up is rejected with an 'email already taken' message directing them to log in or reset password.",
+        "Given a password that violates the password policy, When the visitor submits sign-up, Then sign-up is rejected with an invalid-password message."
       ]
     },
-    "BuildQuantityDefined": {
-      "event": "Build Quantity Defined",
-      "role": "Planner",
+    "AccountConfirmed": {
+      "event": "Account Confirmed",
+      "role": "User",
       "follows": [
         {
-          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/BOMFrozenAtDS1"
+          "$ref": "#/domainEvents/AccountRegistered"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/DefineBuildQuantity"
+        "$ref": "#/schemas/commands/ConfirmAccount"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
+        "$ref": "#/schemas/entities/Account"
       },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetDemandWithBOMStatus",
-          "description": "Get Demand With BOM Status"
-        }
-      ],
       "acceptanceCriteria": [
-        "Given the BOM is frozen at DS1, When the planner defines the build quantity, Then a build_plan v1 with status DRAFT and N builds with status PLANNED are created"
+        "Given an unconfirmed account and a valid registration code, When the user submits the code, Then the account becomes CONFIRMED and the user is directed to log in.",
+        "Given an already-confirmed account, When the user submits a code, Then they are told it is already verified and redirected to login.",
+        "Given an expired registration code, When the user submits it, Then they are told the code expired and resend is unlocked."
       ]
     },
-    "MaterialDemandSpecified": {
-      "event": "Material Demand Specified",
-      "role": "Supply Planner",
+    "AccountLoggedIn": {
+      "event": "Account Logged In",
+      "role": "User",
       "follows": [
         {
-          "$ref": "#/domainEvents/BuildQuantityDefined"
+          "$ref": "#/domainEvents/AccountConfirmed"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/SpecifyMaterialDemand"
+        "$ref": "#/schemas/commands/LogIn"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
+        "$ref": "#/schemas/entities/Account"
       },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildWithBOM",
-          "description": "Get Build With BOM"
-        }
-      ],
       "acceptanceCriteria": [
-        "Given builds exist, When the supply planner specifies material demand, Then build_demand rows and draft purchase_orders are created"
-      ]
-    },
-    "MaterialShortageIdentified": {
-      "event": "Material Shortage Identified",
-      "role": "Automation",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/SAP/domainEvents/MaterialETAChanged"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/FlagMaterialShortage"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListBuildsAtRisk",
-          "description": "List Builds At Risk"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a purchase order confirmed_eta is later than a build planned_start, When the simulator detects the shortage, Then the build material_status becomes AT_RISK"
-      ]
-    },
-    "BuildPrioritySet": {
-      "event": "Build Priority Set",
-      "role": "Planner",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/EngineeringReleaseApproved"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/SetBuildPriority"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListBuilds",
-          "description": "List Builds"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given builds exist, When the planner sets priority, Then build.priority is updated"
-      ]
-    },
-    "BuildPlanUpdated": {
-      "event": "Build Plan Updated",
-      "role": "Planner",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BuildPrioritySet"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/UpdateBuildPlan"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildPlanDisruptions",
-          "description": "Get Build Plan Disruptions"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given an ETA change, ER approval, priority change, or site change occurred, When the planner triggers a replan, Then a new build_plan version with status DRAFT is created and the previous version is archived"
-      ]
-    },
-    "BuildPlanLocked": {
-      "event": "Build Plan Locked",
-      "role": "Planner",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BuildPlanUpdated"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/LockBuildPlan"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildPlanLockReadiness",
-          "description": "Get Build Plan Lock Readiness"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given DS2 is frozen and engineering_release is APPROVED and a work_order is CREATED, When the CM locks the latest build_plan, Then build_plan.status becomes LOCKED and locked_at is set"
-      ]
-    },
-    "BuildReleasedToSite": {
-      "event": "Build Released To Site",
-      "role": "Planner",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BuildPlanLocked"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ReleaseBuildToSite"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Compass/schemas/queries/ListProductionSites",
-          "description": "List Production Sites"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the build_plan is LOCKED, When the HWM releases the build to a site, Then build.site_id is set, build.status becomes RELEASED, and build_plan.status becomes RELEASED"
-      ]
-    },
-    "MaterialKitCompleted": {
-      "event": "Material Kit Completed",
-      "role": "Automation",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/SAP/domainEvents/MaterialReceivedAtSite"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/CompleteMaterialKit"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildMaterialStatus",
-          "description": "Get Build Material Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given every build_demand for a build has qty_available greater than or equal to qty_required, When the simulator detects completion, Then build.material_status becomes KIT_READY"
-      ]
-    },
-    "ProductionStarted": {
-      "event": "Production Started",
-      "role": "Production",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/MaterialKitCompleted"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/StartProduction"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildProductionReadiness",
-          "description": "Get Build Production Readiness"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the line is BOOKED and material is KIT_READY, When production begins, Then line_booking.status becomes RUNNING and build.status becomes IN_PROGRESS with actual_start set"
-      ]
-    },
-    "BuildReachedRTD": {
-      "event": "Build Reached RTD",
-      "role": "Quality Engineer",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Test/domainEvents/FirstArticleInspectionPassed"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/MarkBuildAsRTD"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildTestStatus",
-          "description": "Get Build Test Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given FAI passed and qty produced, When the build reaches RTD, Then build.status becomes RTD with actual_end set, line_booking.status becomes DONE, work_order.status becomes CLOSED, and N unit rows with status BUILT are created"
+        "Given a confirmed account with correct credentials and no MFA, When the user logs in, Then tokens are issued, a session is established, and they land on the dashboard.",
+        "Given correct credentials and MFA enabled, When the user logs in, Then an MFA (SOFTWARE_TOKEN_MFA) challenge is returned and a valid 6-digit TOTP code completes login.",
+        "Given an unconfirmed account, When the user attempts to log in, Then they are redirected to confirmation with an auto-resent code.",
+        "Given incorrect credentials, When the user logs in, Then login fails with 'Incorrect email or password.'"
       ]
     }
   },
   "schemas": {
     "commands": {
-      "CreateDemand": {
+      "RegisterAccount": {
         "required": [
-          "customerId",
-          "productName",
-          "qty",
-          "requestedWeek"
+          "email",
+          "password",
+          "firstname",
+          "lastname",
+          "company"
         ],
         "fields": [
           {
-            "name": "customerId",
+            "name": "email",
             "hideInForm": false
           },
           {
-            "name": "productName",
+            "name": "password",
             "hideInForm": false
           },
           {
-            "name": "qty",
+            "name": "firstname",
             "hideInForm": false
           },
           {
-            "name": "requestedWeek",
+            "name": "lastname",
+            "hideInForm": false
+          },
+          {
+            "name": "company",
+            "hideInForm": false
+          },
+          {
+            "name": "phoneNumber",
+            "hideInForm": false
+          },
+          {
+            "name": "referralSource",
+            "hideInForm": false
+          },
+          {
+            "name": "usageIntent",
             "hideInForm": false
           }
         ]
       },
-      "DefineBuildQuantity": {
+      "ConfirmAccount": {
         "required": [
-          "demandId",
-          "builds"
+          "email",
+          "confirmationCode"
         ],
         "fields": [
           {
-            "name": "demandId",
+            "name": "email",
             "hideInForm": false
           },
           {
-            "name": "builds",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Build"
-            },
-            "array": true,
-            "required": [
-              "buildNo",
-              "qty",
-              "plannedStart"
-            ],
-            "fields": [
-              {
-                "name": "buildNo"
-              },
-              {
-                "name": "qty"
-              },
-              {
-                "name": "plannedStart"
-              }
-            ],
+            "name": "confirmationCode",
             "hideInForm": false
           }
         ]
       },
-      "SpecifyMaterialDemand": {
+      "LogIn": {
         "required": [
-          "id",
-          "buildDemand"
+          "email",
+          "password"
         ],
         "fields": [
           {
-            "name": "id",
+            "name": "email",
             "hideInForm": false
           },
           {
-            "name": "buildDemand",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
-            },
-            "array": true,
-            "required": [
-              "partNumber",
-              "qtyRequired"
-            ],
-            "fields": [
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qtyRequired"
-              }
-            ],
+            "name": "password",
             "hideInForm": false
-          }
-        ]
-      },
-      "FlagMaterialShortage": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "SetBuildPriority": {
-        "required": [
-          "id",
-          "priority"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "priority",
-            "hideInForm": false
-          }
-        ]
-      },
-      "UpdateBuildPlan": {
-        "required": [
-          "demandId",
-          "reason"
-        ],
-        "fields": [
-          {
-            "name": "demandId",
-            "hideInForm": false
-          },
-          {
-            "name": "reason",
-            "hideInForm": false
-          }
-        ]
-      },
-      "LockBuildPlan": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ReleaseBuildToSite": {
-        "required": [
-          "id",
-          "siteId"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "siteId",
-            "hideInForm": false
-          }
-        ]
-      },
-      "CompleteMaterialKit": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "StartProduction": {
-        "required": [
-          "id",
-          "actualStart"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "actualStart",
-            "hideInForm": false
-          }
-        ]
-      },
-      "MarkBuildAsRTD": {
-        "required": [
-          "id",
-          "actualEnd"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "actualEnd",
-            "hideInForm": false
-          }
-        ]
-      }
-    },
-    "queries": {
-      "ListDemands": {
-        "description": "Browse all demands with their lifecycle status and simulator progress. Powers the multi-demand dashboard view.",
-        "entity": {
-          "$ref": "#/schemas/entities/Demand"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "customerId"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "progress",
-            "description": "Count of distinct domain events fired for this demand across the 28-event workflow (0-28).",
-            "computed": true
-          },
-          {
-            "name": "lastEventRef",
-            "description": "$ref of the most recent domain event recorded for this demand, or null if no events have fired yet.",
-            "computed": true
-          },
-          {
-            "name": "lastEventAt",
-            "description": "Timestamp of the most recent domain event recorded for this demand, or null if no events have fired yet.",
-            "computed": true
-          }
-        ]
-      },
-      "GetDemand": {
-        "description": "Read the demand that this project will be linked to.",
-        "entity": {
-          "$ref": "#/schemas/entities/Demand"
-        },
-        "fields": [
-          {
-            "name": "demandId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "customerId"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          }
-        ]
-      },
-      "GetDemandWithBOMStatus": {
-        "description": "Demand details enriched with whether its project BOM is frozen at DS1, used before defining build quantity.",
-        "entity": {
-          "$ref": "#/schemas/entities/Demand"
-        },
-        "fields": [
-          {
-            "name": "demandId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "projectStatus",
-            "description": "Latest design-state of the project's BOM (DRAFT, DS1, DS2_PROD).",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildWithBOM": {
-        "description": "Build context together with its project's BOM lines, used to compute material requirements.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "bomItems",
-            "description": "BOM lines pulled from the parent project of this build.",
-            "relatedEntity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
-            },
-            "fields": [
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qtyPerUnit"
-              }
-            ],
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsAtRisk": {
-        "description": "Builds whose confirmed PO ETA is later than the build's planned_start. Computed by the simulator after every ETA change.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "plannedStart"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "latestPoEta",
-            "description": "Maximum confirmed_eta across the build's purchase orders.",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuilds": {
-        "description": "Builds visible to the planner for prioritization.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "buildPlanId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "priority"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "materialStatus"
-          }
-        ]
-      },
-      "GetBuildPlanDisruptions": {
-        "description": "Current plan together with the disruption signals that justify a replan.",
-        "entity": {
-          "$ref": "#/schemas/entities/BuildPlan"
-        },
-        "fields": [
-          {
-            "name": "demandId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "version"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "etaSlips",
-            "description": "POs whose confirmed_eta moved later than the relevant build's planned_start.",
-            "computed": true
-          },
-          {
-            "name": "approvedEngineeringChanges",
-            "description": "ECs approved since the current plan version was created.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildPlanLockReadiness": {
-        "description": "Pre-flight check for the Lock gate: DS2 frozen, engineering release approved, work order created.",
-        "entity": {
-          "$ref": "#/schemas/entities/BuildPlan"
-        },
-        "fields": [
-          {
-            "name": "buildPlanId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "version"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "ds2Frozen",
-            "description": "True when all bom_items design_state is DS2_PROD.",
-            "computed": true
-          },
-          {
-            "name": "engineeringReleaseApproved",
-            "description": "True when the project's engineering_release is APPROVED.",
-            "computed": true
-          },
-          {
-            "name": "workOrderCreated",
-            "description": "True when a work_order exists for this plan.",
-            "computed": true
-          }
-        ]
-      },
-      "ListProductionSites": {
-        "description": "Available manufacturing sites.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/Compass/schemas/entities/ProductionSite"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "name"
-          }
-        ]
-      },
-      "GetBuildMaterialStatus": {
-        "description": "Build with its build_demand rollup; the simulator checks whether qty_available >= qty_required for every part.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "buildDemand",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
-            },
-            "fields": [
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qtyRequired"
-              },
-              {
-                "name": "qtyAvailable"
-              }
-            ]
-          },
-          {
-            "name": "isKitComplete",
-            "description": "True when every build_demand has qty_available >= qty_required.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildProductionReadiness": {
-        "description": "Build context with line booking and material readiness; production may only start when both gates are met.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "lineBookingStatus",
-            "description": "Latest line_booking.status for this build (BOOKED, RUNNING, DONE).",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsInProduction": {
-        "description": "Builds currently IN_PROGRESS, awaiting board test.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "status",
-            "description": "Filter on build.status (IN_PROGRESS).",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "actualStart"
-          }
-        ]
-      },
-      "ListBuildsReadyForFAI": {
-        "description": "Builds whose board tests have passed and are ready for First Article Inspection.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "boardTestsPassed",
-            "description": "True when every produced unit has a BOARD test_result with result PASS.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildTestStatus": {
-        "description": "Build with rollup of board test and FAI outcomes, used to confirm RTD readiness.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "boardTestsPassed",
-            "computed": true
-          },
-          {
-            "name": "faiPassed",
-            "description": "True when a FAI test_result with PASS exists.",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsReadyForPack": {
-        "description": "Builds at RTD with their associated units, awaiting pick and pack.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "status",
-            "description": "Filter on build.status (RTD).",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "units",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
-            },
-            "fields": [
-              {
-                "name": "id"
-              },
-              {
-                "name": "serialNo"
-              },
-              {
-                "name": "status"
-              }
-            ]
           }
         ]
       }
     },
     "entities": {
-      "Demand": {
-        "description": "A customer hardware order placed at the start of the flow; tracks the request from NEW through DELIVERED.",
+      "Account": {
+        "description": "Authentication identity managed by AWS Cognito; the credential and verification record behind a person's login.",
         "required": [
           "id",
-          "customerId",
-          "productName",
-          "qty",
-          "requestedWeek",
-          "status"
+          "email",
+          "status",
+          "firstname",
+          "lastname"
         ],
         "fields": [
           {
             "name": "id",
-            "description": "Unique identifier for the demand",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "customerId",
-            "description": "Customer who placed the demand",
+            "description": "Cognito subject/username identifying the account",
             "exampleData": [
-              "cust-10",
-              "cust-22",
-              "cust-07"
+              "a1b2c3d4-1111-2222-3333-444455556666",
+              "f0e9d8c7-aaaa-bbbb-cccc-ddddeeeeffff",
+              "12345678-90ab-cdef-1234-567890abcdef"
             ],
             "dataType": "string"
           },
           {
-            "name": "productName",
-            "description": "Product/variant the customer is ordering",
+            "name": "email",
+            "description": "Login email; the Cognito username, unique across accounts",
             "exampleData": [
-              "Radio Unit X",
-              "Baseband 6630",
-              "Antenna AIR 3239"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Number of units requested",
-            "exampleData": [
-              "20",
-              "5",
-              "100"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "requestedWeek",
-            "description": "ISO week the customer wants the units delivered",
-            "exampleData": [
-              "2026-W18",
-              "2026-W22",
-              "2026-W30"
+              "ada@example.com",
+              "grace@company.org",
+              "linus@mail.net"
             ],
             "dataType": "string"
           },
           {
             "name": "status",
-            "description": "Demand lifecycle status (NEW, PLANNED, DELIVERED)",
+            "description": "Cognito confirmation status",
             "exampleData": [
-              "NEW",
-              "PLANNED",
-              "DELIVERED"
-            ],
-            "dataType": "string"
-          }
-        ]
-      },
-      "BomItem": {
-        "description": "A single line of the Bill of Materials within a project, with its design-state lifecycle.",
-        "required": [
-          "id",
-          "projectId",
-          "partNumber",
-          "qtyPerUnit",
-          "designState"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the BOM item",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project that owns this BOM line",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
+              "UNCONFIRMED",
+              "CONFIRMED",
+              "CONFIRMED"
             ],
             "dataType": "string"
           },
           {
-            "name": "partNumber",
-            "description": "Part number for this BOM line",
+            "name": "firstname",
+            "description": "Given name (Cognito given_name)",
             "exampleData": [
-              "PN-4711",
-              "PN-4712",
-              "PN-4713"
+              "Ada",
+              "Grace",
+              "Linus"
             ],
             "dataType": "string"
           },
           {
-            "name": "qtyPerUnit",
-            "description": "Quantity of this part required per produced unit",
+            "name": "lastname",
+            "description": "Family name (Cognito family_name)",
             "exampleData": [
-              "1",
-              "2",
-              "4"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "designState",
-            "description": "Design state of the BOM line (DRAFT, DS1, DS2_PROD)",
-            "exampleData": [
-              "DRAFT",
-              "DS1",
-              "DS2_PROD"
+              "Lovelace",
+              "Hopper",
+              "Torvalds"
             ],
             "dataType": "string"
           },
           {
-            "name": "frozenAt",
-            "description": "Timestamp when the BOM line was frozen at its current design state",
+            "name": "phoneNumber",
+            "description": "Phone number in E.164 format (Cognito phone_number)",
             "exampleData": [
-              "2026-02-01T10:00:00Z",
-              "2026-02-15T14:30:00Z",
-              "2026-03-05T09:15:00Z"
+              "+14155550100",
+              "+442071234567",
+              "+46812345678"
             ],
             "dataType": "string"
           },
           {
-            "name": "status",
-            "exampleData": [],
-            "dataType": "string"
-          }
-        ]
-      },
-      "BuildPlan": {
-        "description": "Versioned plan of builds for a demand; walks DRAFT → LOCKED → RELEASED.",
-        "required": [
-          "id",
-          "demandId",
-          "version",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build plan",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "demandId",
-            "description": "Demand this build plan was created for",
+            "name": "company",
+            "description": "Organisation name supplied at sign-up (Cognito custom:organisation)",
             "exampleData": [
-              "dmd-001",
-              "dmd-002",
-              "dmd-003"
+              "Acme Inc",
+              "Globex",
+              "Initech"
             ],
             "dataType": "string"
           },
           {
-            "name": "version",
-            "description": "Plan version, incremented on every Build Plan Updated event",
+            "name": "referralSource",
+            "description": "How the user heard about Qlerify (Cognito custom:referral_source)",
             "exampleData": [
-              "1",
-              "2",
-              "3"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "status",
-            "description": "Plan lifecycle status (DRAFT, LOCKED, RELEASED, SUPERSEDED). SUPERSEDED is set on the prior version when Update Build Plan creates a new one — preserving history while keeping a single current plan per demand.",
-            "exampleData": [
-              "DRAFT",
-              "LOCKED",
-              "RELEASED",
-              "SUPERSEDED"
+              "Google search",
+              "A colleague",
+              "Conference talk"
             ],
             "dataType": "string"
           },
           {
-            "name": "lockedAt",
-            "description": "Timestamp when the plan transitioned to LOCKED",
+            "name": "usageIntent",
+            "description": "How the user intends to use Qlerify (Cognito custom:usage_intent)",
             "exampleData": [
-              "2026-03-15T10:00:00Z",
-              "2026-04-01T11:00:00Z",
-              "2026-04-15T09:30:00Z"
+              "Model our order process",
+              "Document microservices",
+              "Teach DDD"
             ],
             "dataType": "string"
           },
           {
-            "name": "releasedAt",
-            "description": "Timestamp when the plan transitioned to RELEASED",
+            "name": "mfaEnabled",
+            "description": "Whether software-token (TOTP) MFA is enabled",
             "exampleData": [
-              "2026-03-16T10:00:00Z",
-              "2026-04-02T11:00:00Z",
-              "2026-04-16T09:30:00Z"
+              "false",
+              "true",
+              "false"
             ],
-            "dataType": "string"
-          },
-          {
-            "name": "reason",
-            "description": "Trigger that caused the latest plan version (ETA_CHANGED, ER_APPROVED, PRIORITY_CHANGED, SITE_CHANGED)",
-            "exampleData": [
-              "ETA_CHANGED",
-              "ER_APPROVED",
-              "PRIORITY_CHANGED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "builds",
-            "description": "Builds scheduled under this plan",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Build"
-            },
-            "dataType": "object"
-          }
-        ]
-      },
-      "Build": {
-        "description": "A planned production batch under a build plan; tracks material readiness and production status.",
-        "required": [
-          "id",
-          "buildPlanId",
-          "buildNo",
-          "qty",
-          "materialStatus",
-          "plannedStart",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildPlanId",
-            "description": "Build plan that owns this build",
-            "exampleData": [
-              "bp-001",
-              "bp-002",
-              "bp-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildNo",
-            "description": "Human-readable sequence number for this build inside the plan",
-            "exampleData": [
-              "B1",
-              "B2",
-              "B3"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Number of units this build produces",
-            "exampleData": [
-              "10",
-              "5",
-              "20"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "priority",
-            "description": "Build priority used for sequencing",
-            "exampleData": [
-              "1",
-              "5",
-              "10"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "siteId",
-            "description": "Production site the build is released to",
-            "exampleData": [
-              "site-stockholm",
-              "site-tallinn",
-              "site-krakow"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "materialStatus",
-            "description": "Material readiness status (OPEN, AT_RISK, KIT_READY)",
-            "exampleData": [
-              "OPEN",
-              "AT_RISK",
-              "KIT_READY"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "plannedStart",
-            "description": "Planned production start date",
-            "exampleData": [
-              "2026-04-20",
-              "2026-05-04",
-              "2026-05-18"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "actualStart",
-            "description": "Actual production start timestamp",
-            "exampleData": [
-              "2026-04-21T08:00:00Z",
-              "2026-05-05T08:00:00Z",
-              "2026-05-19T08:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "actualEnd",
-            "description": "Actual production end timestamp (RTD)",
-            "exampleData": [
-              "2026-04-25T17:00:00Z",
-              "2026-05-09T17:00:00Z",
-              "2026-05-23T17:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Build lifecycle status (PLANNED, RELEASED, IN_PROGRESS, RTD, SHIPPED)",
-            "exampleData": [
-              "PLANNED",
-              "RELEASED",
-              "IN_PROGRESS"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildDemand",
-            "description": "Material requirements per part for this build",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
-            },
-            "dataType": "object"
-          },
-          {
-            "name": "units",
-            "description": "Units produced by this build",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
-            },
-            "dataType": "object"
-          }
-        ]
-      },
-      "BuildDemand": {
-        "description": "Per-build, per-part material requirement; required vs available quantity.",
-        "required": [
-          "id",
-          "buildId",
-          "partNumber",
-          "qtyRequired",
-          "qtyAvailable"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build demand line",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build this material line belongs to",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "partNumber",
-            "description": "Part number required for this build",
-            "exampleData": [
-              "PN-4711",
-              "PN-4712",
-              "PN-4713"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qtyRequired",
-            "description": "Quantity of the part required to complete the build",
-            "exampleData": [
-              "10",
-              "20",
-              "40"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "qtyAvailable",
-            "description": "Quantity of the part currently received and available",
-            "exampleData": [
-              "0",
-              "10",
-              "40"
-            ],
-            "dataType": "number"
-          }
-        ]
-      },
-      "ProductionSite": {
-        "description": "Manufacturing site where builds are produced.",
-        "required": [
-          "id",
-          "name"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the production site",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "name",
-            "description": "Human-readable site name",
-            "exampleData": [
-              "Stockholm",
-              "Tallinn",
-              "Krakow"
-            ],
-            "dataType": "string"
-          }
-        ]
-      },
-      "Unit": {
-        "description": "An individual hardware unit produced from a build; tracked through pack and shipment.",
-        "required": [
-          "id",
-          "buildId",
-          "serialNo",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the unit",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build that produced this unit",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "serialNo",
-            "description": "Unit serial number",
-            "exampleData": [
-              "SN-0001",
-              "SN-0002",
-              "SN-0003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Unit lifecycle status (BUILT, PICKED, PACKED, SHIPPED, DELIVERED, LOST)",
-            "exampleData": [
-              "BUILT",
-              "PACKED",
-              "DELIVERED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "shipmentId",
-            "description": "Shipment this unit was packed into; null until Units Picked And Packed fires. Set atomically with the unit's PACKED status transition.",
-            "exampleData": [
-              "ship-A1B2",
-              "ship-C3D4",
-              "ship-E5F6"
-            ],
-            "dataType": "string"
+            "dataType": "boolean"
           }
         ]
       }
     }
   },
   "externalBoundedContexts": {
-    "PRIM": {
+    "QlerifyPlatform": {
       "domainEvents": {
+        "UserRegistered": {
+          "event": "User Registered",
+          "role": "Automation",
+          "follows": [
+            {
+              "$ref": "#/domainEvents/AccountLoggedIn"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/commands/CreateUser"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/User"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/queries/GetCurrentUser",
+              "description": "Get Current User"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given a confirmed user logging in for the first time with no Qlerify profile, When the session initializes, Then a Qlerify user profile is created in DynamoDB from the Cognito attributes.",
+            "Given a returning user with an existing profile, When they log in, Then the profile is updated and the login counter is incremented and no new profile is created."
+          ]
+        },
+        "OrganisationCreated": {
+          "event": "Organisation Created",
+          "role": "Automation",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/domainEvents/UserRegistered"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/commands/CreateOrganisation"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Organisation"
+          },
+          "acceptanceCriteria": [
+            "Given a first-time user whose sign-up included a company name, When their profile is created, Then an organisation with that name is created and owned by the user.",
+            "Given a first-time user with no company name, When they reach the dashboard, Then they are prompted to create their first organisation manually."
+          ]
+        },
         "ProjectCreated": {
           "event": "Project Created",
-          "role": "Product Manager",
+          "role": "User",
           "follows": [
-            "start"
+            {
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/domainEvents/OrganisationCreated"
+            }
           ],
           "command": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/CreateProject"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/commands/CreateProject"
           },
           "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Project"
           },
           "readModels": [
             {
-              "$ref": "#/schemas/queries/GetDemand",
-              "description": "Get Demand"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/queries/ListOrganisations",
+              "description": "List Organisations"
             }
           ],
           "acceptanceCriteria": [
-            "Given a demand exists, When the product manager creates a project, Then a project linked to the demand is created"
+            "Given an organisation owner on the dashboard, When they create a project with a name under an organisation, Then the project is created and the creator is added as an admin team member.",
+            "Given a user whose subscription project limit is reached, When they try to create a project, Then they are prompted to upgrade."
           ]
         },
-        "BOMDefined": {
-          "event": "BOM Defined",
-          "role": "Designer",
+        "TeamMemberAdded": {
+          "event": "Team Member Added",
+          "role": "Automation",
           "follows": [
             {
-              "$ref": "#/domainEvents/HardwareDemandCreated"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/domainEvents/ProjectCreated"
             }
           ],
           "command": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/DefineBOM"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/commands/AddAdminTeamMember"
           },
           "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/TeamMember"
           },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetProject",
-              "description": "Get Project"
-            }
-          ],
           "acceptanceCriteria": [
-            "Given a project exists, When the designer defines the BOM, Then bom_item rows are inserted with design_state DRAFT"
+            "Given a newly created project, When project creation completes, Then the creator is automatically added as an admin team member (project membership).",
+            "Given a project owner inviting a teammate by email, When they add a team member, Then a membership linking that user or email to the project is created (or a pending invite if the user does not exist yet)."
           ]
         },
-        "BOMFrozenAtDS1": {
-          "event": "BOM Frozen At DS1",
-          "role": "Configuration Manager",
-          "group": "DS1",
+        "WorkflowCreated": {
+          "event": "Workflow Created",
+          "role": "User",
           "follows": [
             {
-              "$ref": "#/externalBoundedContexts/PRIM/domainEvents/BOMDefined"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/domainEvents/TeamMemberAdded"
             }
           ],
           "command": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/FreezeBOMAtDS1"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/commands/CreateWorkflow"
           },
           "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
+            "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Workflow"
           },
           "readModels": [
             {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetProjectWithBOM",
-              "description": "Get Project With BOM"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/queries/ListProjects",
+              "description": "List Projects"
             }
           ],
           "acceptanceCriteria": [
-            "Given a project has at least one bom_item, When the CM freezes the BOM at DS1, Then all bom_items design_state becomes DS1 and frozen_at is set"
-          ]
-        },
-        "BOMFrozenAtDS2": {
-          "event": "BOM Frozen At DS2",
-          "role": "Configuration Manager",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/ESTER/domainEvents/EngineeringChangeApproved"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/FreezeBOMAtDS2"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetProjectStatus",
-              "description": "Get Project Status"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given all open engineering changes are resolved, When the CM freezes the BOM at DS2, Then all bom_items design_state becomes DS2_PROD"
-          ]
-        },
-        "EngineeringReleaseApproved": {
-          "event": "Engineering Release Approved",
-          "role": "Configuration Manager",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/PRIM/domainEvents/BOMFrozenAtDS2"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/commands/ApproveEngineeringRelease"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/EngineeringRelease"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetProjectStatus",
-              "description": "Get Project Status"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given DS2 is frozen, When the release authority approves the release, Then an engineering_release row with status APPROVED and approved_at is created"
+            "Given a team member on a project with FULL subscription access, When they create a workflow with a name, Then a new empty workflow is created in the project and added to their workflow order."
           ]
         }
       },
       "schemas": {
         "commands": {
+          "CreateUser": {
+            "required": [
+              "firstname",
+              "lastname",
+              "email"
+            ],
+            "fields": [
+              {
+                "name": "firstname",
+                "hideInForm": false
+              },
+              {
+                "name": "lastname",
+                "hideInForm": false
+              },
+              {
+                "name": "email",
+                "hideInForm": false
+              },
+              {
+                "name": "company",
+                "hideInForm": false
+              },
+              {
+                "name": "phoneNumber",
+                "hideInForm": false
+              },
+              {
+                "name": "referralSource",
+                "hideInForm": false
+              },
+              {
+                "name": "usageIntent",
+                "hideInForm": false
+              }
+            ]
+          },
+          "CreateOrganisation": {
+            "required": [
+              "name"
+            ],
+            "fields": [
+              {
+                "name": "name",
+                "hideInForm": false
+              }
+            ]
+          },
           "CreateProject": {
             "required": [
-              "demandId",
-              "productName"
+              "name",
+              "organisationId"
             ],
             "fields": [
               {
-                "name": "demandId",
+                "name": "name",
                 "hideInForm": false
               },
               {
-                "name": "productName",
+                "name": "organisationId",
                 "hideInForm": false
               }
             ]
           },
-          "DefineBOM": {
+          "AddAdminTeamMember": {
             "required": [
-              "id",
-              "bomItems"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "bomItems",
-                "relatedEntity": {
-                  "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
-                },
-                "array": true,
-                "required": [
-                  "partNumber",
-                  "qtyPerUnit"
-                ],
-                "fields": [
-                  {
-                    "name": "partNumber"
-                  },
-                  {
-                    "name": "qtyPerUnit"
-                  }
-                ],
-                "hideInForm": false
-              }
-            ]
-          },
-          "FreezeBOMAtDS1": {
-            "required": [
-              "id"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              }
-            ]
-          },
-          "FreezeBOMAtDS2": {
-            "required": [
-              "id"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              }
-            ]
-          },
-          "ApproveEngineeringRelease": {
-            "required": [
-              "projectId"
+              "projectId",
+              "userId"
             ],
             "fields": [
               {
                 "name": "projectId",
+                "hideInForm": false
+              },
+              {
+                "name": "userId",
+                "hideInForm": false
+              }
+            ]
+          },
+          "CreateWorkflow": {
+            "required": [
+              "projectId",
+              "name"
+            ],
+            "fields": [
+              {
+                "name": "projectId",
+                "hideInForm": false
+              },
+              {
+                "name": "name",
                 "hideInForm": false
               }
             ]
           }
         },
         "queries": {
-          "GetProject": {
-            "description": "Project that the BOM is being defined for.",
+          "GetCurrentUser": {
+            "description": "Looks up the authenticated user's Qlerify profile to decide whether to create a new profile or update the existing one.",
             "entity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/User"
             },
             "fields": [
-              {
-                "name": "projectId",
-                "isFilter": true
-              },
               {
                 "name": "id"
               },
               {
-                "name": "demandId"
+                "name": "email"
               },
               {
-                "name": "productName"
+                "name": "firstname"
               },
               {
-                "name": "status"
+                "name": "lastname"
               }
             ]
           },
-          "GetProjectWithBOM": {
-            "description": "Project with its BOM lines, used before freezing the BOM at DS1.",
+          "ListOrganisations": {
+            "description": "Lists the organisations the user owns so they can choose which one to create the project under.",
             "entity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Organisation"
             },
+            "array": true,
             "fields": [
-              {
-                "name": "projectId",
-                "isFilter": true
-              },
               {
                 "name": "id"
               },
               {
-                "name": "productName"
-              },
-              {
-                "name": "status"
-              },
-              {
-                "name": "bomItems",
-                "relatedEntity": {
-                  "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
-                },
-                "fields": [
-                  {
-                    "name": "id"
-                  },
-                  {
-                    "name": "partNumber"
-                  },
-                  {
-                    "name": "qtyPerUnit"
-                  },
-                  {
-                    "name": "designState"
-                  }
-                ]
+                "name": "name"
               }
             ]
           },
-          "GetBOMItem": {
-            "description": "BOM item the engineering change refers to.",
+          "ListProjects": {
+            "description": "Lists the projects the user is a member of so they can choose which one to create the workflow in.",
             "entity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
+              "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Project"
             },
+            "array": true,
             "fields": [
-              {
-                "name": "bomItemId",
-                "isFilter": true
-              },
               {
                 "name": "id"
               },
               {
-                "name": "partNumber"
+                "name": "name"
               },
               {
-                "name": "qtyPerUnit"
-              },
-              {
-                "name": "designState"
-              }
-            ]
-          },
-          "GetProjectStatus": {
-            "description": "Project with gating signals: BOM design-state aggregate and count of open engineering changes.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/Project"
-            },
-            "fields": [
-              {
-                "name": "projectId",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "status"
-              },
-              {
-                "name": "bomDesignState",
-                "description": "Most-restrictive design state across the BOM (DRAFT, DS1, DS2_PROD).",
-                "computed": true
-              },
-              {
-                "name": "openEngineeringChanges",
-                "description": "Count of engineering changes still OPEN for this project.",
-                "computed": true
+                "name": "organisationId"
               }
             ]
           }
         },
         "entities": {
-          "Project": {
-            "description": "PRIM project that owns the product structure and BOM for a demand.",
+          "User": {
+            "description": "Qlerify user profile stored in DynamoDB, created on first login from the Cognito account attributes.",
             "required": [
               "id",
-              "demandId",
-              "productName"
+              "email",
+              "firstname",
+              "lastname"
             ],
             "fields": [
               {
                 "name": "id",
-                "description": "Unique identifier for the project",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "demandId",
-                "description": "Demand this project was created for",
+                "description": "Unique identifier of the user (matches the Cognito identity)",
                 "exampleData": [
-                  "dmd-001",
-                  "dmd-002",
-                  "dmd-003"
+                  "a1b2c3d4-1111-2222-3333-444455556666",
+                  "f0e9d8c7-aaaa-bbbb-cccc-ddddeeeeffff",
+                  "12345678-90ab-cdef-1234-567890abcdef"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "productName",
-                "description": "Product variant the project covers",
+                "name": "email",
+                "description": "User email",
                 "exampleData": [
-                  "Radio Unit X",
-                  "Baseband 6630",
-                  "Antenna AIR 3239"
+                  "ada@example.com",
+                  "grace@company.org",
+                  "linus@mail.net"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "status",
-                "description": "Project lifecycle status",
+                "name": "firstname",
+                "description": "Given name",
                 "exampleData": [
-                  "ACTIVE",
-                  "ON_HOLD",
-                  "CLOSED"
+                  "Ada",
+                  "Grace",
+                  "Linus"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "bomItems",
-                "description": "Bill of Materials lines belonging to this project",
-                "array": true,
+                "name": "lastname",
+                "description": "Family name",
+                "exampleData": [
+                  "Lovelace",
+                  "Hopper",
+                  "Torvalds"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "company",
+                "description": "Company the user belongs to",
+                "exampleData": [
+                  "Acme Inc",
+                  "Globex",
+                  "Initech"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "phoneNumber",
+                "description": "Phone number",
+                "exampleData": [
+                  "+14155550100",
+                  "+442071234567",
+                  "+46812345678"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "job",
+                "description": "Job title",
+                "exampleData": [
+                  "Product Manager",
+                  "Software Architect",
+                  "CTO"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "referralSource",
+                "description": "How the user heard about Qlerify",
+                "exampleData": [
+                  "Google search",
+                  "A colleague",
+                  "Conference talk"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "usageIntent",
+                "description": "How the user intends to use Qlerify",
+                "exampleData": [
+                  "Model our order process",
+                  "Document microservices",
+                  "Teach DDD"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "picture",
+                "description": "Profile picture and its storage location",
                 "exampleData": [
                   "Object",
                   "Object",
                   "Object"
                 ],
                 "relatedEntity": {
-                  "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
+                  "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/valueObjects/Picture"
                 },
                 "dataType": "object"
               },
               {
-                "name": "engineeringRelease",
-                "description": "Signed-off design package gating production for this project",
-                "exampleData": [
-                  "Object",
-                  "Object",
-                  "Object"
-                ],
-                "relatedEntity": {
-                  "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/EngineeringRelease"
-                },
-                "dataType": "object"
-              }
-            ]
-          },
-          "BomItem": {
-            "description": "A single line of the Bill of Materials within a project, with its design-state lifecycle.",
-            "required": [
-              "id",
-              "projectId",
-              "partNumber",
-              "qtyPerUnit",
-              "designState"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the BOM item",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "projectId",
-                "description": "Project that owns this BOM line",
-                "exampleData": [
-                  "proj-001",
-                  "proj-002",
-                  "proj-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "partNumber",
-                "description": "Part number for this BOM line",
-                "exampleData": [
-                  "PN-4711",
-                  "PN-4712",
-                  "PN-4713"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "qtyPerUnit",
-                "description": "Quantity of this part required per produced unit",
+                "name": "loginCounter",
+                "description": "Number of times the user has logged in",
                 "exampleData": [
                   "1",
-                  "2",
-                  "4"
-                ],
-                "dataType": "number"
-              },
-              {
-                "name": "designState",
-                "description": "Design state of the BOM line (DRAFT, DS1, DS2_PROD)",
-                "exampleData": [
-                  "DRAFT",
-                  "DS1",
-                  "DS2_PROD"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "frozenAt",
-                "description": "Timestamp when the BOM line was frozen at its current design state",
-                "exampleData": [
-                  "2026-02-01T10:00:00Z",
-                  "2026-02-15T14:30:00Z",
-                  "2026-03-05T09:15:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "status",
-                "exampleData": [],
-                "dataType": "string"
-              }
-            ]
-          },
-          "EngineeringRelease": {
-            "description": "Signed-off design package gating production lock; separate from the BOM freeze.",
-            "required": [
-              "id",
-              "projectId",
-              "status"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the engineering release",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "projectId",
-                "description": "Project this release belongs to",
-                "exampleData": [
-                  "proj-001",
-                  "proj-002",
-                  "proj-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "status",
-                "description": "Release status (OPEN, APPROVED)",
-                "exampleData": [
-                  "OPEN",
-                  "APPROVED",
-                  "APPROVED"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "approvedAt",
-                "description": "Timestamp the release was approved",
-                "exampleData": [
-                  "2026-03-10T10:00:00Z",
-                  "2026-03-12T16:00:00Z",
-                  "2026-04-01T09:00:00Z"
-                ],
-                "dataType": "string"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "SAP": {
-      "domainEvents": {
-        "MaterialOrdered": {
-          "event": "Material Ordered",
-          "role": "Buyer",
-          "group": "Group 3",
-          "follows": [
-            {
-              "$ref": "#/domainEvents/MaterialDemandSpecified"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/commands/OrderMaterial"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/queries/ListDraftPurchaseOrders",
-              "description": "List Draft Purchase Orders"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a purchase order is in DRAFT, When the buyer orders the material, Then the purchase order status becomes ORDERED and requested_date is set"
-          ]
-        },
-        "SupplierConfirmedOrderWithETA": {
-          "event": "Supplier Confirmed Order With ETA",
-          "role": "Supplier",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/domainEvents/MaterialOrdered"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/commands/ConfirmOrderWithETA"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/queries/GetPurchaseOrder",
-              "description": "Get Purchase Order"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a purchase order is ORDERED, When the supplier confirms, Then the purchase order status becomes CONFIRMED and confirmed_eta is set"
-          ]
-        },
-        "MaterialETAChanged": {
-          "event": "Material ETA Changed",
-          "role": "Supplier",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/domainEvents/SupplierConfirmedOrderWithETA"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/commands/ChangeMaterialETA"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/queries/GetPurchaseOrder",
-              "description": "Get Purchase Order"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a purchase order is CONFIRMED, When the supplier updates the ETA to a date strictly later than the current confirmed_eta, Then confirmed_eta is updated to the new value",
-            "Given a purchase order is CONFIRMED, When the supplier submits a new ETA that is equal to or earlier than the current confirmed_eta, Then the change is rejected with a domain error and confirmed_eta is unchanged"
-          ]
-        },
-        "MaterialReceivedAtSite": {
-          "event": "Material Received At Site",
-          "role": "Goods Receiving",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/Compass/domainEvents/ProductionLineBooked"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/commands/ReceiveMaterial"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/queries/GetPurchaseOrder",
-              "description": "Get Purchase Order"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a PO is CONFIRMED and the ETA has been reached, When goods are received, Then purchase_order.status becomes RECEIVED, actual_receipt_date is set, and build_demand.qty_available is updated"
-          ]
-        }
-      },
-      "schemas": {
-        "commands": {
-          "OrderMaterial": {
-            "required": [
-              "id",
-              "requestedDate"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "requestedDate",
-                "hideInForm": false
-              }
-            ]
-          },
-          "ConfirmOrderWithETA": {
-            "required": [
-              "id",
-              "confirmedEta"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "confirmedEta",
-                "hideInForm": false
-              }
-            ]
-          },
-          "ChangeMaterialETA": {
-            "required": [
-              "id",
-              "confirmedEta"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "confirmedEta",
-                "hideInForm": false
-              }
-            ]
-          },
-          "ReceiveMaterial": {
-            "required": [
-              "id",
-              "actualReceiptDate"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "actualReceiptDate",
-                "hideInForm": false
-              }
-            ]
-          }
-        },
-        "queries": {
-          "ListDraftPurchaseOrders": {
-            "description": "Draft POs awaiting buyer action.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-            },
-            "array": true,
-            "fields": [
-              {
-                "name": "status",
-                "description": "Filter on PO status (DRAFT).",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qty"
-              },
-              {
-                "name": "supplierId"
-              }
-            ]
-          },
-          "GetPurchaseOrder": {
-            "description": "Read a specific PO; reused across multiple PO lifecycle events.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/SAP/schemas/entities/PurchaseOrder"
-            },
-            "fields": [
-              {
-                "name": "id",
-                "description": "Purchase order to retrieve",
-                "isFilter": true
-              },
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qty"
-              },
-              {
-                "name": "supplierId"
-              },
-              {
-                "name": "requestedDate"
-              },
-              {
-                "name": "confirmedEta"
-              },
-              {
-                "name": "actualReceiptDate"
-              },
-              {
-                "name": "status"
-              }
-            ]
-          }
-        },
-        "entities": {
-          "PurchaseOrder": {
-            "description": "Procurement order for a part from a supplier; walks DRAFT → ORDERED → CONFIRMED → RECEIVED.",
-            "required": [
-              "id",
-              "projectId",
-              "partNumber",
-              "qty",
-              "supplierId",
-              "status"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the purchase order",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "projectId",
-                "description": "Project this PO sources material for",
-                "exampleData": [
-                  "proj-001",
-                  "proj-002",
-                  "proj-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "partNumber",
-                "description": "Part number being procured",
-                "exampleData": [
-                  "PN-4711",
-                  "PN-4712",
-                  "PN-4713"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "qty",
-                "description": "Quantity ordered",
-                "exampleData": [
-                  "100",
-                  "200",
-                  "500"
-                ],
-                "dataType": "number"
-              },
-              {
-                "name": "supplierId",
-                "description": "Supplier providing the part",
-                "exampleData": [
-                  "sup-A",
-                  "sup-B",
-                  "sup-C"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "requestedDate",
-                "description": "Date the buyer requested delivery on",
-                "exampleData": [
-                  "2026-04-10",
-                  "2026-04-15",
-                  "2026-04-20"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "confirmedEta",
-                "description": "ETA confirmed by the supplier; may slip later",
-                "exampleData": [
-                  "2026-04-12",
-                  "2026-04-25",
-                  "2026-05-05"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "actualReceiptDate",
-                "description": "Date goods were actually received",
-                "exampleData": [
-                  "2026-04-12",
-                  "2026-04-26",
-                  "2026-05-06"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "status",
-                "description": "PO lifecycle status (DRAFT, ORDERED, CONFIRMED, RECEIVED)",
-                "exampleData": [
-                  "DRAFT",
-                  "ORDERED",
-                  "CONFIRMED"
-                ],
-                "dataType": "string"
-              }
-            ]
-          },
-          "WorkOrder": {
-            "description": "Production work order created as a precondition to Build Plan Lock.",
-            "required": [
-              "id",
-              "projectId",
-              "buildId",
-              "qty",
-              "status"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the work order",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "projectId",
-                "description": "Project this work order belongs to",
-                "exampleData": [
-                  "proj-001",
-                  "proj-002",
-                  "proj-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "buildId",
-                "description": "Build the work order is for",
-                "exampleData": [
-                  "build-001",
-                  "build-002",
-                  "build-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "qty",
-                "description": "Quantity to be produced",
-                "exampleData": [
-                  "10",
                   "5",
-                  "20"
+                  "27"
                 ],
                 "dataType": "number"
               },
               {
-                "name": "status",
-                "description": "Work order lifecycle status (CREATED, RELEASED, CLOSED)",
+                "name": "hasMcpApiKey",
+                "description": "Whether the user has generated an MCP API key",
                 "exampleData": [
-                  "CREATED",
-                  "RELEASED",
-                  "CLOSED"
+                  "false",
+                  "true",
+                  "false"
                 ],
-                "dataType": "string"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "ESTER": {
-      "domainEvents": {
-        "EngineeringChangeRaised": {
-          "event": "Engineering Change Raised",
-          "role": "Designer",
-          "follows": [
-            {
-              "$ref": "#/domainEvents/MaterialShortageIdentified"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/ESTER/schemas/commands/RaiseEngineeringChange"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/ESTER/schemas/entities/EngineeringChange"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetBOMItem",
-              "description": "Get BOM Item"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a BOM is frozen at DS1, When a designer raises an engineering change, Then an engineering_change row is created with status OPEN"
-          ]
-        },
-        "EngineeringChangeApproved": {
-          "event": "Engineering Change Approved",
-          "role": "Configuration Manager",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/ESTER/domainEvents/EngineeringChangeRaised"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/ESTER/schemas/commands/ApproveEngineeringChange"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/ESTER/schemas/entities/EngineeringChange"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/ESTER/schemas/queries/ListOpenEngineeringChanges",
-              "description": "List Open Engineering Changes"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given an engineering change is OPEN, When the CM approves it, Then the status becomes APPROVED and the affected bom_item is updated"
-          ]
-        }
-      },
-      "schemas": {
-        "commands": {
-          "RaiseEngineeringChange": {
-            "required": [
-              "projectId",
-              "bomItemId",
-              "description"
-            ],
-            "fields": [
-              {
-                "name": "projectId",
-                "hideInForm": false
-              },
-              {
-                "name": "bomItemId",
-                "hideInForm": false
-              },
-              {
-                "name": "description",
-                "hideInForm": false
+                "dataType": "boolean"
               }
             ]
           },
-          "ApproveEngineeringChange": {
-            "required": [
-              "id"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              }
-            ]
-          }
-        },
-        "queries": {
-          "ListOpenEngineeringChanges": {
-            "description": "Engineering changes still in OPEN status, awaiting approval.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/ESTER/schemas/entities/EngineeringChange"
-            },
-            "array": true,
-            "fields": [
-              {
-                "name": "projectId",
-                "isFilter": true
-              },
-              {
-                "name": "status",
-                "description": "Filter on EC status (OPEN).",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "bomItemId"
-              },
-              {
-                "name": "description"
-              },
-              {
-                "name": "createdAt"
-              }
-            ]
-          }
-        },
-        "entities": {
-          "EngineeringChange": {
-            "description": "A trouble report or change request against a BOM item, with OPEN/APPROVED/REJECTED lifecycle.",
+          "Organisation": {
+            "description": "An entity that runs one or more development projects; owned by the user who created it.",
             "required": [
               "id",
-              "projectId",
-              "bomItemId",
-              "description",
-              "status",
-              "createdAt"
+              "name",
+              "userId"
             ],
             "fields": [
               {
                 "name": "id",
-                "description": "Unique identifier for the engineering change",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "projectId",
-                "description": "Project the engineering change belongs to",
+                "description": "Unique identifier of the organisation",
                 "exampleData": [
-                  "proj-001",
-                  "proj-002",
-                  "proj-003"
+                  "org-1001",
+                  "org-2002",
+                  "org-3003"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "bomItemId",
-                "description": "BOM line the change targets",
+                "name": "name",
+                "description": "Organisation name",
                 "exampleData": [
-                  "bom-101",
-                  "bom-102",
-                  "bom-103"
+                  "Acme Inc",
+                  "Globex",
+                  "Initech"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "description",
-                "description": "What needs to change and why",
+                "name": "userId",
+                "description": "Owner of the organisation (references User)",
                 "exampleData": [
-                  "Swap supplier for capacitor PN-4711",
-                  "Tolerance change on PN-4715",
-                  "Cosmetic rework on housing"
+                  "a1b2c3d4-1111-2222-3333-444455556666",
+                  "f0e9d8c7-aaaa-bbbb-cccc-ddddeeeeffff",
+                  "12345678-90ab-cdef-1234-567890abcdef"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "status",
-                "description": "Change lifecycle status (OPEN, APPROVED, REJECTED)",
+                "name": "projects",
+                "description": "Projects under this organisation",
+                "array": true,
                 "exampleData": [
-                  "OPEN",
-                  "APPROVED",
-                  "REJECTED"
+                  "Object",
+                  "Object",
+                  "Object"
+                ],
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Project"
+                },
+                "dataType": "object"
+              },
+              {
+                "name": "createdAt",
+                "description": "Timestamp when the organisation was created",
+                "exampleData": [
+                  "2026-01-15T10:00:00Z",
+                  "2026-02-03T08:30:00Z",
+                  "2026-03-21T14:05:00Z"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "updatedAt",
+                "description": "Timestamp when the organisation was last updated",
+                "exampleData": [
+                  "2026-01-16T09:00:00Z",
+                  "2026-02-04T11:30:00Z",
+                  "2026-03-22T16:45:00Z"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "Project": {
+            "description": "A workspace under an organisation that groups workflows and team members.",
+            "required": [
+              "id",
+              "name",
+              "organisationId"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the project",
+                "exampleData": [
+                  "proj-5001",
+                  "proj-6002",
+                  "proj-7003"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "name",
+                "description": "Project name",
+                "exampleData": [
+                  "Checkout Redesign",
+                  "Billing Platform",
+                  "Onboarding Revamp"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "organisationId",
+                "description": "Organisation this project belongs to (references Organisation)",
+                "exampleData": [
+                  "org-1001",
+                  "org-2002",
+                  "org-3003"
                 ],
                 "dataType": "string"
               },
               {
                 "name": "createdAt",
-                "description": "Timestamp the change was raised",
+                "description": "Timestamp when the project was created",
                 "exampleData": [
-                  "2026-02-20T09:00:00Z",
-                  "2026-03-01T14:00:00Z",
-                  "2026-03-10T11:30:00Z"
+                  "2026-01-15T10:05:00Z",
+                  "2026-02-03T08:40:00Z",
+                  "2026-03-21T14:10:00Z"
                 ],
                 "dataType": "string"
               },
               {
-                "name": "approvedAt",
-                "description": "Timestamp the change was approved",
-                "exampleData": [
-                  "2026-02-22T16:00:00Z",
-                  "2026-03-03T10:00:00Z",
-                  "2026-03-12T15:00:00Z"
-                ],
-                "dataType": "string"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "Compass": {
-      "domainEvents": {
-        "ProductionLineBooked": {
-          "event": "Production Line Booked",
-          "role": "Production Planner",
-          "follows": [
-            {
-              "$ref": "#/domainEvents/BuildReleasedToSite"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Compass/schemas/commands/BookProductionLine"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Compass/schemas/entities/LineBooking"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/Compass/schemas/queries/ListProductionLines",
-              "description": "List Production Lines"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given a build is RELEASED, When the production planner books a line, Then a line_booking row with status BOOKED is created"
-          ]
-        }
-      },
-      "schemas": {
-        "commands": {
-          "BookProductionLine": {
-            "required": [
-              "lineId",
-              "buildId",
-              "plannedStart",
-              "plannedEnd"
-            ],
-            "fields": [
-              {
-                "name": "lineId",
-                "hideInForm": false
-              },
-              {
-                "name": "buildId",
-                "hideInForm": false
-              },
-              {
-                "name": "plannedStart",
-                "hideInForm": false
-              },
-              {
-                "name": "plannedEnd",
-                "hideInForm": false
-              }
-            ]
-          }
-        },
-        "queries": {
-          "ListProductionSites": {
-            "description": "Available manufacturing sites.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/Compass/schemas/entities/ProductionSite"
-            },
-            "array": true,
-            "fields": [
-              {
-                "name": "id"
-              },
-              {
-                "name": "name"
-              }
-            ]
-          },
-          "ListProductionLines": {
-            "description": "Production lines and their weekly capacity, filtered by site.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/Compass/schemas/entities/ProductionLine"
-            },
-            "array": true,
-            "fields": [
-              {
-                "name": "siteId",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "name"
-              },
-              {
-                "name": "capacityPerWeek"
-              }
-            ]
-          }
-        },
-        "entities": {
-          "ProductionSite": {
-            "description": "Manufacturing site where builds are produced.",
-            "required": [
-              "id",
-              "name"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the production site",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "name",
-                "description": "Human-readable site name",
-                "exampleData": [
-                  "Stockholm",
-                  "Tallinn",
-                  "Krakow"
-                ],
-                "dataType": "string"
-              }
-            ]
-          },
-          "ProductionLine": {
-            "description": "A production line within a site, with weekly capacity.",
-            "required": [
-              "id",
-              "siteId",
-              "name",
-              "capacityPerWeek"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the production line",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "siteId",
-                "description": "Production site this line belongs to",
-                "exampleData": [
-                  "site-stockholm",
-                  "site-tallinn",
-                  "site-krakow"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "name",
-                "description": "Line name",
-                "exampleData": [
-                  "Line A",
-                  "Line B",
-                  "Line C"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "capacityPerWeek",
-                "description": "Weekly production capacity in units",
-                "exampleData": [
-                  "50",
-                  "100",
-                  "200"
-                ],
-                "dataType": "number"
-              }
-            ]
-          },
-          "LineBooking": {
-            "description": "Reservation of a production line for a specific build.",
-            "required": [
-              "id",
-              "lineId",
-              "buildId",
-              "plannedStart",
-              "plannedEnd",
-              "status"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the line booking",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "lineId",
-                "description": "Production line reserved",
-                "exampleData": [
-                  "line-A1",
-                  "line-B2",
-                  "line-C3"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "buildId",
-                "description": "Build the line is booked for",
-                "exampleData": [
-                  "build-001",
-                  "build-002",
-                  "build-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "plannedStart",
-                "description": "Planned start of the line booking",
-                "exampleData": [
-                  "2026-04-21T08:00:00Z",
-                  "2026-05-05T08:00:00Z",
-                  "2026-05-19T08:00:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "plannedEnd",
-                "description": "Planned end of the line booking",
-                "exampleData": [
-                  "2026-04-25T17:00:00Z",
-                  "2026-05-09T17:00:00Z",
-                  "2026-05-23T17:00:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "status",
-                "description": "Booking lifecycle status (BOOKED, RUNNING, DONE)",
-                "exampleData": [
-                  "BOOKED",
-                  "RUNNING",
-                  "DONE"
-                ],
-                "dataType": "string"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "Test": {
-      "domainEvents": {
-        "BoardTestPassed": {
-          "event": "Board Test Passed",
-          "role": "Test Engineer",
-          "follows": [
-            {
-              "$ref": "#/domainEvents/ProductionStarted"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Test/schemas/commands/RecordBoardTestPass"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Test/schemas/entities/TestResult"
-          },
-          "readModels": [
-            {
-              "$ref": "#/schemas/queries/ListBuildsInProduction",
-              "description": "List Builds In Production"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given production is IN_PROGRESS, When board test passes, Then a test_result row with test_type BOARD and result PASS is created per produced unit"
-          ]
-        },
-        "FirstArticleInspectionPassed": {
-          "event": "First Article Inspection Passed",
-          "role": "Quality Engineer",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/Test/domainEvents/BoardTestPassed"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Test/schemas/commands/RecordFAIPass"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Test/schemas/entities/TestResult"
-          },
-          "readModels": [
-            {
-              "$ref": "#/schemas/queries/ListBuildsReadyForFAI",
-              "description": "List Builds Ready For FAI"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given board tests have passed, When FAI passes, Then a test_result row with test_type FAI and result PASS is created"
-          ]
-        }
-      },
-      "schemas": {
-        "commands": {
-          "RecordBoardTestPass": {
-            "required": [
-              "buildId",
-              "unitSerial",
-              "executedAt"
-            ],
-            "fields": [
-              {
-                "name": "buildId",
-                "hideInForm": false
-              },
-              {
-                "name": "unitSerial",
-                "hideInForm": false
-              },
-              {
-                "name": "executedAt",
-                "hideInForm": false
-              }
-            ]
-          },
-          "RecordFAIPass": {
-            "required": [
-              "buildId",
-              "unitSerial",
-              "executedAt"
-            ],
-            "fields": [
-              {
-                "name": "buildId",
-                "hideInForm": false
-              },
-              {
-                "name": "unitSerial",
-                "hideInForm": false
-              },
-              {
-                "name": "executedAt",
-                "hideInForm": false
-              }
-            ]
-          }
-        },
-        "entities": {
-          "TestResult": {
-            "description": "Recorded outcome of a specific test type for a build or unit.",
-            "required": [
-              "id",
-              "buildId",
-              "unitSerial",
-              "testType",
-              "result",
-              "executedAt"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the test result",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "buildId",
-                "description": "Build the test was executed on",
-                "exampleData": [
-                  "build-001",
-                  "build-002",
-                  "build-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "unitSerial",
-                "description": "Serial number of the unit tested",
-                "exampleData": [
-                  "SN-0001",
-                  "SN-0002",
-                  "SN-0003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "testType",
-                "description": "Type of test (BOARD, FAI, FA2, FUNCTIONAL)",
-                "exampleData": [
-                  "BOARD",
-                  "FAI",
-                  "FUNCTIONAL"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "result",
-                "description": "Test outcome (PASS, FAIL)",
-                "exampleData": [
-                  "PASS",
-                  "PASS",
-                  "FAIL"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "executedAt",
-                "description": "Timestamp the test was executed",
-                "exampleData": [
-                  "2026-04-22T10:00:00Z",
-                  "2026-04-23T14:00:00Z",
-                  "2026-04-24T09:00:00Z"
-                ],
-                "dataType": "string"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "Logistics": {
-      "domainEvents": {
-        "UnitsPickedAndPacked": {
-          "event": "Units Picked And Packed",
-          "role": "Warehouse",
-          "follows": [
-            {
-              "$ref": "#/domainEvents/BuildReachedRTD"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/commands/PickAndPackUnits"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/entities/Shipment"
-          },
-          "readModels": [
-            {
-              "$ref": "#/schemas/queries/ListBuildsReadyForPack",
-              "description": "List Builds Ready For Pack"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given the build is RTD, When the warehouse picks and packs, Then a shipment row with status READY is created with packed_at set and unit.status becomes PACKED"
-          ]
-        },
-        "ShipmentDispatched": {
-          "event": "Shipment Dispatched",
-          "role": "Logistics",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/Logistics/domainEvents/UnitsPickedAndPacked"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/commands/DispatchShipment"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/entities/Shipment"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/Logistics/schemas/queries/ListShipmentsReady",
-              "description": "List Shipments Ready"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given the shipment is READY, When dispatched, Then shipment.status becomes IN_TRANSIT with shipped_at set, unit.status becomes SHIPPED, and build.status becomes SHIPPED"
-          ]
-        },
-        "UnitReceivedByCustomer": {
-          "event": "Unit Received By Customer",
-          "role": "Customer",
-          "follows": [
-            {
-              "$ref": "#/externalBoundedContexts/Logistics/domainEvents/ShipmentDispatched"
-            }
-          ],
-          "command": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/commands/ConfirmShipmentDelivered"
-          },
-          "aggregateRoot": {
-            "$ref": "#/externalBoundedContexts/Logistics/schemas/entities/Shipment"
-          },
-          "readModels": [
-            {
-              "$ref": "#/externalBoundedContexts/Logistics/schemas/queries/GetShipment",
-              "description": "Get Shipment"
-            }
-          ],
-          "acceptanceCriteria": [
-            "Given the shipment is IN_TRANSIT, When the customer receives it, Then shipment.status becomes DELIVERED with delivered_at set, unit.status becomes DELIVERED, and demand.status becomes DELIVERED"
-          ]
-        }
-      },
-      "schemas": {
-        "commands": {
-          "PickAndPackUnits": {
-            "required": [
-              "demandId",
-              "buildId",
-              "packedAt",
-              "units"
-            ],
-            "fields": [
-              {
-                "name": "demandId",
-                "hideInForm": false
-              },
-              {
-                "name": "buildId",
-                "hideInForm": false
-              },
-              {
-                "name": "packedAt",
-                "hideInForm": false
-              },
-              {
-                "name": "units",
-                "relatedEntity": {
-                  "$ref": "#/schemas/entities/Unit"
-                },
-                "array": true,
-                "required": [
-                  "id",
-                  "status"
-                ],
-                "fields": [
-                  {
-                    "name": "id"
-                  },
-                  {
-                    "name": "status"
-                  }
-                ],
-                "hideInForm": false
-              }
-            ]
-          },
-          "DispatchShipment": {
-            "required": [
-              "id",
-              "shippedAt"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "shippedAt",
-                "hideInForm": false
-              }
-            ]
-          },
-          "ConfirmShipmentDelivered": {
-            "required": [
-              "id",
-              "deliveredAt"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "hideInForm": false
-              },
-              {
-                "name": "deliveredAt",
-                "hideInForm": false
-              }
-            ]
-          }
-        },
-        "queries": {
-          "ListShipmentsReady": {
-            "description": "Shipments with status READY waiting for dispatch.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/Logistics/schemas/entities/Shipment"
-            },
-            "array": true,
-            "fields": [
-              {
-                "name": "status",
-                "description": "Filter on shipment.status (READY).",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "demandId"
-              },
-              {
-                "name": "packedAt"
-              }
-            ]
-          },
-          "GetShipment": {
-            "description": "Current state of the shipment, used by the receiver to confirm delivery.",
-            "entity": {
-              "$ref": "#/externalBoundedContexts/Logistics/schemas/entities/Shipment"
-            },
-            "fields": [
-              {
-                "name": "shipmentId",
-                "isFilter": true
-              },
-              {
-                "name": "id"
-              },
-              {
-                "name": "demandId"
-              },
-              {
-                "name": "packedAt"
-              },
-              {
-                "name": "shippedAt"
-              },
-              {
-                "name": "deliveredAt"
-              },
-              {
-                "name": "status"
-              }
-            ]
-          }
-        },
-        "entities": {
-          "Shipment": {
-            "description": "Outbound shipment of one or more units to the customer.",
-            "required": [
-              "id",
-              "demandId",
-              "status"
-            ],
-            "fields": [
-              {
-                "name": "id",
-                "description": "Unique identifier for the shipment",
-                "exampleData": [],
-                "dataType": "string"
-              },
-              {
-                "name": "demandId",
-                "description": "Demand the shipment fulfils",
-                "exampleData": [
-                  "dmd-001",
-                  "dmd-002",
-                  "dmd-003"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "packedAt",
-                "description": "Timestamp the units were packed",
-                "exampleData": [
-                  "2026-04-26T09:00:00Z",
-                  "2026-05-10T09:00:00Z",
-                  "2026-05-24T09:00:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "shippedAt",
-                "description": "Timestamp the shipment was dispatched",
-                "exampleData": [
-                  "2026-04-26T15:00:00Z",
-                  "2026-05-10T15:00:00Z",
-                  "2026-05-24T15:00:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "deliveredAt",
-                "description": "Timestamp the shipment was confirmed delivered",
-                "exampleData": [
-                  "2026-04-30T11:00:00Z",
-                  "2026-05-14T11:00:00Z",
-                  "2026-05-28T11:00:00Z"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "status",
-                "description": "Shipment lifecycle status (PREPARING, READY, IN_TRANSIT, DELIVERED)",
-                "exampleData": [
-                  "PREPARING",
-                  "READY",
-                  "IN_TRANSIT"
-                ],
-                "dataType": "string"
-              },
-              {
-                "name": "units",
-                "description": "Units included in this shipment",
+                "name": "teamMembers",
+                "description": "Members of this project",
                 "array": true,
                 "exampleData": [
                   "Object",
@@ -3278,9 +797,250 @@
                   "Object"
                 ],
                 "relatedEntity": {
-                  "$ref": "#/schemas/entities/Unit"
+                  "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/TeamMember"
                 },
                 "dataType": "object"
+              },
+              {
+                "name": "workflows",
+                "description": "Workflows in this project",
+                "array": true,
+                "exampleData": [
+                  "Object",
+                  "Object",
+                  "Object"
+                ],
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/QlerifyPlatform/schemas/entities/Workflow"
+                },
+                "dataType": "object"
+              }
+            ]
+          },
+          "TeamMember": {
+            "description": "A membership linking a user to a project, with per-user workflow ordering. The admin membership is auto-created with the project.",
+            "required": [
+              "id",
+              "userId",
+              "email",
+              "projectId"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the team member / project membership",
+                "exampleData": [
+                  "tm-9001",
+                  "tm-9002",
+                  "tm-9003"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "userId",
+                "description": "The member user (references User)",
+                "exampleData": [
+                  "a1b2c3d4-1111-2222-3333-444455556666",
+                  "f0e9d8c7-aaaa-bbbb-cccc-ddddeeeeffff",
+                  "12345678-90ab-cdef-1234-567890abcdef"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "email",
+                "description": "Email of the member (used for invites before the user exists)",
+                "exampleData": [
+                  "ada@example.com",
+                  "grace@company.org",
+                  "linus@mail.net"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "projectId",
+                "description": "The project this membership grants access to (references Project)",
+                "exampleData": [
+                  "proj-5001",
+                  "proj-6002",
+                  "proj-7003"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "lastLogin",
+                "description": "Last time the member accessed the project",
+                "exampleData": [
+                  "2026-01-20T09:00:00Z",
+                  "2026-02-10T13:15:00Z",
+                  "2026-03-25T17:45:00Z"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "createdAt",
+                "description": "Timestamp when the membership was created",
+                "exampleData": [
+                  "2026-01-15T10:05:00Z",
+                  "2026-02-03T08:40:00Z",
+                  "2026-03-21T14:10:00Z"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "workflowOrder",
+                "description": "Ordered list of workflow ids as arranged by this member",
+                "exampleData": [
+                  "wf-abc123,wf-def456",
+                  "wf-ghi789",
+                  "wf-abc123,wf-def456,wf-ghi789"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "starredWorkflowOrder",
+                "description": "Ordered list of starred workflow ids for this member",
+                "exampleData": [
+                  "wf-abc123",
+                  "wf-def456"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "Workflow": {
+            "description": "A BPMN-style event-storming diagram belonging to a project; created empty during onboarding.",
+            "required": [
+              "id",
+              "name",
+              "projectId"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the workflow",
+                "exampleData": [
+                  "wf-abc123",
+                  "wf-def456",
+                  "wf-ghi789"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "name",
+                "description": "Workflow name",
+                "exampleData": [
+                  "Order Fulfilment",
+                  "User Onboarding",
+                  "Claims Handling"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "projectId",
+                "description": "Project this workflow belongs to (references Project)",
+                "exampleData": [
+                  "proj-5001",
+                  "proj-6002",
+                  "proj-7003"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "version",
+                "description": "Optimistic-locking version of the workflow",
+                "exampleData": [
+                  "1",
+                  "2",
+                  "15"
+                ],
+                "dataType": "number"
+              },
+              {
+                "name": "createdAt",
+                "description": "Timestamp when the workflow was created",
+                "exampleData": [
+                  "2026-01-15T10:10:00Z",
+                  "2026-02-03T08:50:00Z",
+                  "2026-03-21T14:20:00Z"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "updatedAt",
+                "description": "Timestamp when the workflow was last updated",
+                "exampleData": [
+                  "2026-01-16T11:00:00Z",
+                  "2026-02-05T09:25:00Z",
+                  "2026-03-23T10:30:00Z"
+                ],
+                "dataType": "string"
+              }
+            ]
+          }
+        },
+        "valueObjects": {
+          "Picture": {
+            "description": "Value object describing a user's profile picture and its S3 storage location; immutable and replaced as a whole.",
+            "fields": [
+              {
+                "name": "name",
+                "description": "File name of the picture",
+                "exampleData": [
+                  "avatar.png",
+                  "profile.jpg",
+                  "me.webp"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "url",
+                "description": "Public URL of the picture",
+                "exampleData": [
+                  "https://cdn.example.com/avatar.png",
+                  "https://cdn.example.com/profile.jpg",
+                  "https://cdn.example.com/me.webp"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "mimeType",
+                "description": "MIME type of the picture",
+                "exampleData": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "region",
+                "description": "S3 region where the file is stored",
+                "exampleData": [
+                  "eu-west-1",
+                  "us-east-1",
+                  "eu-north-1"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "bucket",
+                "description": "S3 bucket where the file is stored",
+                "exampleData": [
+                  "qlerify-uploads",
+                  "qlerify-prod-files",
+                  "qlerify-eu"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "key",
+                "description": "S3 object key of the stored file",
+                "exampleData": [
+                  "pictures/ada.png",
+                  "pictures/grace.jpg",
+                  "pictures/linus.webp"
+                ],
+                "dataType": "string"
               }
             ]
           }
@@ -3288,19 +1048,6 @@
       }
     }
   },
-  "groups": [
-    {
-      "name": "DS0",
-      "startSlotX": 0
-    },
-    {
-      "name": "DS1",
-      "startSlotX": 3
-    },
-    {
-      "name": "Group 3",
-      "startSlotX": 6
-    }
-  ],
+  "groups": [],
   "releases": []
 }

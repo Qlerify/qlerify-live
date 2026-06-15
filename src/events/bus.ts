@@ -92,6 +92,25 @@ type Subscriber = (ev: EmittedEvent) => Promise<void> | void;
 const subscribers = new Map<string, Subscriber[]>();
 const wildcardSubscribers: Subscriber[] = [];
 
+// Scope override: the generic simulator runs every command of one "run" with the
+// run's root-instance id set here, so emitted events are grouped by that id
+// (written to EventLog.demandId) without depending on the Ericsson-only
+// resolveDemandId aggregate-walk. null → fall back to resolveDemandId.
+let scopeOverride: string | null = null;
+export function setScopeOverride(id: string | null): void {
+  scopeOverride = id;
+}
+/** Run `fn` with the event scope pinned to `id`, restoring the prior scope after. */
+export async function withScope<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const prev = scopeOverride;
+  scopeOverride = id;
+  try {
+    return await fn();
+  } finally {
+    scopeOverride = prev;
+  }
+}
+
 export function subscribe(ref: string, fn: Subscriber) {
   const list = subscribers.get(ref) ?? [];
   list.push(fn);
@@ -104,7 +123,7 @@ export function subscribeAll(fn: Subscriber) {
 
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
-  const demandId = await resolveDemandId(def.aggregateRoot, ev.aggregateId, ev.payload);
+  const demandId = scopeOverride ?? (await resolveDemandId(def.aggregateRoot, ev.aggregateId, ev.payload));
 
   await prisma.eventLog.create({
     data: {

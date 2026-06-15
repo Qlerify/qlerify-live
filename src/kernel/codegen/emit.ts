@@ -56,25 +56,69 @@ ${exports}
 `;
 }
 
-/** src/commands/registry.generated.ts — side-effect registration of detect/DESCRIBE. */
+/** src/commands/registry.generated.ts — side-effect registration of every
+ * generated command: its handler (from .gen.ts) plus detect/DESCRIBE (from
+ * .logic.ts). Imported once at startup so the HTTP layer can mount routes and
+ * serve /describe + /detect for the whole generated command set. */
 export function registryContent(ds: CommandDescriptor[]): string {
   const imports = ds
-    .map((d) => `import * as ${d.handlerName} from "../${d.bcDir}/${d.aggDir}/${d.kebab}.logic.js";`)
+    .map(
+      (d) =>
+        `import { ${d.handlerName} } from "../${d.bcDir}/${d.aggDir}/${d.kebab}.gen.js";\n` +
+        `import * as ${d.handlerName}Logic from "../${d.bcDir}/${d.aggDir}/${d.kebab}.logic.js";`,
+    )
     .join("\n");
   const regs = ds
     .map(
       (d) =>
-        `register(${JSON.stringify(d.kebab)}, { commandName: ${JSON.stringify(d.commandName)}, boundedContext: ${JSON.stringify(d.boundedContext)}, handlerName: ${JSON.stringify(d.handlerName)}, eventRef: ${JSON.stringify(d.eventRef)}, role: ${JSON.stringify(d.role)}, detect: ${d.handlerName}.detect, DESCRIBE: ${d.handlerName}.DESCRIBE });`,
+        `register(${JSON.stringify(d.kebab)}, { commandName: ${JSON.stringify(d.commandName)}, boundedContext: ${JSON.stringify(d.boundedContext)}, handlerName: ${JSON.stringify(d.handlerName)}, route: ${JSON.stringify(`/commands/${d.bcDir}/${d.kebab}`)}, eventRef: ${JSON.stringify(d.eventRef)}, role: ${JSON.stringify(d.role)}, handler: ${d.handlerName}, detect: ${d.handlerName}Logic.detect, DESCRIBE: ${d.handlerName}Logic.DESCRIBE });`,
     )
     .join("\n");
   return `${HEADER}
 //
-// Side-effect registration of each generated command's detect() predicate and
-// DESCRIBE text, keyed by HTTP route segment. Imported once at server startup
-// (src/http/routes.ts) to back /commands/:bc/:name/describe and /detect.
+// Side-effect registration of each generated command (handler + detect +
+// DESCRIBE), keyed by HTTP route segment. Imported once at server startup
+// (src/http/routes.ts) to mount routes and back /describe and /detect.
 import { register } from "./registry.js";
 ${imports}
 
 ${regs}
+`;
+}
+
+/** The default .logic.ts written for a command that has no hand/AI-authored
+ * logic yet (e.g. a brand-new command, including after a model swap). It is a
+ * thin delegate to the GENERIC BASE COMMAND (src/commands/base.ts), so the
+ * command WORKS immediately — it creates/updates its aggregate from the command
+ * fields + the entity's example data and emits the event, with no AI. The base
+ * looks the command up in the live model by name on every call, so this stub
+ * carries no model data and stays correct across hot reloads.
+ *
+ * Authoring real logic = replace this file with apply()/detect()/DESCRIBE that
+ * import nothing from base.js (like the SAP commands). The generator NEVER
+ * overwrites an existing .logic.ts, so the override is a clean file swap. */
+export function logicStubContent(d: CommandDescriptor): string {
+  return `// 🌱 GENERATED default logic for "${d.eventName}" (${d.commandName}).
+// Delegates to the generic base command — create/update the ${d.aggregate} from
+// the command fields + example data, then emit the event. This WORKS as-is.
+// To add preconditions, status transitions, or cross-aggregate effects, replace
+// this file with a real apply()/detect()/DESCRIBE (import nothing from base.js),
+// by hand or via:  npm run codegen:ai -- ${d.commandName} ${d.boundedContext}
+// The deterministic generator never overwrites this file once it exists.
+import { genericApply, genericDetect, genericDescribe } from "../../commands/base.js";
+import type { CommandContext, DetectInput, DetectResult } from "../../commands/runtime.js";
+import type { ${d.commandName}Args } from "./${d.kebab}.gen.js";
+
+const COMMAND = "${d.commandName}";
+
+export async function apply(ctx: CommandContext<${d.commandName}Args>): Promise<unknown> {
+  return genericApply(COMMAND, ctx);
+}
+
+export async function detect(input: DetectInput): Promise<DetectResult> {
+  return genericDetect(COMMAND, input);
+}
+
+export const DESCRIBE = genericDescribe(COMMAND);
 `;
 }

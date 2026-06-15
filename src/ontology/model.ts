@@ -21,7 +21,7 @@
 // linear 28-step ordering, the 5-act `phase` grouping, and the `derived` flag
 // for rules-engine events. Those live as a thin overlay in events/registry.ts.
 
-import { readFileSync, watch } from "node:fs";
+import { readFileSync, existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,10 +87,26 @@ export interface OntologyEvent {
   acceptanceCriteria: string[];
   /** Keys of the events that must occur before this one (the DAG edges). */
   predecessors: string[];
+  // --- Overlay-sourced (non-DDD) facts; see .qlerify/overlay.json ---
+  /** Position in the demo's linear walk; undefined → ordered by topology. */
+  order?: number;
+  /** 5-act grouping the demo UI uses; undefined → 1. */
+  phase?: number;
+  /** True for rules-engine events emitted automatically (not a user action). */
+  derived?: boolean;
 }
 
 export interface Ontology {
   version: number;
+  /** UI title for the workflow: overlay.title, else the primary bounded context. */
+  title: string;
+  /** The primary bounded context (the export's root context). */
+  primaryBoundedContext: string;
+  /** The aggregate the workflow centers on — the root event's aggregate root.
+   * Drives the dashboard's per-instance vocabulary (e.g. "Demand" / "User"). */
+  rootAggregate: string;
+  /** Overlay keys that don't match any current event (stale after a swap). */
+  staleOverlayKeys: string[];
   boundedContexts: string[];
   roles: string[];
   events: OntologyEvent[];
@@ -107,6 +123,9 @@ export interface Ontology {
   successorsOf(key: string): string[];
   /** Kahn topological order over the `follows` DAG; throws on a cycle. */
   topologicalOrder(): string[];
+  /** Demo linearization: by overlay `order` where present, topology as the
+   * tiebreaker / fallback. This replaces the old hardcoded STEP_SEQUENCE. */
+  linearOrder(): string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +176,17 @@ interface RawWorkflow extends RawContext {
   externalBoundedContexts?: Record<string, RawContext>;
 }
 
+/** .qlerify/overlay.json — non-DDD facts keyed by domain-event key. */
+interface RawOverlay {
+  /** Human title for the whole workflow (UI header). Defaults to the primary
+   * bounded context when omitted. */
+  title?: string;
+  /** The aggregate the workflow centers on (drives per-instance UI vocabulary).
+   * Defaults to a heuristic (the first root event's aggregate) when omitted. */
+  rootAggregate?: string;
+  events?: Record<string, { order?: number; phase?: number; derived?: boolean }>;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -177,8 +207,19 @@ function readJson<T>(path: string): T {
 // Loader
 // ---------------------------------------------------------------------------
 
+/** Read the optional overlay sidecar. A missing file is fine (returns {}); a
+ * malformed one throws, which (via reloadOntology) leaves the previous model in
+ * place — the same fail-soft contract as a malformed workflow.json. */
+function readOverlay(qlerifyDir: string): RawOverlay {
+  const path = join(qlerifyDir, "overlay.json");
+  if (!existsSync(path)) return {};
+  return readJson<RawOverlay>(path);
+}
+
 export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   const wf = readJson<RawWorkflow>(join(qlerifyDir, "workflow.json"));
+  const overlay = readOverlay(qlerifyDir);
+  const overlayEvents = overlay.events ?? {};
 
   // Every bounded context as an equal (name, contribution) pair: the primary
   // first, then each external one. The primary's name defaults to "Primary"
@@ -243,6 +284,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
       if (!queryByName.has(rm.name)) problems.push(`event ${key}: read model "${rm.name}" is not a known query`);
     }
 
+    const ov = overlayEvents[key];
     return {
       key,
       ref: `#/domainEvents/${key}`,
@@ -254,6 +296,9 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
       readModels,
       acceptanceCriteria: raw.acceptanceCriteria ?? [],
       predecessors,
+      ...(ov?.order !== undefined ? { order: ov.order } : {}),
+      ...(ov?.phase !== undefined ? { phase: ov.phase } : {}),
+      ...(ov?.derived ? { derived: true } : {}),
     };
   });
 
@@ -263,6 +308,12 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
       if (!eventByKey.has(p)) problems.push(`event ${e.key}: predecessor "${p}" does not exist`);
     }
   }
+  // Overlay keys that no longer resolve to a model event are IGNORED, not fatal:
+  // after a model swap the old overlay is naturally stale, and it must never
+  // block the new model from loading. Unknown keys simply don't apply (events
+  // fall back to topological order / phase 1); `staleOverlayKeys` surfaces them
+  // (e.g. /sim/registry-status) so the overlay can be regenerated via the swap.
+  const staleOverlayKeys = Object.keys(overlayEvents).filter((k) => !eventByKey.has(k));
 
   if (problems.length > 0) {
     throw new Error(`Invalid Qlerify ontology (${problems.length} problem(s)):\n  - ${problems.join("\n  - ")}`);
@@ -278,7 +329,15 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   for (const e of events) if (e.aggregateRoot) aggregateToBc.set(e.aggregateRoot, e.boundedContext);
 
   const roles = wf.roles ?? [...new Set(events.map((e) => e.role))].sort();
+  const primaryBoundedContext = contexts[0]?.[0] ?? "Workflow";
   const boundedContexts = contexts.map(([bc]) => bc).sort();
+  // An overlay whose event keys don't match this model belongs to a PREVIOUSLY
+  // loaded model — its title/rootAggregate overrides are stale and must be
+  // ignored (the model-switch "stale labels" bug). The override only applies
+  // when the overlay is actually for this model (at least one event key matches).
+  const overlayKeys = Object.keys(overlayEvents);
+  const overlayForThisModel = overlayKeys.length === 0 || overlayKeys.some((k) => eventByKey.has(k));
+  const title = (overlayForThisModel && overlay.title) || primaryBoundedContext;
 
   function topologicalOrder(): string[] {
     const indegree = new Map(events.map((e) => [e.key, e.predecessors.length]));
@@ -302,8 +361,39 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   // Fail fast if the graph is not a DAG.
   topologicalOrder();
 
+  // The aggregate the workflow centers on: an explicit overlay.rootAggregate if
+  // given, else a heuristic (first root event's aggregate in linear order, then
+  // the first event's, then the first entity).
+  const rootAggregate =
+    (overlayForThisModel && overlay.rootAggregate) ||
+    // The aggregate of the FIRST step in the workflow (the entry point), then the
+    // first DAG-root event's, then the first entity.
+    eventByKey.get(linearOrder()[0] ?? "")?.aggregateRoot ||
+    linearOrder().map((k) => eventByKey.get(k)!).find((e) => e.predecessors.length === 0)?.aggregateRoot ||
+    entities[0]?.name ||
+    "Item";
+
+  function linearOrder(): string[] {
+    const topo = topologicalOrder();
+    const topoIndex = new Map(topo.map((k, i) => [k, i]));
+    return events
+      .map((e) => e.key)
+      .sort((a, b) => {
+        const ea = eventByKey.get(a)!;
+        const eb = eventByKey.get(b)!;
+        const oa = ea.order ?? Number.POSITIVE_INFINITY;
+        const ob = eb.order ?? Number.POSITIVE_INFINITY;
+        if (oa !== ob) return oa - ob;
+        return topoIndex.get(a)! - topoIndex.get(b)!;
+      });
+  }
+
   return {
     version: wf.version ?? 0,
+    title,
+    primaryBoundedContext,
+    rootAggregate,
+    staleOverlayKeys,
     boundedContexts,
     roles,
     events,
@@ -323,6 +413,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
     boundedContextOf: (aggregate) => aggregateToBc.get(aggregate),
     successorsOf: (key) => successors.get(key) ?? [],
     topologicalOrder,
+    linearOrder,
   };
 }
 
@@ -338,6 +429,9 @@ export function getOntology(): Ontology {
 export function ontologyView(ontology: Ontology = getOntology()) {
   return {
     version: ontology.version,
+    title: ontology.title,
+    primaryBoundedContext: ontology.primaryBoundedContext,
+    rootAggregate: ontology.rootAggregate,
     boundedContexts: ontology.boundedContexts,
     roles: ontology.roles,
     events: ontology.events,
@@ -388,7 +482,7 @@ export function startOntologyWatch(log?: WatchLogger): void {
   watching = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   watch(QLERIFY_DIR, (_event, filename) => {
-    if (filename && filename !== "workflow.json") return;
+    if (filename && filename !== "workflow.json" && filename !== "overlay.json") return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       try {

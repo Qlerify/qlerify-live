@@ -6,8 +6,15 @@
 // enforces the lane→command constraint from the workflow.
 
 import type { FastifyInstance } from "fastify";
-import { roleFromRequest } from "../auth.js";
-import { isHandledError } from "../errors.js";
+import { roleFromRequest, assertRole } from "../auth.js";
+import { isHandledError, DomainError } from "../errors.js";
+import { genericApply } from "../commands/base.js";
+import { kebabCase } from "../kernel/codegen/introspect.js";
+import { applyModel, applyStatus } from "../twin/apply.js";
+import {
+  isEricssonModel, genericNewInstance, genericStep, genericCurrentStep,
+  genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll,
+} from "../twin/sim.js";
 
 // Commands
 import * as demand from "../helix/demand/commands.js";
@@ -15,7 +22,6 @@ import * as bp from "../helix/buildplan/commands.js";
 import * as build from "../helix/build/commands.js";
 import * as project from "../prim/project/commands.js";
 import * as er from "../prim/engineering-release/commands.js";
-import * as po from "../sap/purchase-order/commands.js";
 import * as ec from "../ester/engineering-change/commands.js";
 import * as lb from "../compass/line-booking/commands.js";
 import * as test from "../test/test-result/commands.js";
@@ -32,7 +38,7 @@ import * as logisticsQ from "../logistics/queries.js";
 
 import { prisma } from "../db.js";
 import { EVENTS, registryError } from "../events/registry.js";
-import { ontologyView } from "../ontology/model.js";
+import { ontologyView, getOntology } from "../ontology/model.js";
 import { fetchLatestModel, modelStatus, rollModel, restoreModel, modelFile, getModelSource, writeSourceOverride } from "../ontology/sync.js";
 import {
   nextStep, currentStepIndex, newDemand, resetDemand, resetAll,
@@ -41,6 +47,7 @@ import { runAgentTurn } from "../chat/agent.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
+import { swapPreview } from "../kernel/codegen/swap.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
 export function registerRoutes(app: FastifyInstance) {
@@ -80,11 +87,8 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/commands/prim/freeze-bom-at-ds1",    cmd(project.freezeBOMAtDS1));
   app.post("/commands/prim/freeze-bom-at-ds2",    cmd(project.freezeBOMAtDS2));
   app.post("/commands/prim/approve-engineering-release", cmd(er.approveEngineeringRelease));
-  // SAP
-  app.post("/commands/sap/order-material",         cmd(po.orderMaterial));
-  app.post("/commands/sap/confirm-order-with-eta", cmd(po.confirmOrderWithETA));
-  app.post("/commands/sap/change-material-eta",    cmd(po.changeMaterialETA));
-  app.post("/commands/sap/receive-material",       cmd(po.receiveMaterial));
+  // SAP commands are generated — mounted dynamically from the codegen registry
+  // below (see "Generated commands"), so they are not hand-listed here.
   // ESTER
   app.post("/commands/ester/raise-engineering-change",   cmd(ec.raiseEngineeringChange));
   app.post("/commands/ester/approve-engineering-change", cmd(ec.approveEngineeringChange));
@@ -97,6 +101,41 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/commands/logistics/pick-and-pack-units",       cmd(ship.pickAndPackUnits));
   app.post("/commands/logistics/dispatch-shipment",         cmd(ship.dispatchShipment));
   app.post("/commands/logistics/confirm-shipment-delivered", cmd(ship.confirmShipmentDelivered));
+
+  // Generated commands — mounted from the codegen registry. Any command produced
+  // by src/kernel/codegen (SAP today; whole bounded contexts after a model swap)
+  // gets its POST route here automatically, with no edit to this file.
+  for (const c of listRegisteredCommands()) {
+    app.post(c.route, cmd(c.handler));
+  }
+
+  // Generic command dispatch — the fallback for ANY model command that has no
+  // generated/authored handler (static routes above take precedence). Resolves
+  // the command from the live model by its kebab name and runs it through the
+  // generic base command, so a freshly-swapped model is runnable with zero
+  // codegen / restart. Role + required-field checks come from the model.
+  app.post("/commands/:bc/:name", async (req: any, reply: any) => {
+    const name = (req.params as any).name as string;
+    const ont = getOntology();
+    const event = ont.events.find((e) => e.commandName && kebabCase(e.commandName) === name);
+    if (!event) return reply.code(404).send({ error: "NOT_FOUND", message: `no command "${name}" in the loaded model` });
+    try {
+      const role = roleFromRequest(req);
+      assertRole(role, event.role);
+      const args = (req.body ?? {}) as Record<string, unknown>;
+      const command = ont.command(event.commandName);
+      for (const field of command?.required ?? []) {
+        const v = args[field];
+        if (v === undefined || v === null || v === "") throw new DomainError(`${field} is required`);
+      }
+      const out = await genericApply(event.commandName, { args, role });
+      return reply.code(200).send(out);
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      req.log.error({ err }, "generic command failed");
+      return reply.code(500).send({ error: "INTERNAL", message: (err as Error).message });
+    }
+  });
 
   // -- QUERIES --
   app.get("/queries/list-demands", async () => helixQ.listDemands());
@@ -154,6 +193,10 @@ export function registerRoutes(app: FastifyInstance) {
   // Codegen drift: which generated commands are current vs. need regeneration
   // after a model hot-reload (gwt-drift / schema-drift / missing-in-model).
   app.get("/api/commands/status", async () => codegenStatus());
+  // Swap preview: read-only diff of what applying the current model to the DB
+  // would DROP (data permanently lost), create, and keep. The UI shows this as
+  // the irreversible-swap warning before anyone runs `npm run swap --yes`.
+  app.get("/api/model/swap-preview", async () => swapPreview());
   // Human-readable description of what a command does and how detection works.
   app.get("/commands/:bc/:name/describe", async (req, reply) => {
     const { name } = req.params as { bc: string; name: string };
@@ -218,6 +261,21 @@ export function registerRoutes(app: FastifyInstance) {
       return reply.code(502).send({ error: "FETCH_FAILED", message: err?.message ?? String(err) });
     }
   });
+
+  // Apply the loaded model: rebuild the overlay + DROP/CREATE the projection
+  // tables to match it (in-process, no restart). Destructive by design — the
+  // projection tables are disposable. The UI shows a loader and polls
+  // /api/model/apply-status while this runs.
+  app.post("/api/model/apply", async (req, reply) => {
+    const resetOverlay = (req.body as any)?.resetOverlay;
+    try {
+      const result = await applyModel({ resetOverlay });
+      return { ok: true, ...result, status: applyStatus() };
+    } catch (err: any) {
+      return reply.code(500).send({ error: "APPLY_FAILED", message: err?.message ?? String(err), status: applyStatus() });
+    }
+  });
+  app.get("/api/model/apply-status", async () => applyStatus());
   app.post("/api/model/roll", async (req, reply) => {
     const dir = (req.body as any)?.direction;
     if (dir !== "back" && dir !== "forward") {
@@ -252,6 +310,9 @@ export function registerRoutes(app: FastifyInstance) {
     ok: registryError == null,
     error: registryError,
     eventCount: EVENTS.length,
+    // Non-fatal: overlay entries left over from a previous model (regenerate the
+    // overlay via the swap to restore curated ordering/phases for those events).
+    staleOverlayKeys: getOntology().staleOverlayKeys,
   }));
   app.get("/sim/events", async () => EVENTS);
   app.get("/sim/event-log", async (req) => {
@@ -297,6 +358,28 @@ export function registerRoutes(app: FastifyInstance) {
 
   app.get("/sim/health", async () => ({ ok: true, ts: new Date().toISOString() }));
 
+  // Model-derived UI labels for the dashboard — so the header/buttons follow the
+  // loaded model instead of hardcoded domain strings. Hot-reloads with the model.
+  app.get("/sim/meta", async () => {
+    const o = getOntology();
+    const singular = o.rootAggregate;
+    return {
+      title: o.title,
+      primaryBoundedContext: o.primaryBoundedContext,
+      rootAggregate: singular,
+      rootAggregatePlural: pluralize(singular),
+      boundedContextCount: o.boundedContexts.length,
+      aggregateCount: new Set(o.events.map((e) => e.aggregateRoot).filter(Boolean)).size,
+      eventCount: EVENTS.length,
+      // Whether the hand-written Ericsson simulator drives this model, or the
+      // model-generic simulator. The frontend renders the dashboard accordingly.
+      ericsson: isEricssonModel(),
+    };
+  });
+  // Generic per-run detail (root row + events + rows created in the run) — used
+  // by the dashboard detail view for non-Ericsson models.
+  app.get("/sim/instance/:id", async (req) => genericInstanceDetail((req.params as any).id));
+
   // ---------------- Chat assistant ----------------
   app.get("/chat/info", async () => ({
     model: process.env.CHAT_MODEL ?? "claude-sonnet-4-6",
@@ -322,8 +405,10 @@ export function registerRoutes(app: FastifyInstance) {
     }
   });
 
-  // List all demands with progress (the dashboard's main query).
+  // List all demands with progress (the dashboard's main query). For non-Ericsson
+  // models, list the root-aggregate instances via the generic simulator.
   app.get("/sim/demands", async () => {
+    if (!isEricssonModel()) return genericListInstances();
     const demands = await prisma.demand.findMany({ orderBy: { createdAt: "desc" } });
     const out: any[] = [];
     const nowMs = Date.now();
@@ -346,22 +431,57 @@ export function registerRoutes(app: FastifyInstance) {
     return out;
   });
 
-  // Create a fresh demand (fires Hardware Demand Created).
-  app.post("/sim/demands", async () => newDemand());
+  // Create a fresh demand (fires Hardware Demand Created). Guarded: returns a
+  // clean 422 when the loaded model isn't the one the simulator is wired to.
+  app.post("/sim/demands", async (_req, reply) => {
+    try {
+      if (isEricssonModel()) return await newDemand();
+      const inst = await genericNewInstance();
+      return { id: inst.id, template: { aggregate: inst.aggregate } };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
 
   app.get("/sim/current-step", async (req) => {
     const demandId = (req.query as any)?.demandId as string | undefined;
     if (!demandId) return { error: "demandId required" };
+    if (!isEricssonModel()) return { ...(await genericCurrentStep(demandId)), demandId };
     return { index: await currentStepIndex(demandId), total: EVENTS.length, demandId };
   });
 
-  app.post("/sim/next", async (req) => {
+  app.post("/sim/next", async (req, reply) => {
     const body = (req.body ?? {}) as { demandId?: string; withDisruptions?: boolean };
     if (!body.demandId) throw new Error("demandId required");
-    return nextStep(body.demandId, body.withDisruptions ?? true);
+    try {
+      if (!isEricssonModel()) return await genericStep(body.demandId);
+      return await nextStep(body.demandId, body.withDisruptions ?? true);
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
   });
+  // DELETE — remove an item entirely (the dashboard's ✕). Distinct from /sim/reset.
+  // Generic: delete the run's rows (root + everything it created) + its events.
+  // Ericsson: resetDemand wipes the demand's whole chain (and the demand row).
+  app.post("/sim/delete", async (req) => {
+    const body = (req.body ?? {}) as { demandId?: string };
+    if (!body.demandId) throw new Error("demandId required");
+    if (!isEricssonModel()) await genericDeleteInstance(body.demandId);
+    else await resetDemand(body.demandId);
+    return { ok: true };
+  });
+
+  // RESET — start over / clear (the detail view's Reset button). For a generic
+  // model with a demandId this also removes the run; without one it clears all.
   app.post("/sim/reset", async (req) => {
     const body = (req.body ?? {}) as { demandId?: string };
+    if (!isEricssonModel()) {
+      if (body.demandId) await genericDeleteInstance(body.demandId);
+      else await genericDeleteAll();
+      return { ok: true };
+    }
     if (body.demandId) await resetDemand(body.demandId);
     else await resetAll();
     return { ok: true };
@@ -370,6 +490,14 @@ export function registerRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as { demandId?: string; withDisruptions?: boolean };
     if (!body.demandId) throw new Error("demandId required");
     const steps: any[] = [];
+    if (!isEricssonModel()) {
+      for (let guard = 0; guard < 500; guard++) {
+        const step = await genericStep(body.demandId);
+        steps.push(step);
+        if (step.done) break;
+      }
+      return { steps };
+    }
     while (true) {
       const idx = await currentStepIndex(body.demandId);
       if (idx >= EVENTS.length) break;
@@ -378,6 +506,16 @@ export function registerRoutes(app: FastifyInstance) {
     }
     return { steps };
   });
+}
+
+// Naive English pluralization for UI labels (User→Users, Policy→Policies,
+// Address→Addresses). Good enough for a header; the model can override the whole
+// title via overlay.json if a domain term doesn't pluralize cleanly.
+function pluralize(word: string): string {
+  if (!word) return word;
+  if (/[^aeiou]y$/i.test(word)) return word.slice(0, -1) + "ies";
+  if (/(s|x|z|ch|sh)$/i.test(word)) return word + "es";
+  return word + "s";
 }
 
 // Snapshot scoped to one demand's chain.

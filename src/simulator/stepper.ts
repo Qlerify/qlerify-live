@@ -5,6 +5,8 @@
 import { prisma } from "../db.js";
 import { wireDerivedEvents } from "../events/derived.js";
 import { setBusinessClock, businessTimeForStep } from "../events/clock.js";
+import { getOntology } from "../ontology/model.js";
+import { DomainError } from "../errors.js";
 import { createDemand } from "../helix/demand/commands.js";
 import { defineBuildQuantity, updateBuildPlan, lockBuildPlan } from "../helix/buildplan/commands.js";
 import {
@@ -66,7 +68,24 @@ const DEFAULT_DEMAND_TEMPLATES = [
   { customerId: "cust-15", productName: "Radio Unit X", qty: 2, requestedWeek: "2026-W26" },
 ];
 
+// The step-through dashboard simulator is hardcoded to the Ericsson demo
+// workflow (its 28 step bodies call Ericsson commands and emit Ericsson events).
+// When a different model is loaded, those events aren't in the registry, so
+// firing a step would 500 with a cryptic "unknown event ref". Guard with a clear,
+// actionable message instead. (Generalizing the simulator to drive ANY model via
+// the generic base command is a separate, larger piece — see ARCHITECTURE.md.)
+function assertSimulatorModel(): void {
+  if (!getOntology().eventByKey("HardwareDemandCreated")) {
+    throw new DomainError(
+      `The step-through simulator is wired to the Ericsson demo workflow, but the loaded model is "${getOntology().title}". ` +
+        `The dashboard's "+ New" and step buttons can't drive a different model yet. ` +
+        `The model-driven process graph (/api/ontology) does reflect your model; to run a model end-to-end, apply it with the swap to materialise its tables + commands, then drive them via the command API.`,
+    );
+  }
+}
+
 export async function newDemand(): Promise<{ id: string; template: typeof DEFAULT_DEMAND_TEMPLATES[number] }> {
+  assertSimulatorModel();
   wireDerivedEvents();
   const existing = await prisma.demand.count();
   const tmpl = DEFAULT_DEMAND_TEMPLATES[existing % DEFAULT_DEMAND_TEMPLATES.length]!;
@@ -323,6 +342,7 @@ export async function currentStepIndex(demandId: string): Promise<number> {
 }
 
 export async function nextStep(demandId: string, withDisruptions = true): Promise<StepResult> {
+  assertSimulatorModel();
   wireDerivedEvents();
   const idx = await currentStepIndex(demandId);
   if (idx >= EVENTS.length) {

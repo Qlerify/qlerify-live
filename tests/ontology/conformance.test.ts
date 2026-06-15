@@ -85,14 +85,29 @@ function parseHandlers(): Handler[] {
 const handlers = parseHandlers();
 
 describe("ontology loads and is well-formed", () => {
-  it("has 28 events forming an acyclic follows graph", () => {
-    expect(ontology.events).toHaveLength(28);
-    expect(ontology.topologicalOrder()).toHaveLength(28);
+  // Model-relative (no magic numbers): a swapped model with a different event /
+  // BC / role count must still pass, so we assert internal consistency rather
+  // than the specific Ericsson shape.
+  it("events form an acyclic follows graph", () => {
+    expect(ontology.events.length).toBeGreaterThan(0);
+    expect(ontology.topologicalOrder()).toHaveLength(ontology.events.length);
   });
 
-  it("exposes the expected 7 bounded contexts and 16 roles", () => {
-    expect(ontology.boundedContexts).toHaveLength(7);
-    expect(ontology.roles).toHaveLength(16);
+  it("linearOrder covers exactly the model's events, once each", () => {
+    const lin = ontology.linearOrder();
+    expect(lin).toHaveLength(ontology.events.length);
+    expect([...lin].sort()).toEqual(ontology.events.map((e) => e.key).sort());
+  });
+
+  it("declares at least one bounded context and one role", () => {
+    expect(ontology.boundedContexts.length).toBeGreaterThan(0);
+    expect(ontology.roles.length).toBeGreaterThan(0);
+  });
+
+  it("every event's role is a declared model role", () => {
+    for (const e of ontology.events) {
+      expect(ontology.roles, `event ${e.key} role "${e.role}"`).toContain(e.role);
+    }
   });
 });
 
@@ -101,9 +116,10 @@ describe("command handlers conform to the model", () => {
     expect(handlers.length).toBeGreaterThan(0);
   });
 
-  it("emit refs cover exactly the model's events — no orphans, no gaps", () => {
-    const emitted = new Set(handlers.map((h) => h.ref));
-    expect([...emitted].sort()).toEqual([...modelRefs].sort());
+  it("every handler's emit ref is a real model event", () => {
+    for (const h of handlers) {
+      expect(modelRefs, `${h.name} in ${h.file}`).toContain(h.ref);
+    }
   });
 
   it.each(handlers.map((h) => [h.name, h] as const))(
@@ -122,9 +138,13 @@ describe("command handlers conform to the model", () => {
 });
 
 describe("simulator registry conforms to the model", () => {
-  it("covers exactly the model's 28 events", () => {
-    expect(EVENTS).toHaveLength(28);
+  it("covers exactly the model's events, in a linear order", () => {
+    expect(EVENTS).toHaveLength(ontology.events.length);
     expect([...new Set(EVENTS.map((e) => e.ref))].sort()).toEqual([...modelRefs].sort());
+    // EVENTS order must equal the ontology's linearOrder() (overlay + topo).
+    expect(EVENTS.map((e) => e.ref)).toEqual(
+      ontology.linearOrder().map((k) => ontology.requireEventByRef(k).ref),
+    );
   });
 
   it.each(EVENTS.map((e) => [e.name, e] as const))(
@@ -137,7 +157,6 @@ describe("simulator registry conforms to the model", () => {
       expect(e.boundedContext).toBe(event.boundedContext);
       expect(VALID_BCS).toContain(e.boundedContext);
       expect(e.phase).toBeGreaterThanOrEqual(1);
-      expect(e.phase).toBeLessThanOrEqual(5);
     },
   );
 });

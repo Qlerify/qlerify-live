@@ -16,7 +16,7 @@ import { withScope } from "../events/bus.js";
 import { provenanceFor } from "./provenance.js";
 import { setBusinessClock, genericBusinessTimeForStep } from "../events/clock.js";
 import { DomainError } from "../errors.js";
-import { getOntology, type Ontology, type OntologyEvent } from "../ontology/model.js";
+import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { genericApply } from "../commands/base.js";
 import * as store from "./projection-store.js";
 
@@ -98,6 +98,54 @@ function placeholder(field: string): string {
   return `${field}-${newId("").slice(0, 6)}`;
 }
 
+/** Coerce a stored-as-string example to its declared type so embedded rows read
+ * naturally (numbers as numbers, booleans as booleans). */
+function coerceExample(v: unknown, dataType?: string): unknown {
+  switch ((dataType ?? "string").toLowerCase()) {
+    case "number":
+    case "integer":
+    case "float":
+    case "decimal": {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : v;
+    }
+    case "boolean":
+      return v === true || v === "true" || v === "1";
+    default:
+      return v;
+  }
+}
+
+/** One example row from a related schema, taking each field's idx-th example
+ * (falling back to the first). Skips the surrogate `id`: embedded rows are
+ * value-shaped (e.g. a cart item, an invoice line), not separately addressable. */
+function exampleRow(schema: EntitySchema, idx: number): Record<string, unknown> {
+  const row: Record<string, unknown> = {};
+  for (const f of schema.fields) {
+    if (f.name === "id") continue;
+    const ex = f.exampleData;
+    const v = Array.isArray(ex) ? (ex[idx] ?? ex[0]) : ex;
+    if (v === undefined) continue;
+    row[f.name] = coerceExample(v, f.dataType);
+  }
+  return row;
+}
+
+/** Materialize an object-typed field's value from its `relatedEntity` schema: an
+ * array of rows when the field is a collection, else a single object. Returns
+ * undefined when there's no related schema to build from (caller falls back to
+ * exampleData). This is what turns the model's opaque "Object" placeholder into
+ * real underlying rows (cart items, invoice lines, the target-audience segment). */
+function objectFieldValue(ef: EntitySchema["fields"][number], ont: Ontology): unknown {
+  if ((ef.dataType ?? "").toLowerCase() !== "object" || !ef.relatedEntity) return undefined;
+  const sub = ont.entity(ef.relatedEntity) ?? ont.valueObject(ef.relatedEntity);
+  if (!sub) return undefined;
+  if (!ef.array) return exampleRow(sub, 0);
+  // As many rows as there are distinct examples to draw from (cap 3, min 1).
+  const n = Math.min(3, Math.max(1, ...sub.fields.map((f) => f.exampleData?.length ?? 1)));
+  return Array.from({ length: n }, (_, i) => exampleRow(sub, i));
+}
+
 /** Map aggregateRoot → its instance id already created in this run (from the log). */
 async function runInstances(scopeId: string): Promise<Map<string, string>> {
   const rows = await prisma.eventLog.findMany({
@@ -131,6 +179,10 @@ function synthesizeArgs(
       if (id) { args[name] = id; continue; }
     }
     const ef = entity?.fields.find((x) => x.name === name);
+    if (ef) {
+      const obj = objectFieldValue(ef, ont);
+      if (obj !== undefined) { args[name] = obj; continue; }
+    }
     const ex = ef?.exampleData?.[0];
     args[name] = ex !== undefined ? ex : placeholder(name);
   }

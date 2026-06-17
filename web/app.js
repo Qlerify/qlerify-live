@@ -103,6 +103,7 @@ const state = {
   // detail view
   demandId: null,
   instance: null,   // generic (non-Ericsson) per-run detail from /sim/instance
+  prevInstance: null, // the instance snapshot before the last step (generic diff)
   log: [],
   snapshot: null,
   prev: null,
@@ -1485,6 +1486,10 @@ async function loadDetail() {
       api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
       loadRegistryStatus(),
     ]);
+    // Keep the pre-step instance so the detail view can mark what this step
+    // changed (mirrors the Ericsson path's state.prev / rowChanged). Only diff
+    // within the same run — switching runs starts clean.
+    state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
     state.instance = instance;
     state.events = events;
     // newest-first so lastEventCaption() / businessByStep read the latest first
@@ -1813,25 +1818,235 @@ function detailView() {
   `;
 }
 
+// ---------------------------------------------------------------------------
+// Model-generic per-run detail. The run is one root-aggregate instance plus the
+// rows each event created; this view shows them as a relationship FOREST (child
+// aggregates nested under the aggregate root they belong to, e.g. invoice rows
+// under their invoice) and marks what the last event changed.
+// ---------------------------------------------------------------------------
+
+// Platform/bookkeeping columns we never surface as business fields.
+const GEN_HIDDEN = new Set(["version", "createdAt", "updatedAt", "_provenance"]);
+
+// Every row in the run, tagged with its aggregate. The root instance is listed
+// once under the root aggregate (the entities map may also carry it).
+function genAllRows(inst, m) {
+  const out = [];
+  const rootId = inst.root?.id;
+  if (inst.root) out.push({ agg: m.rootAggregate, row: inst.root });
+  for (const [agg, rows] of Object.entries(inst.entities || {})) {
+    for (const row of rows || []) {
+      if (agg === m.rootAggregate && row.id === rootId) continue; // already added
+      out.push({ agg, row });
+    }
+  }
+  return out;
+}
+
+// aggregate → bounded context, read off the run's event log (so each card can
+// show which system the data came from — "from the different bounded contexts").
+function genBcByAgg(inst) {
+  const map = {};
+  for (const e of inst.events || []) {
+    if (e.aggregateRoot && e.boundedContext && !map[e.aggregateRoot]) map[e.aggregateRoot] = e.boundedContext;
+  }
+  return map;
+}
+
+function genRowKey(agg, row) { return agg + "#" + (row.id ?? JSON.stringify(row)); }
+
+// Attach each row to the parent its foreign keys point at — VALUE-based: a field
+// named like "<x>Id" whose value is the id of another row links this row beneath
+// that row. Matching on the value (not the name) needs no schema and handles odd
+// FK names (a Payment's invoiceId → its Invoice row). Nesting is confined to a
+// SINGLE bounded context: a foreign key that crosses into another BC (e.g. an
+// Engagement MarketingDispatch referencing the Campaign-Management Campaign) is a
+// loose cross-context reference, not composition, so that row stays its own
+// top-level box. The root aggregate is always a forest root. Returns
+// { parentOf, childrenOf } keyed by genRowKey.
+function genRelations(allRows, m, bcByAgg) {
+  const byId = new Map(); // id value → entry
+  for (const e of allRows) if (e.row?.id != null) byId.set(String(e.row.id), e);
+  const parentOf = new Map();
+  for (const e of allRows) {
+    if (e.agg === m.rootAggregate) continue; // run root never nests under anything
+    let best = null;
+    for (const [k, v] of Object.entries(e.row)) {
+      if (k === "id" || v == null || !/Id$/.test(k)) continue;
+      const target = byId.get(String(v));
+      if (!target || target === e || target.agg === e.agg) continue;
+      // Cross-bounded-context FK → reference, not parent/child: don't nest.
+      const cbc = bcByAgg[e.agg], pbc = bcByAgg[target.agg];
+      if (cbc && pbc && cbc !== pbc) continue;
+      // Prefer the FK whose name matches the target aggregate (invoiceId→Invoice)
+      // over an incidental id collision; the most specific link wins.
+      const base = k.slice(0, -2).toLowerCase();
+      const score = target.agg.toLowerCase().includes(base) ? 2 : 1;
+      if (!best || score > best.score) best = { target, score };
+    }
+    if (best) parentOf.set(genRowKey(e.agg, e.row), genRowKey(best.target.agg, best.target.row));
+  }
+  const childrenOf = new Map();
+  for (const e of allRows) {
+    const pk = parentOf.get(genRowKey(e.agg, e.row));
+    if (!pk) continue;
+    let arr = childrenOf.get(pk);
+    if (!arr) { arr = []; childrenOf.set(pk, arr); }
+    arr.push(e);
+  }
+  return { parentOf, childrenOf };
+}
+
+// --- diff against the pre-step instance (what the last event touched) -------
+function genPrevRow(agg, id) {
+  const p = state.prevInstance;
+  if (!p || id == null) return undefined;
+  if (agg === p.rootAggregate && p.root && p.root.id === id) return p.root;
+  return (p.entities?.[agg] || []).find((r) => r.id === id);
+}
+// The aggregate instance the most recent event touched, read off the event log.
+// This is the baseline on the FIRST view of a run: the create event (e.g. the
+// root "Campaign Drafted") fires server-side at run start, so there is no
+// client-side pre-step snapshot to diff against — without this, that first step
+// would light up nothing even though every field is brand new.
+function genLastTouched() {
+  const last = state.log && state.log[0];
+  if (!last || !last.aggregateRoot || !last.aggregateId) return null;
+  return { agg: last.aggregateRoot, id: String(last.aggregateId) };
+}
+function genRowChanged(agg, row) {
+  const prev = genPrevRow(agg, row.id);
+  if (state.prevInstance) {
+    if (!prev) return true; // created by the last event
+    return JSON.stringify(prev) !== JSON.stringify(row);
+  }
+  // No pre-step snapshot yet → fall back to the event log's last-touched
+  // aggregate so the create step (and a hard page reload) still highlight.
+  const lt = genLastTouched();
+  return !!lt && lt.agg === agg && row.id != null && String(row.id) === lt.id;
+}
+function genFieldChanged(agg, row, field) {
+  const prev = genPrevRow(agg, row.id);
+  // Updated row with a known baseline → only the fields that actually differ.
+  if (prev) return JSON.stringify(prev[field]) !== JSON.stringify(row[field]);
+  // New row (or no baseline): every business field is new, so a row the last
+  // event changed lights up all of its fields.
+  return genRowChanged(agg, row);
+}
+// The previous step's value of an embedded-collection field, parsed to rows, so
+// genEmbeddedTable can highlight only the rows that are new/changed. Null when
+// there's no baseline (new parent row / first view) → all rows count as new.
+function genPrevCollection(agg, row, field) {
+  const prev = genPrevRow(agg, row.id);
+  return prev ? genParseRows(prev[field]) : null;
+}
+
+// An embedded-structure field → the rows to render as a small table under its
+// row: an array of objects (cart items, invoice lines), or a single object (a
+// value object like targetAudience) as one row. Values may arrive already
+// parsed or as a JSON string from the projection's TEXT column. Plain
+// strings/scalars (and arrays of scalars) return null → rendered inline.
+function genParseRows(v) {
+  let parsed = v;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t[0] !== "[" && t[0] !== "{") return null;
+    try { parsed = JSON.parse(t); } catch { return null; }
+  }
+  if (Array.isArray(parsed)) return parsed.length && parsed[0] && typeof parsed[0] === "object" ? parsed : null;
+  if (parsed && typeof parsed === "object") return [parsed];
+  return null;
+}
+
+function genVal(k, v) {
+  if (v == null || v === "") return "—";
+  if (k === "status") return pill(String(v), String(v));
+  if (typeof v === "object") return `<span class="mono text-[11px] text-stone-500">${escapeHtml(JSON.stringify(v))}</span>`;
+  return escapeHtml(String(v));
+}
+
+function genEmbeddedTable(name, rows, changed, prevRows) {
+  const cols = Object.keys(rows[0]).filter((c) => !GEN_HIDDEN.has(c)).slice(0, 6);
+  // Light up the embedded DATA rows that are new/different vs the previous step
+  // (the same yellow flash as a scalar field's value), not just the header. With
+  // no baseline (new parent row / first view) every row counts as new. The header
+  // only carries a small "updated" tag for context.
+  const prevSet = prevRows ? prevRows.map((r) => JSON.stringify(r)) : null;
+  const isNew = (r) => changed && (!prevSet || !prevSet.includes(JSON.stringify(r)));
+  return `
+    <div class="mt-2 overflow-hidden rounded border ${changed ? "border-amber-300" : "border-stone-200"}">
+      <div class="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 border-b text-stone-500 bg-stone-50 border-stone-200">${escapeHtml(name)} <span class="text-stone-400 font-normal">· ${rows.length}</span>${changed ? ` <span class="ml-1 px-1 rounded bg-amber-200 text-amber-900 font-semibold">updated</span>` : ""}</div>
+      <table class="w-full text-[11px]">
+        <thead><tr>${cols.map((c) => `<th class="text-left font-medium text-stone-400 px-2 py-1">${escapeHtml(c)}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((r) => `<tr class="border-t border-stone-100 ${isNew(r) ? "row-changed" : ""}">${cols.map((c) => `<td class="px-2 py-1 align-top text-stone-700">${genVal(c, r[c])}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+// One aggregate instance as a card: its fields, any embedded collections, and —
+// nested beneath — the child aggregates whose foreign keys point back at it.
+function genNode(agg, row, ctx, depth, prominent) {
+  const rk = genRowKey(agg, row);
+  if (ctx.seen.has(rk) || depth > 8) return ""; // cycle / runaway guard
+  ctx.seen.add(rk);
+
+  const changed = genRowChanged(agg, row);
+  const scalars = [], collections = [];
+  for (const [k, v] of Object.entries(row)) {
+    if (GEN_HIDDEN.has(k) || k === "id") continue;
+    const sub = genParseRows(v);
+    if (sub) collections.push([k, sub]); else scalars.push([k, v]);
+  }
+  const grid = scalars.map(([k, v]) => {
+    const fc = genFieldChanged(agg, row, k);
+    return `<div><div class="text-[10px] text-stone-500">${escapeHtml(k)}</div><div class="text-[12px] text-stone-800 break-words ${fc ? "field-changed inline-block px-1" : ""}">${genVal(k, v)}</div></div>`;
+  }).join("");
+
+  const bc = ctx.bcByAgg[agg];
+  const bcChip = bc ? `<span class="text-[10px] px-1.5 py-px rounded bg-stone-100 text-stone-500 border border-stone-200">${escapeHtml(bc)}</span>` : "";
+  const idChip = row.id != null ? `<span class="mono text-[11px] text-stone-400">${escapeHtml(shortId(String(row.id)))}</span>` : "";
+  const updatedChip = changed ? `<span class="text-[10px] px-1.5 py-px rounded bg-amber-100 text-amber-800 font-semibold uppercase tracking-wide">updated</span>` : "";
+
+  const kids = ctx.childrenOf.get(rk) || [];
+  const childHtml = kids.length
+    ? `<div class="entity-nest pl-3 ml-1 mt-3 flex flex-col gap-2">${kids.map((e) => genNode(e.agg, e.row, ctx, depth + 1, false)).join("")}</div>`
+    : "";
+
+  return `
+    <div class="rounded-lg border ${changed ? "border-amber-300 ring-1 ring-amber-200" : "border-stone-200"} bg-white ${prominent ? "p-4" : "p-3"}">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="font-semibold text-stone-800 ${prominent ? "text-sm" : "text-[12px]"}">${escapeHtml(agg)}</span>
+        ${bcChip}${idChip}${updatedChip}
+      </div>
+      <div class="grid grid-cols-2 ${prominent ? "md:grid-cols-3" : "sm:grid-cols-2"} gap-x-4 gap-y-1.5">${grid}</div>
+      ${collections.map(([k, sub]) => genEmbeddedTable(k, sub, genFieldChanged(agg, row, k), genPrevCollection(agg, row, k))).join("")}
+      ${childHtml}
+    </div>`;
+}
+
 // Model-generic per-run detail: header (reuses the btn-back/next/all/reset ids so
-// the existing bindings work), the run's events, and the rows it created.
+// the existing bindings work), the timeline, and the relationship forest.
 function genericDetailView() {
   const inst = state.instance || {};
   const root = inst.root || {};
   const total = state.events.length;
   const m = state.meta;
-  const reserved = new Set(["id", "version", "createdAt", "updatedAt"]);
-  const rootFields = Object.entries(root).filter(([k]) => !reserved.has(k));
-  const rootCard = `
-    <div class="rounded-lg border border-stone-200 bg-white p-4">
-      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold mb-2">${escapeHtml(m.rootAggregate)}</div>
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-        ${rootFields.map(([k, v]) => `<div><div class="text-[11px] text-stone-500">${escapeHtml(k)}</div><div class="text-sm text-stone-800 break-words">${k === "status" ? pill(String(v), String(v)) : escapeHtml(String(v ?? "—"))}</div></div>`).join("")}
-      </div>
-    </div>`;
-  const entityCards = Object.entries(inst.entities || {})
-    .filter(([agg]) => agg !== m.rootAggregate)
-    .map(([agg, rows]) => genericEntityCard(agg, rows)).join("");
+
+  const allRows = genAllRows(inst, m);
+  const bcByAgg = genBcByAgg(inst);
+  const { parentOf, childrenOf } = genRelations(allRows, m, bcByAgg);
+  const ctx = { bcByAgg, childrenOf, seen: new Set() };
+
+  // Forest roots = rows with no parent; the run root renders first & prominent,
+  // the rest (other DDD aggregates not reachable by an FK from the root) follow.
+  const runRootKey = inst.root ? genRowKey(m.rootAggregate, inst.root) : null;
+  const otherRoots = allRows.filter((e) => {
+    const k = genRowKey(e.agg, e.row);
+    return k !== runRootKey && !parentOf.has(k);
+  });
+  const rootCard = inst.root ? genNode(m.rootAggregate, inst.root, ctx, 0, true) : "";
+  const otherCards = otherRoots.map((e) => genNode(e.agg, e.row, ctx, 0, false)).join("");
+
   return `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-4">
@@ -1851,23 +2066,8 @@ function genericDetailView() {
     ${lastEventCaption()}
     <main class="flex-1 overflow-auto p-6 flex flex-col gap-4">
       ${rootCard}
-      ${entityCards ? `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">${entityCards}</div>` : ""}
+      ${otherCards ? `<div class="grid gap-4 items-start" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${otherCards}</div>` : ""}
     </main>`;
-}
-
-function genericEntityCard(agg, rows) {
-  const reserved = new Set(["version", "createdAt", "updatedAt"]);
-  const cols = rows[0] ? Object.keys(rows[0]).filter((k) => !reserved.has(k)).slice(0, 5) : [];
-  return `
-    <div class="rounded-lg border border-stone-200 bg-white p-3">
-      <div class="font-semibold text-stone-800 text-sm mb-2">${escapeHtml(agg)} <span class="text-stone-400 font-normal">(${rows.length})</span></div>
-      <table class="w-full text-xs">
-        <thead><tr class="text-left text-stone-400">${cols.map((c) => `<th class="py-1 pr-2 font-medium">${escapeHtml(c)}</th>`).join("")}</tr></thead>
-        <tbody class="divide-y divide-stone-100">
-          ${rows.map((r) => `<tr>${cols.map((c) => `<td class="py-1 pr-2 text-stone-700 ${c === "id" ? "mono text-stone-400" : ""}">${c === "status" ? pill(String(r[c]), String(r[c])) : escapeHtml(String(c === "id" ? String(r[c]).slice(0, 10) + "…" : (r[c] ?? "—")))}</td>`).join("")}</tr>`).join("")}
-        </tbody>
-      </table>
-    </div>`;
 }
 
 

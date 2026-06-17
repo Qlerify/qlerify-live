@@ -41,6 +41,13 @@ export interface SchemaField {
   dataType?: string;
   exampleData?: unknown[];
   hideInForm?: boolean;
+  /** True when the field holds a collection (array) of `relatedEntity` rows,
+   * e.g. an invoice's line items. From the raw model's `array` flag. */
+  array?: boolean;
+  /** For object-typed fields: the entity / value-object whose schema describes
+   * this field's row shape (resolved terminal name of the raw
+   * `relatedEntity.$ref`), e.g. CartItem for `cartItems`. */
+  relatedEntity?: string;
 }
 
 export interface CommandSchema {
@@ -112,12 +119,17 @@ export interface Ontology {
   events: OntologyEvent[];
   commands: CommandSchema[];
   entities: EntitySchema[];
+  /** Value objects (embedded, id-less schemas, e.g. a campaign's TargetAudience).
+   * Same shape as an entity; resolved as a related schema for object fields. */
+  valueObjects: EntitySchema[];
   queries: QuerySchema[];
   eventByKey(key: string): OntologyEvent | undefined;
   eventByRef(ref: string): OntologyEvent | undefined;
   requireEventByRef(ref: string): OntologyEvent;
   command(name: string): CommandSchema | undefined;
   entity(name: string): EntitySchema | undefined;
+  /** A value object by name (the related-schema lookup for object fields). */
+  valueObject(name: string): EntitySchema | undefined;
   query(name: string): QuerySchema | undefined;
   boundedContextOf(aggregate: string): string | undefined;
   successorsOf(key: string): string[];
@@ -146,17 +158,29 @@ interface RawEvent {
   acceptanceCriteria?: string[];
 }
 
+/** On-disk field shape. Like SchemaField but `relatedEntity` is a raw `$ref`
+ * (normalized to a terminal name by normalizeField). */
+interface RawSchemaField {
+  name: string;
+  description?: string;
+  dataType?: string;
+  exampleData?: unknown[];
+  hideInForm?: boolean;
+  array?: boolean;
+  relatedEntity?: RawRef;
+}
+
 interface RawSchema {
   description?: string;
   required?: string[];
-  fields?: SchemaField[];
+  fields?: RawSchemaField[];
 }
 
 interface RawSchemas {
   entities?: Record<string, RawSchema>;
   commands?: Record<string, RawSchema>;
   queries?: Record<string, Record<string, unknown>>;
-  valueObjects?: Record<string, unknown>;
+  valueObjects?: Record<string, RawSchema>;
 }
 
 /** A bounded context's contribution: its events and its schemas. The primary
@@ -203,6 +227,20 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf-8")) as T;
 }
 
+/** Raw on-disk field → public SchemaField: resolve `relatedEntity.$ref` to its
+ * terminal name and carry the `array` flag, dropping nothing else. */
+function normalizeField(f: RawSchemaField): SchemaField {
+  return {
+    name: f.name,
+    description: f.description,
+    dataType: f.dataType,
+    exampleData: f.exampleData,
+    hideInForm: f.hideInForm,
+    ...(f.array ? { array: true } : {}),
+    ...(f.relatedEntity ? { relatedEntity: refTail(f.relatedEntity.$ref) } : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
@@ -236,23 +274,33 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   const rawEntities: Record<string, RawSchema> = {};
   const rawCommands: Record<string, RawSchema> = {};
   const rawQueries: Record<string, Record<string, unknown>> = {};
+  const rawValueObjects: Record<string, RawSchema> = {};
   for (const [bc, ctx] of contexts) {
     for (const [key, raw] of Object.entries(ctx.domainEvents ?? {})) rawEvents.push({ key, raw, bc });
     Object.assign(rawEntities, ctx.schemas?.entities ?? {});
     Object.assign(rawCommands, ctx.schemas?.commands ?? {});
     Object.assign(rawQueries, ctx.schemas?.queries ?? {});
+    Object.assign(rawValueObjects, ctx.schemas?.valueObjects ?? {});
   }
 
   const commands: CommandSchema[] = Object.entries(rawCommands).map(([name, raw]) => ({
     name,
     required: raw.required ?? [],
-    fields: raw.fields ?? [],
+    fields: (raw.fields ?? []).map(normalizeField),
   }));
   const entities: EntitySchema[] = Object.entries(rawEntities).map(([name, raw]) => ({
     name,
     description: raw.description,
     required: raw.required ?? [],
-    fields: raw.fields ?? [],
+    fields: (raw.fields ?? []).map(normalizeField),
+  }));
+  // Value objects share the entity shape (id-less, embedded). They back object
+  // fields via `relatedEntity` (e.g. Campaign.targetAudience → TargetAudience).
+  const valueObjects: EntitySchema[] = Object.entries(rawValueObjects).map(([name, raw]) => ({
+    name,
+    description: raw.description,
+    required: raw.required ?? [],
+    fields: (raw.fields ?? []).map(normalizeField),
   }));
   const queries: QuerySchema[] = Object.entries(rawQueries).map(([name, raw]) => ({
     name,
@@ -261,6 +309,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
 
   const commandByName = new Map(commands.map((c) => [c.name, c]));
   const entityByName = new Map(entities.map((e) => [e.name, e]));
+  const valueObjectByName = new Map(valueObjects.map((v) => [v.name, v]));
   const queryByName = new Map(queries.map((q) => [q.name, q]));
 
   const problems: string[] = [];
@@ -402,6 +451,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
     events,
     commands,
     entities,
+    valueObjects,
     queries,
     eventByKey: (key) => eventByKey.get(key),
     eventByRef: (ref) => eventByKey.get(refTail(ref)),
@@ -412,6 +462,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
     },
     command: (name) => commandByName.get(name),
     entity: (name) => entityByName.get(name),
+    valueObject: (name) => valueObjectByName.get(name),
     query: (name) => queryByName.get(name),
     boundedContextOf: (aggregate) => aggregateToBc.get(aggregate),
     successorsOf: (key) => successors.get(key) ?? [],

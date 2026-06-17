@@ -5,7 +5,7 @@
 // host sees fresh code). buildAdapterPrompt + writeBody have no side effects and
 // need no API key (so they're unit-testable); only generateAdapterBody calls out.
 
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -55,9 +55,11 @@ export function buildAdapterPrompt(cfg: AdapterConfig, entity: EntitySchema): st
   ].join("\n");
 }
 
-/** Repo-relative dir for a BC's generated bodies (gitignored). */
+/** Repo-relative dir for a BC's generated bodies (gitignored). The BC name is
+ * sanitized so contexts like "Identity & Access" yield a safe path. */
 function bodyDir(cfg: AdapterConfig): string {
-  return join("src", "packs", cfg.boundedContext, "generated");
+  const bcDir = cfg.boundedContext.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "bc";
+  return join("src", "packs", bcDir, "generated");
 }
 
 export interface WriteBodyResult {
@@ -81,6 +83,21 @@ export function writeBody(cfg: AdapterConfig, code: string): WriteBodyResult {
     writeFileSync(abs, clean);
   }
   return { bodyPath: rel, hash, skipped };
+}
+
+/** Delete every generated body file for an adapter (all content-hash versions).
+ * Used by reset/remove. Returns the count deleted. */
+export function deleteGeneratedBodies(cfg: AdapterConfig): number {
+  const dir = join(ROOT, bodyDir(cfg));
+  if (!existsSync(dir)) return 0;
+  let n = 0;
+  for (const f of readdirSync(dir)) {
+    if (f.startsWith(cfg.id + ".") && f.endsWith(".logic.ts")) {
+      rmSync(join(dir, f));
+      n++;
+    }
+  }
+  return n;
 }
 
 export interface GenerateResult extends WriteBodyResult {

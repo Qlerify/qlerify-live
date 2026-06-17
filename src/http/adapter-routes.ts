@@ -8,16 +8,48 @@ import type { FastifyInstance } from "fastify";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerAdapter } from "../packs/registry.js";
-import { writeSidecar } from "../packs/sidecar.js";
+import { registerAdapter, getAdapter } from "../packs/registry.js";
+import { writeSidecar, readSidecar } from "../packs/sidecar.js";
 import { createAuthoredAdapter } from "../packs/adapters/authored.js";
-import { adapterCfg, authorAdapterBody } from "../packs/author.js";
+import { createSimulatedAdapter } from "../packs/adapters/simulated.js";
+import { adapterCfg, authorAdapterBody, resetAdapter, removeAdapter } from "../packs/author.js";
+import { getOntology } from "../ontology/model.js";
 import type { AdapterConfig, ProvMode } from "../packs/types.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const MODES: ProvMode[] = ["simulated", "recorded", "live"];
 
+function slug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 export function registerAdapterCodeRoutes(app: FastifyInstance): void {
+  // Bootstrap the FIRST adapter for a bounded context that has none. Creates a
+  // SIMULATED adapter (the bottom of the mode ladder — runs immediately with
+  // synthesized rows), persists a sidecar, and registers it. The workbench then
+  // drives Configure → Generate (AI) → Test → Ingest to climb to recorded/live.
+  app.post("/api/bc/:bc/adapter", async (req, reply) => {
+    const o = getOntology();
+    const raw = (req.params as any).bc;
+    const bc = o.boundedContexts.find((b) => b.toLowerCase() === String(raw).toLowerCase());
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const body = (req.body ?? {}) as any;
+    const targetEntity =
+      (typeof body.targetEntity === "string" && body.targetEntity) ||
+      o.events.find((e) => e.boundedContext === bc && e.aggregateRoot)?.aggregateRoot;
+    if (!targetEntity || !o.entity(targetEntity)) {
+      return reply.code(400).send({ error: "NO_ENTITY", message: "targetEntity required and must exist in the model" });
+    }
+    const id = slug(typeof body.id === "string" && body.id ? body.id : `${bc}-${targetEntity}`);
+    if (getAdapter(id) || readSidecar(id)) {
+      return reply.code(409).send({ error: "EXISTS", message: `adapter "${id}" already exists` });
+    }
+    const cfg: AdapterConfig = { id, kind: "simulated", boundedContext: bc, targetEntity, phase: "draft", mode: "simulated" };
+    writeSidecar(cfg);
+    registerAdapter(createSimulatedAdapter({ id, boundedContext: bc, targetEntity }));
+    return { ok: true, id, boundedContext: bc, targetEntity, kind: "simulated", mode: "simulated" };
+  });
+
   // View the current generated body source.
   app.get("/api/adapters/:id/code", async (req, reply) => {
     const cfg = adapterCfg((req.params as any).id);
@@ -45,6 +77,26 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
       return { ok: true, ...r };
     } catch (err: any) {
       return reply.code(400).send({ error: "GENERATE_FAILED", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Reset an adapter to a clean simulated draft (build from scratch). Deletes its
+  // generated bodies + stored credentials; re-registers a simulated adapter.
+  app.post("/api/adapters/:id/reset", async (req, reply) => {
+    try {
+      return { ok: true, ...resetAdapter((req.params as any).id) };
+    } catch (err: any) {
+      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Remove an adapter entirely (back to "Connect a system").
+  app.delete("/api/adapters/:id", async (req, reply) => {
+    try {
+      removeAdapter((req.params as any).id);
+      return { ok: true, removed: (req.params as any).id };
+    } catch (err: any) {
+      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
     }
   });
 

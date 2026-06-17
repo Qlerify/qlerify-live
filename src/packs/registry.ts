@@ -17,6 +17,11 @@ export function listAdapters(): SourceAdapter[] {
   return [...adapters.values()];
 }
 
+/** Remove a single adapter from the registry (used by removeAdapter). */
+export function unregisterAdapter(id: string): void {
+  adapters.delete(id);
+}
+
 /** Reset the registry — called by loadPacks() before a fresh discovery pass. */
 export function clearAdapters(): void {
   adapters.clear();

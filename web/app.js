@@ -112,7 +112,6 @@ const state = {
   bc: null,           // current bounded context (#bc/<Name>)
   bcList: null,       // /api/bc index
   bcData: null,       // /api/bc/:bc overview
-  bcTab: "overview",  // overview | connection | test | raw
   bcVerify: null,
   bcTest: null,
   bcRaw: null,
@@ -907,6 +906,7 @@ async function onHashChange() {
   state.bc = r.bc ?? null;
   state.prev = null;
   state.snapshot = null;
+  state.bcBusy = false; // never carry a stuck busy-flag across navigation
 
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
 
@@ -1149,19 +1149,15 @@ async function loadBcList() {
 async function loadBc(bc) {
   await loadMeta();
   state.bcVerify = null; state.bcTest = null; state.bcRaw = null; state.bcCode = null;
-  if (!state.bcTab) state.bcTab = "overview";
   try { state.bcData = await api("/api/bc/" + encodeURIComponent(bc)); }
   catch (e) { state.bcData = { error: e.message, name: bc }; }
-  render();
-}
-
-async function loadBcCode() {
+  // The workbench is one stacked page, so load the adapter code up front.
   const adapter = (state.bcData && state.bcData.adapters || [])[0];
-  if (!adapter) return;
-  state.bcBusy = true; render();
-  try { state.bcCode = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code`); }
-  catch { state.bcCode = { exists: false, source: "", hasKey: false }; }
-  finally { state.bcBusy = false; render(); }
+  if (adapter) {
+    try { state.bcCode = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code`); }
+    catch { state.bcCode = { exists: false, source: "", hasKey: false }; }
+  }
+  render();
 }
 
 async function loadBcRaw() {
@@ -1204,37 +1200,51 @@ function bcListView() {
     </main>`;
 }
 
-const BC_TABS = [["overview", "Overview"], ["connection", "Connection"], ["code", "Adapter code"], ["test", "Test"], ["raw", "Raw data"]];
+// One titled section in the stacked workbench (replaces the old tabs).
+function bcSection(title, body) {
+  return `
+    <section class="space-y-3">
+      <div class="border-b border-stone-200 pb-1.5"><span class="text-sm font-semibold text-stone-700">${title}</span></div>
+      ${body}
+    </section>`;
+}
 
 function bcWorkbenchView() {
   const d = state.bcData;
   if (!d) return bcHeader("Loading…", "", "#bcs");
   if (d.error) return `${bcHeader(d.name || "Bounded context", "Adapter workbench", "#bcs")}<main class="p-6"><div class="text-rose-600">${escapeHtml(d.error)}</div></main>`;
   const adapter = (d.adapters || [])[0];
-  const tabs = BC_TABS.map(([id, label]) => `
-    <button data-bctab="${id}" class="px-3 py-2 text-sm border-b-2 ${state.bcTab === id ? "border-amber-500 text-stone-900 font-medium" : "border-transparent text-stone-500 hover:text-stone-700"}">${label}</button>`).join("");
+  const subBar = `
+    <div class="px-6 py-2 border-b border-stone-200 bg-white flex items-center gap-2 text-sm text-stone-600">
+      <span>data source</span> ${provChip(d.provenance && d.provenance.mode)}
+      ${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no adapter</span>`}
+    </div>`;
+  // Stacked sections (no tabs). With no adapter, show one "Connect a system"
+  // prompt + the model overview rather than the empty per-tab panels.
+  const sections = adapter
+    ? [
+        bcSection("Connection", bcConnectionPanel(d, adapter)),
+        bcSection("Adapter code", bcCodePanel(d, adapter)),
+        bcSection("Test", bcTestPanel(d, adapter)),
+        bcSection("Raw data", bcRawPanel(d, adapter)),
+        bcSection("Overview", bcOverviewPanel(d)),
+      ].join("")
+    : `${bcNoAdapter(d)}${bcSection("Overview", bcOverviewPanel(d))}`;
   return `
     ${bcHeader(d.name, "Adapter workbench", "#bcs")}
-    <div class="px-6 pt-3 flex items-center gap-3 border-b border-stone-200 bg-white">
-      <div class="flex items-center gap-2 text-sm text-stone-600">data source ${provChip(d.provenance && d.provenance.mode)}${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no adapter</span>`}</div>
-      <div class="flex-1"></div>
-      <div class="flex gap-1">${tabs}</div>
-    </div>
-    <main class="flex-1 overflow-auto p-6">${bcTabContent(d, adapter)}</main>`;
+    ${subBar}
+    <main class="flex-1 overflow-auto p-6 space-y-8">${sections}</main>`;
 }
 
-function bcTabContent(d, adapter) {
-  switch (state.bcTab) {
-    case "connection": return bcConnectionPanel(d, adapter);
-    case "code": return bcCodePanel(d, adapter);
-    case "test": return bcTestPanel(d, adapter);
-    case "raw": return bcRawPanel(d, adapter);
-    default: return bcOverviewPanel(d);
-  }
-}
-
-function bcNoAdapter() {
-  return `<div class="text-stone-400 text-sm">This bounded context has no adapter yet. (AI-authored adapters arrive in Slice 2.)</div>`;
+function bcNoAdapter(d) {
+  const entity = (d && d.defaultEntity) || "the root entity";
+  return `
+    <div class="max-w-xl rounded-lg border border-dashed border-stone-300 bg-white p-6 text-center">
+      <div class="text-stone-400 text-4xl mb-2">🔌</div>
+      <div class="text-stone-700 font-medium">No adapter for this system yet</div>
+      <div class="text-sm text-stone-500 mt-1">Create one to pull <span class="mono">${escapeHtml(String(entity))}</span> records from the real source. It starts simulated; then configure the endpoint + credentials and let AI author the live connector.</div>
+      <button id="bc-add-adapter" ${state.bcBusy ? "disabled" : ""} class="mt-4 px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Connect a system</button>
+    </div>`;
 }
 
 function bcOverviewPanel(d) {
@@ -1258,7 +1268,7 @@ function bcOverviewPanel(d) {
 }
 
 function bcConnectionPanel(d, adapter) {
-  if (!adapter) return bcNoAdapter();
+  if (!adapter) return bcNoAdapter(d);
   const v = state.bcVerify;
   const status = v == null ? `<span class="text-stone-400">not checked</span>`
     : v.ok ? `<span class="text-emerald-700">● connected</span> <span class="text-stone-500">${escapeHtml(v.detail || "")}</span>`
@@ -1295,11 +1305,20 @@ function bcConnectionPanel(d, adapter) {
         </div>
         <div class="text-[11px] text-stone-400">The secret is never echoed, written to disk, or sent to chat — only the key name is remembered (dev: kept in process env; encrypted-at-rest store is the next increment). The AI-authored adapter reads it as <span class="mono">ctx.secret</span>.</div>
       </div>
+
+      <div class="rounded-lg border border-rose-200 bg-rose-50 p-4 space-y-2">
+        <div class="text-xs uppercase tracking-wide text-rose-600 font-semibold">Danger zone</div>
+        <div class="flex gap-2 flex-wrap">
+          <button id="bc-reset" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Reset adapter</button>
+          <button id="bc-remove" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Remove adapter</button>
+        </div>
+        <div class="text-[11px] text-rose-700/80"><b>Reset</b> wipes the AI-authored code + stored credentials back to a clean simulated draft (keeps the adapter, so you can build it from scratch). <b>Remove</b> deletes it entirely.</div>
+      </div>
     </div>`;
 }
 
 function bcCodePanel(d, adapter) {
-  if (!adapter) return bcNoAdapter();
+  if (!adapter) return bcNoAdapter(d);
   const c = state.bcCode;
   const hasKey = c ? c.hasKey : false;
   const src = c && c.exists ? c.source : "";
@@ -1320,7 +1339,7 @@ function bcCodePanel(d, adapter) {
 }
 
 function bcTestPanel(d, adapter) {
-  if (!adapter) return bcNoAdapter();
+  if (!adapter) return bcNoAdapter(d);
   const t = state.bcTest;
   let result = "";
   if (t && !t.error) {
@@ -1381,15 +1400,34 @@ function bindBcList() {
 function bindBcWorkbench() {
   document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.go)));
   const adapter = (state.bcData && state.bcData.adapters || [])[0];
-  document.querySelectorAll("[data-bctab]").forEach((el) => el.addEventListener("click", async () => {
-    state.bcTab = el.dataset.bctab; render();
-    if (state.bcTab === "code" && !state.bcCode) await loadBcCode();
-  }));
+  document.getElementById("bc-add-adapter")?.addEventListener("click", async () => {
+    state.bcBusy = true; render();
+    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
+    catch (e) { alert("Could not connect a system: " + e.message); }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-reset")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    if (!confirm("Reset this adapter to a clean simulated draft? Its AI-authored code and stored credentials will be deleted.")) return;
+    state.bcBusy = true; render();
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/reset`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
+    catch (e) { alert("Reset failed: " + e.message); }
+    finally { state.bcBusy = false; render(); }
+  });
+  document.getElementById("bc-remove")?.addEventListener("click", async () => {
+    if (!adapter) return;
+    if (!confirm("Remove this adapter entirely? This deletes its code, credentials, and configuration.")) return;
+    state.bcBusy = true; render();
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}`, { method: "DELETE" }); await loadBc(state.bc); }
+    catch (e) { alert("Remove failed: " + e.message); }
+    finally { state.bcBusy = false; render(); }
+  });
   document.getElementById("bc-generate")?.addEventListener("click", async () => {
     if (!adapter) return;
     state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code/generate`, { method: "POST", body: "{}" }); await loadBc(state.bc); state.bcTab = "code"; await loadBcCode(); }
-    catch (e) { alert("Generate failed: " + e.message); state.bcBusy = false; render(); }
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code/generate`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
+    catch (e) { alert("Generate failed: " + e.message); }
+    finally { state.bcBusy = false; render(); }
   });
   document.getElementById("bc-config-save")?.addEventListener("click", async () => {
     if (!adapter) return;
@@ -1427,7 +1465,7 @@ function bindBcWorkbench() {
   document.getElementById("bc-ingest")?.addEventListener("click", async () => {
     if (!adapter) return;
     state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); state.bcTab = "raw"; await loadBcRaw(); }
+    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); await loadBcRaw(); }
     catch (e) { alert("Ingest failed: " + e.message); state.bcBusy = false; render(); }
   });
   document.getElementById("bc-raw")?.addEventListener("click", loadBcRaw);

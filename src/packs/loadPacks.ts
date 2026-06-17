@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerAdapter, clearAdapters } from "./registry.js";
 import { listSidecars } from "./sidecar.js";
 import { createAuthoredAdapter } from "./adapters/authored.js";
+import { createSimulatedAdapter } from "./adapters/simulated.js";
 import type { Pack } from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,17 +59,22 @@ export async function loadPacks(log?: Logger): Promise<number> {
     }
   }
 
-  // Authored adapters from sidecars (.qlerify/adapters/<id>.json with
-  // kind:"authored"). Registration is LAZY — createAuthoredAdapter does NOT import
-  // the body, so a broken body can never poison boot. Per-sidecar try/catch so one
-  // malformed sidecar can't abort the rest (Trap 1 from the design review).
+  // Adapters from sidecars (.qlerify/adapters/<id>.json). These are the source of
+  // truth for adapter STATE (a "Connect a system" draft, a reset, or an authored
+  // adapter), so they OVERRIDE the code-pack defaults registered above. Authored
+  // registration is LAZY (createAuthoredAdapter does NOT import the body), so a
+  // broken body can never poison boot. Per-sidecar try/catch so one malformed
+  // sidecar can't abort the rest (Trap 1 from the design review).
   for (const cfg of listSidecars()) {
-    if (cfg.kind !== "authored") continue;
     try {
-      registerAdapter(createAuthoredAdapter(cfg));
+      registerAdapter(
+        cfg.kind === "authored"
+          ? createAuthoredAdapter(cfg)
+          : createSimulatedAdapter({ id: cfg.id, boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity }),
+      );
       count++;
     } catch (err) {
-      log?.warn?.({ err, adapter: cfg.id }, "authored adapter failed to register (skipped)");
+      log?.warn?.({ err, adapter: cfg.id }, "adapter sidecar failed to register (skipped)");
     }
   }
   return count;

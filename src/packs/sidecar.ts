@@ -3,7 +3,7 @@
 // (e.g. packs/sap) don't need a sidecar to register; wizard-created ones do. I/O
 // mirrors the overlay/source-override pattern in sync.ts.
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { QLERIFY_DIR } from "../ontology/model.js";
 import type { AdapterConfig } from "./types.js";
@@ -49,4 +49,10 @@ export function touchSidecar(id: string, patch: Partial<AdapterConfig>): void {
   const cur = readSidecar(id);
   if (!cur) return;
   writeSidecar({ ...cur, ...patch });
+}
+
+/** Delete an adapter's sidecar (used by removeAdapter). No-op if absent. */
+export function deleteSidecar(id: string): void {
+  const p = pathFor(id);
+  if (existsSync(p)) rmSync(p);
 }

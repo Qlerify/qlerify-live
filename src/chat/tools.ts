@@ -12,7 +12,7 @@ import { currentStepIndex, nextStep, newDemand } from "../simulator/stepper.js";
 import { getOntology } from "../ontology/model.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
-import { adapterCfg, authorAdapterBody } from "../packs/author.js";
+import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -194,6 +194,19 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["adapterId", "confirmed"],
     },
   },
+  {
+    name: "reset_adapter",
+    description:
+      "WRITE — Reset an adapter to a clean simulated draft so it can be built from scratch: deletes its AI-authored code and stored credentials (keeps the adapter shell + its target entity). Use when an adapter is beyond repair and the user wants to start over rather than patch it. Requires explicit confirmation: state that the code + credentials will be wiped, ask 'Shall I reset it?', wait for yes, then call with `confirmed: true`.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        confirmed: { type: "boolean", description: "Must be `true`, set only after the user confirmed." },
+      },
+      required: ["adapterId", "confirmed"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -249,6 +262,8 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3)));
       case "regenerate_adapter_body":
         return await handleRegenerateAdapterBody(args);
+      case "reset_adapter":
+        return handleResetAdapter(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -475,5 +490,18 @@ async function handleRegenerateAdapterBody(args: Record<string, any>) {
   return ok({
     regenerated: true, adapterId, bodyPath: r.bodyPath, skipped: r.skipped,
     note: "New body written + registered, but NOT run or promoted (stop-and-show). Tell the user to Test it from the workbench, then promote if it passes.",
+  });
+}
+
+function handleResetAdapter(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Tell the user the code + credentials will be wiped, get an explicit yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  const fresh = resetAdapter(id);
+  return ok({
+    reset: true, adapterId: id, kind: fresh.kind, mode: fresh.mode,
+    note: "Adapter wiped to a clean simulated draft (code + credentials deleted). Re-configure the connection, then regenerate the body to build from scratch.",
   });
 }

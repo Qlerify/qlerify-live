@@ -20,6 +20,10 @@ export interface EventDef {
   role: Role;
   phase: number;
   derived?: boolean;
+  /** Refs of the events that must occur before this one (the `follows` DAG
+   * edges). Carried through so the UI can lay the workflow out as branching
+   * lanes instead of a single flattened line. */
+  predecessors: string[];
 }
 
 // Build the ordered event list from the model: linearOrder() honors the
@@ -36,6 +40,9 @@ function buildEvents(): EventDef[] {
       aggregateRoot: e.aggregateRoot,
       role: e.role,
       phase: e.phase ?? 1,
+      // Predecessor keys → canonical refs, so they match the `ref` of the
+      // events they point at (same scheme model.ts uses to mint each ref).
+      predecessors: e.predecessors.map((k) => `#/domainEvents/${k}`),
       ...(e.derived ? { derived: true as const } : {}),
     };
   });

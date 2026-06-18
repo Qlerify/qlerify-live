@@ -1449,8 +1449,8 @@
             "Given the wing battle-rhythm schedule, When the scheduled start time (0500Z) is reached, Then a new operations day (dygn) is opened and the day watch is activated"
           ]
         },
-        "NightWatchHandedOver": {
-          "event": "Night Watch Handed Over",
+        "DutyOfficerHandedOver": {
+          "event": "Duty Officer Handed Over",
           "role": "Wing Ops Duty Officer",
           "follows": [
             {
@@ -2383,7 +2383,7 @@
           "role": "Subordinate Unit",
           "follows": [
             {
-              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/NightWatchHandedOver"
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/DutyOfficerHandedOver"
             }
           ],
           "command": {
@@ -3008,7 +3008,7 @@
           "role": "Air Tasking Cell",
           "follows": [
             {
-              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/NightWatchHandedOver"
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/DutyOfficerHandedOver"
             }
           ],
           "command": {

@@ -1690,13 +1690,115 @@ function daysBetween(isoA, isoB) {
   return Math.round(ms / 86_400_000);
 }
 
+// ---------------------------------------------------------------------------
+// Flow layout — turn the event DAG (each event's `predecessors`, the model's
+// `follows` edges) into a 2-D placement:
+//   • column = longest-path depth from a start event, so events that run in
+//     parallel line up vertically in the same column;
+//   • lane (row) = the longest path through the graph is the "main spine" and
+//     stays on the top lane (0); every branch that forks off it drops to the
+//     next free lane below and runs in its own row until it ends.
+// A model with no `follows` edges (or a plain chain) collapses to one lane —
+// i.e. the original single-row timeline, so nothing regresses for linear flows.
+// ---------------------------------------------------------------------------
+function computeFlowLayout(events) {
+  const byRef = new Map();
+  events.forEach((e, idx) => byRef.set(e.ref, { event: e, idx }));
+  const preds = (ref) => (byRef.get(ref)?.event.predecessors || []).filter((p) => byRef.has(p));
+
+  // No edges at all (linear model, or a server that predates `predecessors`) →
+  // fall back to a single lane in declared order.
+  if (!events.some((e) => preds(e.ref).length > 0)) {
+    const place = new Map(events.map((e, i) => [e.ref, { col: i, lane: 0, idx: i }]));
+    return { cols: events.length, lanes: 1, place, edges: [] };
+  }
+
+  const succ = new Map(events.map((e) => [e.ref, []]));
+  for (const e of events) for (const p of preds(e.ref)) succ.get(p).push(e.ref);
+
+  // col = longest path from a source (memoized); height = longest path to a sink.
+  const colMemo = new Map();
+  const col = (ref) => {
+    if (colMemo.has(ref)) return colMemo.get(ref);
+    const ps = preds(ref);
+    const c = ps.length ? 1 + Math.max(...ps.map(col)) : 0;
+    colMemo.set(ref, c);
+    return c;
+  };
+  const hMemo = new Map();
+  const height = (ref) => {
+    if (hMemo.has(ref)) return hMemo.get(ref);
+    const ss = succ.get(ref) || [];
+    const h = ss.length ? 1 + Math.max(...ss.map(height)) : 0;
+    hMemo.set(ref, h);
+    return h;
+  };
+  events.forEach((e) => { col(e.ref); height(e.ref); });
+
+  // Main spine: start at the source that begins the longest path, then always
+  // follow the successor with the most depth remaining, to the end.
+  const spine = new Set();
+  const sources = events.filter((e) => preds(e.ref).length === 0).map((e) => e.ref);
+  if (sources.length) {
+    let cur = sources.reduce((a, b) => (height(b) > height(a) ? b : a));
+    while (cur) {
+      spine.add(cur);
+      const ss = succ.get(cur) || [];
+      if (!ss.length) break;
+      cur = ss.reduce((a, b) => (height(b) > height(a) ? b : a));
+    }
+  }
+
+  // Lanes: spine on lane 0; everything else takes the lowest free lane in its
+  // column, preferring to inherit a non-spine predecessor's lane so a branch
+  // reads as one straight horizontal run rather than zig-zagging.
+  const lane = new Map();
+  const occupied = new Set(); // "lane,col"
+  for (const ref of spine) { lane.set(ref, 0); occupied.add(`0,${col(ref)}`); }
+  const others = events
+    .filter((e) => !spine.has(e.ref))
+    .sort((a, b) => col(a.ref) - col(b.ref) || byRef.get(a.ref).idx - byRef.get(b.ref).idx);
+  for (const e of others) {
+    const c = col(e.ref);
+    let L = null;
+    for (const p of preds(e.ref)) {
+      const pl = lane.get(p);
+      if (!spine.has(p) && pl != null && !occupied.has(`${pl},${c}`)) { L = pl; break; }
+    }
+    if (L == null) { L = 1; while (occupied.has(`${L},${c}`)) L++; }
+    lane.set(e.ref, L);
+    occupied.add(`${L},${c}`);
+  }
+
+  const place = new Map(events.map((e) => [e.ref, { col: col(e.ref), lane: lane.get(e.ref), idx: byRef.get(e.ref).idx }]));
+  const cols = Math.max(...events.map((e) => col(e.ref))) + 1;
+  const lanes = Math.max(...events.map((e) => lane.get(e.ref))) + 1;
+  const edges = [];
+  for (const e of events) for (const p of preds(e.ref)) edges.push({ from: p, to: e.ref });
+  return { cols, lanes, place, edges };
+}
+
+// Card + grid geometry (px). Cards are absolutely positioned so the connector
+// SVG underneath can use exact coordinates; the column/row pitch leaves a gutter
+// for the connectors between cards.
+const FLOW = { cardW: 176, cardH: 104, colPitch: 224, rowPitch: 148 };
+
 function timeline() {
   const total = state.events.length;
   const pct = total ? (state.currentIndex / total) * 100 : 0;
   const biz = businessByStep();
   let prevBizIso = null;
 
-  const items = state.events.map((e, i) => {
+  const layout = computeFlowLayout(state.events);
+  const { cardW, cardH, colPitch, rowPitch } = FLOW;
+  const W = (layout.cols - 1) * colPitch + cardW;
+  const H = (layout.lanes - 1) * rowPitch + cardH;
+
+  // Iterate in declared (linear) order so `data-step`, the fired/current logic,
+  // and the business-date gap accumulation all stay tied to the step sequence;
+  // each card is then *positioned* by its lane/column placement.
+  const cards = state.events.map((e, i) => {
+    const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
     const fired = i < state.currentIndex;
     const isCurrent = i === state.currentIndex - 1;
     const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
@@ -1714,10 +1816,11 @@ function timeline() {
     const provMode = provModeForBC(e.boundedContext);
 
     return `
-      <div data-step="${i}" class="shrink-0 w-44 rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col" style="${provHatch(provMode)}">
-        <div class="flex items-center justify-between text-[10px] text-stone-500 mb-0.5">
-          <span>${i+1}. ${e.boundedContext}</span>
-          <span class="flex items-center gap-1">
+      <div data-step="${i}" class="absolute rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
+           style="left:${pos.col * colPitch}px; top:${pos.lane * rowPitch}px; width:${cardW}px; height:${cardH}px; ${provHatch(provMode)}">
+        <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
+          <span class="truncate">${i+1}. ${e.boundedContext}</span>
+          <span class="flex items-center gap-1 shrink-0">
             ${e.derived ? `<span class="text-amber-600 font-semibold">DERIVED</span>` : ""}
             ${provChip(provMode)}
           </span>
@@ -1733,6 +1836,30 @@ function timeline() {
       </div>
     `;
   }).join("");
+
+  // Connectors: a smooth S-curve from each predecessor's right edge to the
+  // event's left edge. Edges whose target has fired are drawn dark; pending
+  // edges stay faint, so the lit path tracks how far the run has progressed.
+  const paths = layout.edges.map(({ from, to }) => {
+    const a = layout.place.get(from), b = layout.place.get(to);
+    if (!a || !b) return "";
+    const sx = a.col * colPitch + cardW, sy = a.lane * rowPitch + cardH / 2;
+    const ex = b.col * colPitch,         ey = b.lane * rowPitch + cardH / 2;
+    const dx = Math.max(24, (ex - sx) * 0.5);
+    const fired = b.idx < state.currentIndex;
+    return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${fired ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
+  }).join("");
+
+  const svg = layout.edges.length ? `
+        <svg width="${W}" height="${H}" class="absolute top-0 left-0" style="pointer-events:none;">
+          <defs>
+            <marker id="flow-arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e"/>
+            </marker>
+          </defs>
+          ${paths}
+        </svg>` : "";
+
   const prov = state.meta.provenance;
   const legend = prov ? `
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
@@ -1745,9 +1872,12 @@ function timeline() {
     <section class="border-b border-stone-200 bg-stone-50">
       ${legend}
       <div id="timeline-scroll" class="px-6 py-3 overflow-x-auto">
-        <div class="inline-flex flex-col gap-2" style="width: max-content;">
-          <div class="grid gap-0" style="grid-template-columns: repeat(${total}, 11rem);">${items}</div>
-          <div class="h-1 bg-stone-200 rounded overflow-hidden">
+        <div style="width:${W}px;">
+          <div class="relative" style="width:${W}px; height:${H}px;">
+            ${svg}
+            ${cards}
+          </div>
+          <div class="h-1 bg-stone-200 rounded overflow-hidden mt-3" style="width:${W}px;">
             <div class="h-1 bg-amber-400 transition-all duration-300" style="width:${pct}%"></div>
           </div>
         </div>

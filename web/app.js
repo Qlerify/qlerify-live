@@ -1855,46 +1855,19 @@ function genBcByAgg(inst) {
 
 function genRowKey(agg, row) { return agg + "#" + (row.id ?? JSON.stringify(row)); }
 
-// Attach each row to the parent its foreign keys point at — VALUE-based: a field
-// named like "<x>Id" whose value is the id of another row links this row beneath
-// that row. Matching on the value (not the name) needs no schema and handles odd
-// FK names (a Payment's invoiceId → its Invoice row). Nesting is confined to a
-// SINGLE bounded context: a foreign key that crosses into another BC (e.g. an
-// Engagement MarketingDispatch referencing the Campaign-Management Campaign) is a
-// loose cross-context reference, not composition, so that row stays its own
-// top-level box. The root aggregate is always a forest root. Returns
-// { parentOf, childrenOf } keyed by genRowKey.
+// Relationship forest for the detail view. Every row here is an AGGREGATE-ROOT
+// instance: genAllRows reads inst.root + inst.entities, and inst.entities is
+// keyed by each event's aggregateRoot (see genericInstanceDetail). Aggregate
+// roots are independent consistency boundaries — they reference one another by
+// id (e.g. a ChannelReadiness.campaignId pointing at its Campaign) but are NOT
+// composed into each other, so each renders as its own top-level box with the
+// FK left visible as a plain attribute. (Owned child entities / value objects
+// are not separate rows here at all: they ride embedded inside their root row
+// and render as embedded tables — see `collections` in genNode.) Hence no
+// cross-row nesting. Kept returning the { parentOf, childrenOf } shape that
+// genNode / genericDetailView consume; both maps are simply empty.
 function genRelations(allRows, m, bcByAgg) {
-  const byId = new Map(); // id value → entry
-  for (const e of allRows) if (e.row?.id != null) byId.set(String(e.row.id), e);
-  const parentOf = new Map();
-  for (const e of allRows) {
-    if (e.agg === m.rootAggregate) continue; // run root never nests under anything
-    let best = null;
-    for (const [k, v] of Object.entries(e.row)) {
-      if (k === "id" || v == null || !/Id$/.test(k)) continue;
-      const target = byId.get(String(v));
-      if (!target || target === e || target.agg === e.agg) continue;
-      // Cross-bounded-context FK → reference, not parent/child: don't nest.
-      const cbc = bcByAgg[e.agg], pbc = bcByAgg[target.agg];
-      if (cbc && pbc && cbc !== pbc) continue;
-      // Prefer the FK whose name matches the target aggregate (invoiceId→Invoice)
-      // over an incidental id collision; the most specific link wins.
-      const base = k.slice(0, -2).toLowerCase();
-      const score = target.agg.toLowerCase().includes(base) ? 2 : 1;
-      if (!best || score > best.score) best = { target, score };
-    }
-    if (best) parentOf.set(genRowKey(e.agg, e.row), genRowKey(best.target.agg, best.target.row));
-  }
-  const childrenOf = new Map();
-  for (const e of allRows) {
-    const pk = parentOf.get(genRowKey(e.agg, e.row));
-    if (!pk) continue;
-    let arr = childrenOf.get(pk);
-    if (!arr) { arr = []; childrenOf.set(pk, arr); }
-    arr.push(e);
-  }
-  return { parentOf, childrenOf };
+  return { parentOf: new Map(), childrenOf: new Map() };
 }
 
 // --- diff against the pre-step instance (what the last event touched) -------
@@ -1974,7 +1947,7 @@ function genEmbeddedTable(name, rows, changed, prevRows) {
   const prevSet = prevRows ? prevRows.map((r) => JSON.stringify(r)) : null;
   const isNew = (r) => changed && (!prevSet || !prevSet.includes(JSON.stringify(r)));
   return `
-    <div class="mt-2 overflow-hidden rounded border ${changed ? "border-amber-300" : "border-stone-200"}">
+    <div class="overflow-hidden rounded border ${changed ? "border-amber-300" : "border-stone-200"}">
       <div class="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 border-b text-stone-500 bg-stone-50 border-stone-200">${escapeHtml(name)} <span class="text-stone-400 font-normal">· ${rows.length}</span>${changed ? ` <span class="ml-1 px-1 rounded bg-amber-200 text-amber-900 font-semibold">updated</span>` : ""}</div>
       <table class="w-full text-[11px]">
         <thead><tr>${cols.map((c) => `<th class="text-left font-medium text-stone-400 px-2 py-1">${escapeHtml(c)}</th>`).join("")}</tr></thead>
@@ -2012,14 +1985,24 @@ function genNode(agg, row, ctx, depth, prominent) {
     ? `<div class="entity-nest pl-3 ml-1 mt-3 flex flex-col gap-2">${kids.map((e) => genNode(e.agg, e.row, ctx, depth + 1, false)).join("")}</div>`
     : "";
 
+  // Embedded sub-tables (value objects / collection fields like commercialTarget,
+  // budget, campaignBrief) flow into an auto-fit grid: as many side by side as
+  // fit at >=260px each, wrapping to a single stacked column when there isn't
+  // room. "Same row if there's space, else stack" without a fixed column count.
+  const collectionsHtml = collections.length
+    ? `<div class="mt-2 grid gap-3 grid-cols-[repeat(auto-fit,minmax(260px,1fr))]">${collections
+        .map(([k, sub]) => genEmbeddedTable(k, sub, genFieldChanged(agg, row, k), genPrevCollection(agg, row, k)))
+        .join("")}</div>`
+    : "";
+
   return `
     <div class="rounded-lg border ${changed ? "border-amber-300 ring-1 ring-amber-200" : "border-stone-200"} bg-white ${prominent ? "p-4" : "p-3"}">
       <div class="flex items-center gap-2 mb-2">
         <span class="font-semibold text-stone-800 ${prominent ? "text-sm" : "text-[12px]"}">${escapeHtml(agg)}</span>
         ${bcChip}${idChip}${updatedChip}
       </div>
-      <div class="grid grid-cols-2 ${prominent ? "md:grid-cols-3" : "sm:grid-cols-2"} gap-x-4 gap-y-1.5">${grid}</div>
-      ${collections.map(([k, sub]) => genEmbeddedTable(k, sub, genFieldChanged(agg, row, k), genPrevCollection(agg, row, k))).join("")}
+      <div class="grid grid-cols-2 ${prominent ? "md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6" : "sm:grid-cols-2"} gap-x-4 gap-y-1.5">${grid}</div>
+      ${collectionsHtml}
       ${childHtml}
     </div>`;
 }

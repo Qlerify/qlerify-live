@@ -201,12 +201,10 @@ function parseRpcEnvelope(raw: string): any {
   }
 }
 
-/** Fetch the workflow's `.specification` object — from the override URL if one
- * is configured, otherwise from the Qlerify modeller via MCP. */
-async function fetchSpecification(): Promise<unknown> {
+/** Fetch a workflow's `.specification` object from the Qlerify modeller via MCP,
+ * for explicit (projectId, workflowId). */
+async function fetchSpecificationFor(projectId: string, workflowId: string): Promise<unknown> {
   const { url, apiKey } = readMcpCreds();
-  const { workflowId, projectId } = effectiveIds();
-
   const res = await fetch(url, {
     method: "POST",
     headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
@@ -233,6 +231,22 @@ async function fetchSpecification(): Promise<unknown> {
     throw new Error("Qlerify response has no `.specification` — nothing to store");
   }
   return payload.specification;
+}
+
+/** Fetch the workflow's `.specification` from the configured source (override URL
+ * or codegen.json) — the demo/system model fetch. */
+async function fetchSpecification(): Promise<unknown> {
+  const { workflowId, projectId } = effectiveIds();
+  return fetchSpecificationFor(projectId, workflowId);
+}
+
+/** Fetch + serialize a Qlerify model from a modeller workflow URL — used to set a
+ * project's OWN model from a link. Returns the workflow.json text. Throws a clear
+ * error on a malformed URL or a fetch failure. */
+export async function fetchSpecificationFromUrl(workflowUrl: string): Promise<string> {
+  const { projectId, workflowId } = parseWorkflowUrl(workflowUrl); // throws on a bad URL
+  const spec = await fetchSpecificationFor(projectId, workflowId);
+  return serialize(spec);
 }
 
 // ---------------------------------------------------------------------------

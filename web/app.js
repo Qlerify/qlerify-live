@@ -861,21 +861,29 @@ function projectModelControls() {
 
 function projectModelDialog() {
   if (!state.projModelOpen) return "";
-  const err = state.projModelErr ? `<div class="text-sm text-rose-600 mb-2">${escapeHtml(state.projModelErr)}</div>` : "";
+  const err = state.projModelErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.projModelErr)}</div>` : "";
   return `
     <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
       <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
         <div class="px-5 py-4 border-b border-stone-200">
           <div class="text-lg font-semibold">Set this project's model</div>
-          <div class="text-sm text-stone-500 mt-0.5">Paste or upload a Qlerify <span class="mono">workflow.json</span> export. It replaces <b>this project's</b> model and rebuilds <b>this project's</b> data — the demo and other projects are untouched.</div>
+          <div class="text-sm text-stone-500 mt-0.5">Point the project at a Qlerify model. It replaces <b>this project's</b> model and rebuilds <b>this project's</b> data — the demo and other projects are untouched.</div>
         </div>
         <div class="p-5 overflow-auto flex-1">
           ${err}
-          <div class="mb-3 flex items-center gap-2">
-            <input id="proj-model-file" type="file" accept=".json,application/json" class="text-sm" />
-            <span class="text-xs text-stone-400">— or paste below —</span>
-          </div>
-          <textarea id="proj-model-text" class="w-full h-64 rounded-md border border-stone-300 p-2 text-xs mono" placeholder='{ "boundedContext": "...", "domainEvents": { ... }, "schemas": { ... } }'>${escapeHtml(state.projModelText || "")}</textarea>
+          <label class="block text-sm font-medium text-stone-700 mb-1">Qlerify model link</label>
+          <input id="proj-model-url" type="url" value="${escapeHtml(state.projModelUrl || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="https://app.qlerify.com/workflow/&lt;projectId&gt;/&lt;workflowId&gt;" />
+          <div class="text-xs text-stone-500 mt-1">Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.</div>
+          <details class="mt-4">
+            <summary class="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">Advanced — upload or paste a workflow.json instead</summary>
+            <div class="mt-3">
+              <div class="mb-2 flex items-center gap-2">
+                <input id="proj-model-file" type="file" accept=".json,application/json" class="text-sm" />
+                <span class="text-xs text-stone-400">— or paste below —</span>
+              </div>
+              <textarea id="proj-model-text" class="w-full h-48 rounded-md border border-stone-300 p-2 text-xs mono" placeholder='{ "boundedContext": "...", "domainEvents": { ... } }'>${escapeHtml(state.projModelText || "")}</textarea>
+            </div>
+          </details>
         </div>
         <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
           <button id="proj-model-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
@@ -888,22 +896,36 @@ function projectModelDialog() {
 function bindProjectModel() {
   document.getElementById("btn-proj-model")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
   document.getElementById("proj-model-cancel")?.addEventListener("click", () => { state.projModelOpen = false; render(); });
+  document.getElementById("proj-model-url")?.addEventListener("input", (e) => { state.projModelUrl = e.target.value; });
+  // Don't re-render on file load (it would collapse the <details>); fill the textarea directly.
   document.getElementById("proj-model-file")?.addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     const r = new FileReader();
-    r.onload = () => { state.projModelText = String(r.result || ""); render(); };
+    r.onload = () => {
+      state.projModelText = String(r.result || "");
+      const ta = document.getElementById("proj-model-text");
+      if (ta) ta.value = state.projModelText;
+    };
     r.readAsText(f);
   });
   document.getElementById("proj-model-text")?.addEventListener("input", (e) => { state.projModelText = e.target.value; });
   document.getElementById("proj-model-apply")?.addEventListener("click", async () => {
+    const url = ((document.getElementById("proj-model-url") || {}).value || state.projModelUrl || "").trim();
     const text = ((document.getElementById("proj-model-text") || {}).value || state.projModelText || "").trim();
-    if (!text) { state.projModelErr = "Paste or upload a workflow.json first."; render(); return; }
-    try { JSON.parse(text); } catch (_e) { state.projModelErr = "That isn't valid JSON."; render(); return; }
+    let payload;
+    if (url) {
+      payload = { sourceUrl: url }; // primary: pull from the Qlerify modeller
+    } else if (text) {
+      try { JSON.parse(text); } catch (_e) { state.projModelErr = "The pasted/uploaded model isn't valid JSON."; render(); return; }
+      payload = { workflow: text }; // secondary: uploaded / pasted workflow.json
+    } else {
+      state.projModelErr = "Paste a Qlerify model link (or upload/paste a workflow.json under Advanced)."; render(); return;
+    }
     state.projModelBusy = true; state.projModelErr = null; render();
     try {
-      await api("/v1/project/model", { method: "PUT", body: JSON.stringify({ workflow: text }) });
-      state.projModelOpen = false; state.projModelBusy = false; state.projModelText = "";
+      await api("/v1/project/model", { method: "PUT", body: JSON.stringify(payload) });
+      state.projModelOpen = false; state.projModelBusy = false; state.projModelText = ""; state.projModelUrl = "";
       state.modelMsg = { ok: true, text: "Project model updated — rebuilding this project." };
       await ensureMe();
       onHashChange();
@@ -1030,7 +1052,7 @@ async function onHashChange() {
   } else if (r.view === "admin") {
     await loadAdmin();
   } else if (r.view === "bcs") {
-    await loadBcList();
+    await loadExplorer();
   } else if (r.view === "bc") {
     await loadBc(r.bc);
   } else {
@@ -1200,7 +1222,6 @@ function dashboardView() {
         </div>
         ${modelControls()}
         ${projectModelControls()}
-        <button data-go="#bcs" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Bounded contexts / adapters">🔌 Systems</button>
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1296,6 +1317,257 @@ function bcHeader(title, subtitle, back) {
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>`;
+}
+
+// ===========================================================================
+// Systems explorer (#bcs) — a three-pane data console:
+//   Systems (bounded contexts) | Tables (entities) | Items (gen_ rows)
+// + a Filters panel and a Configure Adapter sidebar (chat builder: later).
+// Backed by /api/bc, /api/bc/:bc, /api/bc/:bc/raw — no new backend.
+// ===========================================================================
+
+function expState() {
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, sidebarOpen: false, sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  return state.exp;
+}
+
+async function loadExplorer() {
+  const e = expState();
+  try { e.systems = await api("/api/bc"); } catch (_err) { e.systems = []; }
+  const cur = e.system && e.systems.find((s) => s.name === e.system);
+  if (e.systems[0]) { await selectExpSystem(cur ? e.system : e.systems[0].name); return; }
+  render();
+}
+
+async function selectExpSystem(name) {
+  const e = expState();
+  e.system = name; e.entity = null; e.items = []; e.tableSearch = ""; e.filters = []; e.page = 0;
+  try {
+    const d = await api(`/api/bc/${encodeURIComponent(name)}`);
+    e.entities = d.entities || [];
+    e.adapters = d.adapters || [];
+    const def = d.defaultEntity || (e.entities[0] && e.entities[0].name);
+    if (def) { await selectExpEntity(def); return; }
+  } catch (_err) { e.entities = []; e.adapters = []; }
+  render();
+}
+
+async function selectExpEntity(name) {
+  const e = expState();
+  e.entity = name; e.page = 0; e.filters = []; e.busy = true; render();
+  try {
+    const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(name)}&limit=300`);
+    e.items = d.rows || [];
+    e.tableMissing = !!d.tableMissing;
+  } catch (_err) { e.items = []; e.tableMissing = true; }
+  e.busy = false; render();
+}
+
+function applyExpFilters(items, filters) {
+  const active = (filters || []).filter((f) => f.attr && f.value !== "");
+  if (!active.length) return items;
+  return items.filter((row) => active.every((f) => {
+    let v = row[f.attr]; let t = f.value;
+    if (f.type === "Number") { v = Number(v); t = Number(t); } else { v = String(v == null ? "" : v).toLowerCase(); t = String(t).toLowerCase(); }
+    switch (f.cond) {
+      case "Equal to": return v == t;
+      case "Not equal to": return v != t;
+      case "Contains": return String(v).includes(String(t));
+      case "Begins with": return String(v).startsWith(String(t));
+      case "Greater than": return v > t;
+      case "Less than": return v < t;
+      default: return true;
+    }
+  }));
+}
+
+function explorerView() {
+  const e = expState();
+  return `
+    <div class="flex-1 flex min-h-0 overflow-hidden bg-stone-50">
+      ${expSystemsCol(e)}
+      ${expTablesCol(e)}
+      ${expMain(e)}
+      ${e.sidebarOpen ? expAdapterSidebar(e) : ""}
+    </div>`;
+}
+
+function expSystemsCol(e) {
+  if (e.sysCollapsed) {
+    return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-sys-expand" class="text-stone-400 hover:text-stone-700" title="Show systems">›</button></div>`;
+  }
+  const items = (e.systems || []).map((s) =>
+    `<button data-exp-sys="${escapeHtml(s.name)}" class="w-full text-left px-4 py-2 text-sm hover:bg-stone-100 ${s.name === e.system ? "text-sky-700 font-semibold bg-sky-50" : "text-stone-700"}">${escapeHtml(s.name)}</button>`).join("");
+  return `
+    <div class="w-56 shrink-0 border-r border-stone-200 bg-white flex flex-col">
+      <div class="px-4 py-3 flex items-center justify-between border-b border-stone-100">
+        <span class="font-semibold text-stone-900">Systems</span>
+        <button id="exp-sys-collapse" class="text-stone-400 hover:text-stone-700" title="Collapse">‹</button>
+      </div>
+      <div class="overflow-y-auto py-1 flex-1">${items || '<div class="px-4 py-3 text-sm text-stone-400">No systems</div>'}</div>
+    </div>`;
+}
+
+function expTablesCol(e) {
+  if (e.tablesCollapsed) {
+    return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-tables-expand" class="text-stone-400 hover:text-stone-700" title="Show tables">›</button></div>`;
+  }
+  const all = e.entities || [];
+  const q = (e.tableSearch || "").toLowerCase();
+  const filtered = q ? all.filter((t) => t.name.toLowerCase().includes(q)) : all;
+  const items = filtered.map((t) =>
+    `<button data-exp-entity="${escapeHtml(t.name)}" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-stone-100 ${t.name === e.entity ? "bg-sky-50" : ""}">
+      <span class="w-3 h-3 rounded-full border ${t.name === e.entity ? "border-sky-500 bg-sky-500" : "border-stone-300"}"></span>
+      <span class="flex-1 ${t.name === e.entity ? "text-sky-700 font-medium" : "text-stone-700"}">${escapeHtml(t.name)}</span>
+    </button>`).join("");
+  return `
+    <div class="w-80 shrink-0 border-r border-stone-200 bg-white flex flex-col">
+      <div class="px-4 py-3 border-b border-stone-100 flex items-center justify-between">
+        <span class="font-semibold text-stone-900">Tables <span class="text-stone-400 font-normal">(${all.length})</span></span>
+        <button id="exp-tables-collapse" class="text-stone-400 hover:text-stone-700" title="Collapse">‹</button>
+      </div>
+      <div class="px-3 py-2 border-b border-stone-100">
+        <div class="relative">
+          <input id="exp-table-search" value="${escapeHtml(e.tableSearch || "")}" placeholder="Find a table" class="w-full text-sm border border-stone-300 rounded-md pl-7 pr-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400" />
+          <span class="absolute left-2 top-1.5 text-stone-400 text-sm">🔍</span>
+        </div>
+      </div>
+      <div class="overflow-y-auto py-1 flex-1">${items || `<div class="px-4 py-3 text-sm text-stone-400">${all.length ? "No match" : "No tables"}</div>`}</div>
+    </div>`;
+}
+
+function expMain(e) {
+  if (!e.system) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Loading systems…</div>`;
+  if (!e.entity) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Select a table to explore its items.</div>`;
+  const entity = (e.entities || []).find((t) => t.name === e.entity);
+  const cols = entity && entity.fields && entity.fields.length
+    ? entity.fields.map((f) => f.name)
+    : (e.items[0] ? Object.keys(e.items[0]).filter((k) => k !== "_provenance") : ["id"]);
+  const rows = applyExpFilters(e.items, e.filters);
+  const PAGE = 25;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const page = Math.min(e.page, pages - 1);
+  const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
+  const headerCells = cols.map((c) => `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200">${escapeHtml(c)}</th>`).join("");
+  const bodyRows = pageRows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
+      <td class="px-3 py-2"><input type="checkbox" class="rounded border-stone-300" /></td>
+      ${cols.map((c, ci) => {
+        const val = r[c];
+        const empty = val === null || val === undefined || val === "";
+        const s = empty ? "" : String(val);
+        const disp = empty ? '<span class="text-stone-300">—</span>' : escapeHtml(s.length > 44 ? s.slice(0, 44) + "…" : s);
+        return `<td class="px-3 py-2 text-sm whitespace-nowrap ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}">${disp}</td>`;
+      }).join("")}
+    </tr>`).join("");
+  return `
+    <div class="flex-1 flex flex-col min-w-0 bg-white">
+      <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
+        <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
+        <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${e.sidebarOpen ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Configure Adapter</button>
+      </div>
+      <div class="px-6 py-3 border-b border-stone-200">${expFiltersPanel(e, cols)}</div>
+      <div class="px-6 pt-3 pb-1 flex items-center justify-between">
+        <div class="text-sm font-semibold text-stone-800">Table: ${escapeHtml(e.entity)} — Items returned <span class="text-stone-400 font-normal">(${rows.length})</span></div>
+        <div class="flex items-center gap-2 text-sm text-stone-500">
+          <button id="exp-prev" class="px-2 py-0.5 rounded hover:bg-stone-100 ${page <= 0 ? "opacity-40" : ""}">‹</button>
+          <span class="tabular-nums">${page + 1} / ${pages}</span>
+          <button id="exp-next" class="px-2 py-0.5 rounded hover:bg-stone-100 ${page >= pages - 1 ? "opacity-40" : ""}">›</button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-auto px-6 pb-6">
+        ${e.busy ? '<div class="text-stone-400 text-sm py-10 text-center">Loading…</div>'
+          : e.tableMissing ? `<div class="text-stone-400 text-sm py-10 text-center">No data yet for <b>${escapeHtml(e.entity)}</b>. Run the simulator or connect an adapter to populate it.</div>`
+          : rows.length === 0 ? '<div class="text-stone-400 text-sm py-10 text-center">No items match the filters.</div>'
+          : `<div class="rounded-lg border border-stone-200 overflow-x-auto">
+              <table class="min-w-full">
+                <thead class="bg-stone-50"><tr><th class="px-3 py-2 w-8 border-b border-stone-200"></th>${headerCells}</tr></thead>
+                <tbody>${bodyRows}</tbody>
+              </table>
+            </div>`}
+      </div>
+    </div>`;
+}
+
+function expFiltersPanel(e, cols) {
+  const conds = ["Equal to", "Not equal to", "Contains", "Begins with", "Greater than", "Less than"];
+  const types = ["String", "Number"];
+  const filterRows = (e.filters || []).map((f, i) => `
+    <div class="flex items-end gap-2 mb-2">
+      <div class="flex-1"><label class="block text-[11px] text-stone-500 mb-0.5">Attribute name</label>
+        <input data-filter-idx="${i}" data-filter-field="attr" list="exp-attr-list" value="${escapeHtml(f.attr || "")}" placeholder="Enter attribute name" class="w-full text-sm border border-stone-300 rounded-md px-2 py-1.5" /></div>
+      <div><label class="block text-[11px] text-stone-500 mb-0.5">Condition</label>
+        <select data-filter-idx="${i}" data-filter-field="cond" class="text-sm border border-stone-300 rounded-md px-2 py-1.5">${conds.map((c) => `<option ${c === f.cond ? "selected" : ""}>${c}</option>`).join("")}</select></div>
+      <div><label class="block text-[11px] text-stone-500 mb-0.5">Type</label>
+        <select data-filter-idx="${i}" data-filter-field="type" class="text-sm border border-stone-300 rounded-md px-2 py-1.5">${types.map((t) => `<option ${t === f.type ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+      <div class="flex-1"><label class="block text-[11px] text-stone-500 mb-0.5">Value</label>
+        <input data-filter-idx="${i}" data-filter-field="value" value="${escapeHtml(f.value || "")}" placeholder="Enter attribute value" class="w-full text-sm border border-stone-300 rounded-md px-2 py-1.5" /></div>
+      <button data-filter-remove="${i}" class="px-3 py-1.5 text-sm text-sky-700 hover:underline whitespace-nowrap">Remove</button>
+    </div>`).join("");
+  return `
+    <details ${e.filters && e.filters.length ? "open" : ""}>
+      <summary class="text-sm font-medium text-stone-700 cursor-pointer select-none mb-2">Filters <span class="text-stone-400 font-normal italic">– optional</span></summary>
+      <datalist id="exp-attr-list">${cols.map((c) => `<option value="${escapeHtml(c)}">`).join("")}</datalist>
+      ${filterRows}
+      <button id="exp-add-filter" class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 mb-1">Add filter</button>
+      <div class="flex items-center gap-3 mt-1">
+        <button id="exp-run" class="px-5 py-1.5 text-sm rounded-full bg-amber-400 hover:bg-amber-500 text-stone-900 font-semibold">Run</button>
+        <button id="exp-reset" class="text-sm text-sky-700 hover:underline">Reset</button>
+      </div>
+    </details>`;
+}
+
+function expAdapterSidebar(e) {
+  const adapters = e.adapters || [];
+  const list = adapters.length
+    ? adapters.map((a) => `<div class="rounded-md border border-stone-200 p-2.5"><div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div><div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div></div>`).join("")
+    : '<div class="text-sm text-stone-400">No adapter yet for this system.</div>';
+  return `
+    <div class="w-96 shrink-0 border-l border-stone-200 bg-white flex flex-col">
+      <div class="px-4 py-3 border-b border-stone-200 flex items-center justify-between">
+        <span class="font-semibold text-stone-900">Configure Adapter</span>
+        <button id="exp-sidebar-close" class="text-stone-400 hover:text-stone-700">✕</button>
+      </div>
+      <div class="p-4 overflow-y-auto flex-1 space-y-3">
+        <div class="text-xs text-stone-500">System <b>${escapeHtml(e.system || "")}</b> → table <b>${escapeHtml(e.entity || "")}</b></div>
+        ${list}
+        <div class="rounded-lg border border-dashed border-stone-300 p-4 text-center">
+          <div class="text-2xl mb-1">💬</div>
+          <div class="text-sm font-medium text-stone-700">Build an adapter with AI</div>
+          <div class="text-xs text-stone-500 mt-1">Describe the source system and we'll generate the connector — chat-based builder coming soon.</div>
+          <textarea disabled placeholder="e.g. Connect to our Postgres orders table…" class="w-full mt-3 text-sm border border-stone-200 rounded-md p-2 bg-stone-50 text-stone-400" rows="2"></textarea>
+        </div>
+        <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full adapter workbench →</a>
+      </div>
+    </div>`;
+}
+
+function bindExplorer() {
+  document.getElementById("exp-sys-collapse")?.addEventListener("click", () => { expState().sysCollapsed = true; render(); });
+  document.getElementById("exp-sys-expand")?.addEventListener("click", () => { expState().sysCollapsed = false; render(); });
+  document.getElementById("exp-tables-collapse")?.addEventListener("click", () => { expState().tablesCollapsed = true; render(); });
+  document.getElementById("exp-tables-expand")?.addEventListener("click", () => { expState().tablesCollapsed = false; render(); });
+  document.querySelectorAll("[data-exp-sys]").forEach((el) => el.addEventListener("click", () => selectExpSystem(el.dataset.expSys)));
+  document.querySelectorAll("[data-exp-entity]").forEach((el) => el.addEventListener("click", () => selectExpEntity(el.dataset.expEntity)));
+  const search = document.getElementById("exp-table-search");
+  if (search) search.addEventListener("input", (ev) => {
+    expState().tableSearch = ev.target.value;
+    render();
+    const s = document.getElementById("exp-table-search");
+    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+  });
+  // Filter inputs update state quietly (no re-render → no focus loss); Run applies.
+  document.querySelectorAll("[data-filter-idx]").forEach((el) => {
+    const i = Number(el.dataset.filterIdx), field = el.dataset.filterField;
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", (ev) => { expState().filters[i][field] = ev.target.value; });
+  });
+  document.querySelectorAll("[data-filter-remove]").forEach((el) => el.addEventListener("click", () => { expState().filters.splice(Number(el.dataset.filterRemove), 1); render(); }));
+  document.getElementById("exp-add-filter")?.addEventListener("click", () => { expState().filters.push({ attr: "", cond: "Equal to", type: "String", value: "" }); render(); });
+  document.getElementById("exp-run")?.addEventListener("click", () => { expState().page = 0; render(); });
+  document.getElementById("exp-reset")?.addEventListener("click", () => { expState().filters = []; expState().page = 0; render(); });
+  document.getElementById("exp-prev")?.addEventListener("click", () => { const e = expState(); if (e.page > 0) { e.page--; render(); } });
+  document.getElementById("exp-next")?.addEventListener("click", () => { expState().page++; render(); });
+  document.getElementById("exp-config-adapter")?.addEventListener("click", () => { const e = expState(); e.sidebarOpen = !e.sidebarOpen; render(); });
+  document.getElementById("exp-sidebar-close")?.addEventListener("click", () => { expState().sidebarOpen = false; render(); });
 }
 
 function bcListView() {
@@ -2376,9 +2648,9 @@ function render() {
     bindChat();
     bindRebuildOverlay();
   } else if (state.view === "bcs") {
-    root.innerHTML = wrap(bcListView());
+    root.innerHTML = wrap(explorerView());
     bindTenantBar();
-    bindBcList();
+    bindExplorer();
     bindChat();
     bindRebuildOverlay();
   } else if (state.view === "bc") {
@@ -2453,6 +2725,8 @@ function tenantBar() {
         <span class="text-stone-500 text-xs uppercase tracking-wide">Project</span>
         ${projControl}
         <div class="flex-1"></div>
+        <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
+        <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
         <a href="#admin" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "admin" ? "bg-stone-800 text-white" : ""}" title="Organization admin">⚙ Admin</a>
         <span class="text-stone-600">·</span>
         <span class="text-stone-400" title="Signed in as">${escapeHtml(subject)}</span>

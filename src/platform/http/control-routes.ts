@@ -25,6 +25,7 @@ import {
 } from "../provisioning/index.js";
 import { requireTenant } from "../tenancy/context.js";
 import { setActiveProjectModel } from "../../twin/apply.js";
+import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
 import {
   createVersion,
   currentContent,
@@ -473,12 +474,22 @@ export function registerControlRoutes(app: FastifyInstance) {
   app.put("/v1/project/model", async (req, reply) => {
     try {
       const ctx = requireTenant();
-      const body = (req.body ?? {}) as { workflow?: string; overlay?: string | null };
-      if (typeof body.workflow !== "string" || !body.workflow.trim()) {
-        throw new DomainError("workflow (the Qlerify workflow.json text) is required");
-      }
+      const body = (req.body ?? {}) as { workflow?: string; overlay?: string | null; sourceUrl?: string };
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
-      const result = await setActiveProjectModel(body.workflow, body.overlay ?? null);
+      // Primary path: a Qlerify modeller link → pull the latest model via MCP.
+      let workflow = body.workflow;
+      if (body.sourceUrl && body.sourceUrl.trim()) {
+        try {
+          workflow = await fetchSpecificationFromUrl(body.sourceUrl.trim());
+        } catch (e: any) {
+          return reply.code(502).send({ error: "FETCH_FAILED", message: e?.message ?? String(e) });
+        }
+      }
+      // Secondary path: pasted / uploaded workflow.json text.
+      if (typeof workflow !== "string" || !workflow.trim()) {
+        throw new DomainError("Provide a Qlerify model link, or upload/paste a workflow.json");
+      }
+      const result = await setActiveProjectModel(workflow, body.overlay ?? null);
       return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);

@@ -14,16 +14,10 @@ import { prisma } from "../db.js";
 import { newId } from "../util/ids.js";
 import { withScope } from "../events/bus.js";
 import { provenanceFor } from "./provenance.js";
-import { setBusinessClock, genericBusinessTimeForStep } from "../events/clock.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { genericApply } from "../commands/base.js";
 import * as store from "./projection-store.js";
-
-/** Is this the Ericsson demo model (which has its own hand-written stepper)? */
-export function isEricssonModel(): boolean {
-  return !!getOntology().eventByKey("HardwareDemandCreated");
-}
 
 /** A stable signature of the loaded model — used as the "which model does the
  * transactional data belong to" marker. Changes when the bounded context or the
@@ -35,16 +29,13 @@ export function dataModelSignature(): string {
 
 /** Whether a rebuild (apply) is needed before the model can run cleanly. True
  * when the transactional data belongs to a DIFFERENT model (a switch → clean
- * slate), or — for a generic model — when its projection tables are missing /
- * drifted. False for the Ericsson model whose data already matches. The UI uses
- * this to auto-rebuild on a model change instead of a manual button. */
+ * slate), or when the loaded model's projection tables are missing / drifted.
+ * The UI uses this to auto-rebuild on a model change instead of a manual button. */
 export async function rebuildNeeded(): Promise<boolean> {
   // Model switch: the data in the tables is from a previously-loaded model, so a
-  // clean-slate rebuild is needed (this is what makes switching back to Ericsson
-  // not show the previous session's rows). Null marker = data unclaimed yet.
+  // clean-slate rebuild is needed. Null marker = data unclaimed yet.
   const dataModel = await store.getMeta("dataModel");
   if (dataModel !== null && dataModel !== dataModelSignature()) return true;
-  if (isEricssonModel()) return false;
   const ont = getOntology();
   const existing = new Set(await store.listProjectionTables());
   for (const e of ont.entities) {
@@ -216,14 +207,8 @@ export async function genericNewInstance(): Promise<{ id: string; aggregate: str
   const event = rootCreateEvent(ont);
   const id = newId(ont.rootAggregate.toLowerCase().slice(0, 8));
   const args = { ...synthesizeArgs(event, ont, new Map()), id };
-  // Tag the root event with its step's business date (timeline date caption).
-  const rootIndex = ont.linearOrder().indexOf(event.key);
-  setBusinessClock(genericBusinessTimeForStep(rootIndex < 0 ? 0 : rootIndex));
-  try {
-    await withScope(id, () => genericApply(event.commandName, { args, role: event.role }));
-  } finally {
-    setBusinessClock(null);
-  }
+  // businessAt is derived in emit() from the event's own data, so no clock to set.
+  await withScope(id, () => genericApply(event.commandName, { args, role: event.role }));
   return { id, aggregate: ont.rootAggregate };
 }
 
@@ -252,10 +237,9 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
   const event = ont.eventByKey(order[index]!)!;
   const instances = await runInstances(instanceId);
   const args = synthesizeArgs(event, ont, instances);
-  const businessAt = genericBusinessTimeForStep(index);
-  setBusinessClock(businessAt);
   let caption: string;
   try {
+    // businessAt is derived in emit() from the event's own data.
     await withScope(instanceId, () => genericApply(event.commandName, { args, role: event.role }));
     caption = `${event.role} → ${event.name}`;
   } catch (err: any) {
@@ -266,12 +250,10 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
       data: {
         eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
         aggregateRoot: event.aggregateRoot, aggregateId: "", demandId: instanceId,
-        role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt,
+        role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
         provenance: await provenanceFor(event.boundedContext),
       },
     });
-  } finally {
-    setBusinessClock(null);
   }
   return { index, total, eventRef: event.ref, eventName: event.name, caption, done: index + 1 >= total, instanceId };
 }

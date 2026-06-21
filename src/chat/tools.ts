@@ -7,8 +7,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "../db.js";
 import { EVENTS } from "../events/registry.js";
-import { STEP_DURATIONS_HOURS, businessTimeForStep } from "../events/clock.js";
-import { currentStepIndex, nextStep, newDemand } from "../simulator/stepper.js";
+import {
+  genericCurrentStep, genericStep, genericNewInstance, genericListInstances, genericInstanceDetail,
+} from "../twin/sim.js";
 import { getOntology } from "../ontology/model.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
@@ -18,7 +19,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_demands",
     description:
-      "List every demand currently in the simulator with its lifecycle status, progress (X of 28 steps), and dwellSeconds (real wall-clock idleness since the last event). Use this whenever the user asks 'how many demands are…', 'which demands…', 'show me all demands', or needs an overview.",
+      "List every instance (run) currently in the simulator with its status, progress (steps fired of total), and dwellSeconds (real wall-clock idleness since the last event). Use this whenever the user asks 'how many are…', 'which ones…', 'show me everything', or needs an overview.",
     input_schema: {
       type: "object",
       properties: {
@@ -33,13 +34,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "find_demand",
     description:
-      "Resolve a human description of a demand to a demandId. Matches against customer id, product name, qty, requested week, or any combination. Returns one or more matching demand summaries. Use this when the user references a demand by description (e.g. 'the Baseband one for cust-22', '8 × Radio Unit X').",
+      "Resolve a human description of an instance to its id. Matches against any field on the instance's root aggregate row. Returns one or more matching summaries. Use this when the user references an instance by description rather than by id.",
     input_schema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Free-text description, e.g. '8 baseband cust-22' or 'radio unit x'.",
+          description: "Free-text description matched against the instance's fields.",
         },
       },
       required: ["query"],
@@ -48,11 +49,11 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_demand_details",
     description:
-      "Return the full per-demand state: the Demand row, its Project, BuildPlan(s), Build, BomItems, EngineeringRelease, PurchaseOrders, etc. Use when the user asks 'what's the state of X' or wants to see specific fields on a demand's aggregates.",
+      "Return the full per-instance state: the root aggregate row, the events that have fired, and the rows created across the run grouped by aggregate. Use when the user asks 'what's the state of X' or wants to see specific fields on an instance's aggregates.",
     input_schema: {
       type: "object",
       properties: {
-        demandId: { type: "string", description: "The demand id, e.g. 'dmd-339c7c25'." },
+        demandId: { type: "string", description: "The instance id." },
       },
       required: ["demandId"],
     },
@@ -73,13 +74,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_workflow_step",
     description:
-      "Return the canonical definition of a single step in the 28-event workflow — name, bounded context, role, derived flag, acceptance criteria, and expected duration from the previous step in business days. Use when the user asks 'what does step N do', 'what gates X', 'how long should Y take'.",
+      "Return the canonical definition of a single step in the workflow — name, bounded context, role, derived flag, command, and acceptance criteria. Use when the user asks 'what does step N do' or 'what gates X'.",
     input_schema: {
       type: "object",
       properties: {
         index: {
           type: "number",
-          description: "1-based step number (1..28). Step 1 is Hardware Demand Created.",
+          description: "1-based step number. Step 1 is the workflow's first event.",
         },
       },
       required: ["index"],
@@ -100,16 +101,11 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "next_step",
     description:
-      "WRITE — Advance a demand one step forward in the workflow. Requires explicit user confirmation: summarize what will happen, ask 'Shall I proceed?', wait for an explicit yes, then call with `confirmed: true`. The tool refuses with an error if `confirmed` is false.",
+      "WRITE — Advance an instance one step forward in the workflow. Requires explicit user confirmation: summarize what will happen, ask 'Shall I proceed?', wait for an explicit yes, then call with `confirmed: true`. The tool refuses with an error if `confirmed` is false.",
     input_schema: {
       type: "object",
       properties: {
         demandId: { type: "string" },
-        withDisruptions: {
-          type: "boolean",
-          description:
-            "Whether disruption steps (ETA slip, shortage, replan) should fire. Default true — preserves the Cascading-Disruptions storyline.",
-        },
         confirmed: {
           type: "boolean",
           description: "Must be `true`, set only after the user has explicitly confirmed the action.",
@@ -121,7 +117,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "create_demand",
     description:
-      "WRITE — Create a new demand using the next demand template in rotation. Requires explicit user confirmation: summarize what will be created (the template's customer + product + qty + week), ask 'Shall I proceed?', wait for yes, then call with `confirmed: true`.",
+      "WRITE — Create a new instance of the loaded model (instantiates its root aggregate). Requires explicit user confirmation: summarize what will be created, ask 'Shall I proceed?', wait for yes, then call with `confirmed: true`.",
     input_schema: {
       type: "object",
       properties: {
@@ -277,73 +273,41 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
 // ---------------------------------------------------------------------------
 
 async function handleListDemands(olderThanSeconds?: number) {
-  const demands = await prisma.demand.findMany({ orderBy: { createdAt: "desc" } });
   const now = Date.now();
-  const out = [];
-  for (const d of demands) {
-    const lastEvent = await prisma.eventLog.findFirst({
-      where: { demandId: d.id },
-      orderBy: { occurredAt: "desc" },
-      select: { eventName: true, eventRef: true, occurredAt: true, businessAt: true },
-    });
-    const progress = await prisma.eventLog.findMany({
-      where: { demandId: d.id },
-      distinct: ["eventRef"],
-      select: { eventRef: true },
-    });
-    const dwellSeconds = lastEvent ? Math.round((now - new Date(lastEvent.occurredAt).getTime()) / 1000) : null;
-    const row = {
-      id: d.id,
-      customerId: d.customerId,
-      productName: d.productName,
-      qty: d.qty,
-      requestedWeek: d.requestedWeek,
-      status: d.status,
-      progress: progress.length,
-      total: EVENTS.length,
-      lastEventName: lastEvent?.eventName ?? null,
-      lastBusinessAt: lastEvent?.businessAt ?? null,
-      dwellSeconds,
-    };
-    if (olderThanSeconds == null || (dwellSeconds ?? 0) >= olderThanSeconds) {
-      out.push(row);
-    }
-  }
+  const instances = await genericListInstances();
+  const out = instances
+    .map((d: any) => {
+      const occurredAt = d.lastEvent?.occurredAt ?? null;
+      const dwellSeconds = occurredAt ? Math.round((now - new Date(occurredAt).getTime()) / 1000) : null;
+      const { lastEvent, ...row } = d;
+      return { ...row, lastEventName: lastEvent?.eventName ?? null, dwellSeconds };
+    })
+    .filter((row: any) => olderThanSeconds == null || (row.dwellSeconds ?? 0) >= olderThanSeconds);
   return { demands: out, count: out.length, threshold: olderThanSeconds ?? null };
 }
 
 async function handleFindDemand(query: string) {
   const q = query.toLowerCase().trim();
   if (!q) return { matches: [] };
-  const demands = await prisma.demand.findMany();
-  const matches = demands.filter((d) => {
-    const blob = `${d.id} ${d.customerId} ${d.productName} ${d.qty} ${d.requestedWeek} ${d.status}`.toLowerCase();
-    return q.split(/\s+/).every((tok) => blob.includes(tok));
+  const toks = q.split(/\s+/);
+  const instances = await genericListInstances();
+  const matches = instances.filter((d: any) => {
+    const blob = JSON.stringify(d).toLowerCase();
+    return toks.every((tok) => blob.includes(tok));
   });
-  return { query, matches: matches.map((d) => ({ id: d.id, customer: d.customerId, product: d.productName, qty: d.qty, week: d.requestedWeek, status: d.status })) };
+  return {
+    query,
+    matches: matches.map((d: any) => {
+      const { lastEvent, progress, total, ...row } = d;
+      return row;
+    }),
+  };
 }
 
 async function handleGetDemandDetails(demandId: string) {
-  const demand = await prisma.demand.findUnique({ where: { id: demandId } });
-  if (!demand) return { error: `no demand ${demandId}` };
-  const project = await prisma.project.findFirst({
-    where: { demandId },
-    include: { bomItems: true },
-  });
-  const plans = await prisma.buildPlan.findMany({
-    where: { demandId },
-    orderBy: { versionNo: "desc" },
-    include: { builds: { include: { buildDemand: true } } },
-  });
-  const er = project ? await prisma.engineeringRelease.findUnique({ where: { projectId: project.id } }) : null;
-  const ecs = project ? await prisma.engineeringChange.findMany({ where: { projectId: project.id } }) : [];
-  const pos = project ? await prisma.purchaseOrder.findMany({ where: { projectId: project.id } }) : [];
-  const buildIds = plans.flatMap((p) => p.builds.map((b) => b.id));
-  const bookings = await prisma.lineBooking.findMany({ where: { buildId: { in: buildIds } } });
-  const tests = await prisma.testResult.findMany({ where: { buildId: { in: buildIds } } });
-  const units = await prisma.unit.findMany({ where: { buildId: { in: buildIds } } });
-  const shipments = await prisma.shipment.findMany({ where: { demandId }, include: { units: true } });
-  return { demand, project, plans, engineeringRelease: er, engineeringChanges: ecs, purchaseOrders: pos, lineBookings: bookings, tests, units, shipments };
+  const detail = await genericInstanceDetail(demandId);
+  if (!detail.root) return { error: `no instance ${demandId}` };
+  return detail;
 }
 
 async function handleGetEventLog(demandId: string, limit: number) {
@@ -362,7 +326,7 @@ function handleGetWorkflowStep(index1Based: number) {
   }
   const i = index1Based - 1;
   const e = EVENTS[i]!;
-  const dur = STEP_DURATIONS_HOURS[i] ?? 0;
+  const spec = getOntology().eventByRef(e.ref);
   return {
     step: index1Based,
     name: e.name,
@@ -372,18 +336,18 @@ function handleGetWorkflowStep(index1Based: number) {
     role: e.role,
     phase: e.phase,
     derived: !!e.derived,
-    durationHoursFromPrev: dur,
-    expectedBusinessTime: businessTimeForStep(i).toISOString(),
+    command: spec?.commandName ?? null,
+    acceptanceCriteria: spec?.acceptanceCriteria ?? [],
   };
 }
 
 async function handleGetCurrentStep(demandId: string) {
-  const idx = await currentStepIndex(demandId);
-  if (idx >= EVENTS.length) return { demandId, done: true, completedSteps: EVENTS.length };
-  const e = EVENTS[idx]!;
+  const { index, total } = await genericCurrentStep(demandId);
+  if (index >= total) return { demandId, done: true, completedSteps: total };
+  const e = EVENTS[index]!;
   return {
     demandId,
-    nextStep: idx + 1,
+    nextStep: index + 1,
     name: e.name,
     boundedContext: e.boundedContext,
     role: e.role,
@@ -401,13 +365,10 @@ async function handleNextStep(args: Record<string, any>) {
   }
   const demandId = String(args.demandId ?? "");
   if (!demandId) return err("demandId required");
-  const withDisruptions = args.withDisruptions !== false;
-  const result = await nextStep(demandId, withDisruptions);
+  const result = await genericStep(demandId);
   return ok({
     stepFired: result.index + 1,
-    eventName: result.event.name,
-    boundedContext: result.event.boundedContext,
-    role: result.event.role,
+    eventName: result.eventName,
     caption: result.caption,
     done: result.done,
   });
@@ -417,8 +378,8 @@ async function handleCreateDemand(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. You must obtain an explicit user confirmation first, then call again with confirmed=true.");
   }
-  const result = await newDemand();
-  return ok({ demandId: result.id, template: result.template });
+  const result = await genericNewInstance();
+  return ok({ demandId: result.id, aggregate: result.aggregate });
 }
 
 // ---------------------------------------------------------------------------

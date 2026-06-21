@@ -1,4 +1,4 @@
-// Ericsson HW Flow demo UI — vanilla JS + Tailwind.
+// Model-driven workflow demo UI — vanilla JS + Tailwind.
 // Two views:
 //   1. Dashboard:  table of demands with status + progress, "+ New demand" button.
 //   2. Detail:     per-demand timeline + 7 BC panels, step-forward controls.
@@ -102,13 +102,12 @@ const state = {
   rebuildError: null,
   // detail view
   demandId: null,
-  instance: null,   // generic (non-Ericsson) per-run detail from /sim/instance
-  prevInstance: null, // the instance snapshot before the last step (generic diff)
+  instance: null,   // per-run detail from /sim/instance
+  prevInstance: null, // the instance snapshot before the last step (per-run diff)
   log: [],
   snapshot: null,
   prev: null,
   currentIndex: 0,
-  withDisruptions: true,
   // per-BC adapter workbench (Part 2.3)
   bc: null,           // current bounded context (#bc/<Name>)
   bcList: null,       // /api/bc index
@@ -243,6 +242,15 @@ function escapeHtml(s) {
   return String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Display label for an entity/aggregate identifier. The raw identifier is the
+// source of truth everywhere (model keys, $refs, gen_ table names, codegen, data
+// keys); this is the single hook for prettifying the text the user reads. With
+// no model-supplied overrides it passes the name through verbatim — nothing is
+// hard-coded to any particular model.
+function prettyEntity(name) {
+  return name;
 }
 
 // Inline formatting: bold, italic, inline code. Operates on already-escaped HTML.
@@ -1007,7 +1015,7 @@ function staleness(dwellSeconds, isComplete) {
 
 function dashboardRow(d, cols) {
   const pct = Math.round((d.progress / d.total) * 100) || 0;
-  // Generic (non-Ericsson): columns derived from the row's own fields.
+  // Columns derived from the root-aggregate row's own fields.
   if (cols) {
     const cells = cols.map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
     return `
@@ -1061,7 +1069,7 @@ function dashboardRow(d, cols) {
   `;
 }
 
-// Generic list columns derived from the root-aggregate rows (non-Ericsson models).
+// List columns derived from the root-aggregate rows of the loaded model.
 function genericColumns(rows) {
   const reserved = new Set(["id", "version", "createdAt", "updatedAt", "status", "progress", "total", "lastEvent", "dwellSeconds"]);
   const first = rows[0] || {};
@@ -1070,14 +1078,11 @@ function genericColumns(rows) {
 
 function dashboardView() {
   const m = state.meta;
-  const ericsson = m.ericsson !== false;
-  const cols = ericsson ? null : genericColumns(state.demands);
+  const cols = genericColumns(state.demands);
   const rows = state.demands.map((d) => dashboardRow(d, cols)).join("");
   const empty = state.demands.length === 0;
-  const plural = m.rootAggregatePlural, singular = m.rootAggregate;
-  const headerCells = ericsson
-    ? `<th class="px-4 py-2 font-medium">customer</th><th class="px-4 py-2 font-medium">product</th><th class="px-4 py-2 font-medium">qty</th><th class="px-4 py-2 font-medium">week</th>`
-    : (cols || []).map((c) => `<th class="px-4 py-2 font-medium">${escapeHtml(c)}</th>`).join("");
+  const plural = prettyEntity(m.rootAggregatePlural), singular = prettyEntity(m.rootAggregate);
+  const headerCells = cols.map((c) => `<th class="px-4 py-2 font-medium">${escapeHtml(c)}</th>`).join("");
   return `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-6">
@@ -1243,7 +1248,7 @@ function bcNoAdapter(d) {
     <div class="max-w-xl rounded-lg border border-dashed border-stone-300 bg-white p-6 text-center">
       <div class="text-stone-400 text-4xl mb-2">🔌</div>
       <div class="text-stone-700 font-medium">No adapter for this system yet</div>
-      <div class="text-sm text-stone-500 mt-1">Create one to pull <span class="mono">${escapeHtml(String(entity))}</span> records from the real source. It starts simulated; then configure the endpoint + credentials and let AI author the live connector.</div>
+      <div class="text-sm text-stone-500 mt-1">Create one to pull <span class="mono">${escapeHtml(prettyEntity(String(entity)))}</span> records from the real source. It starts simulated; then configure the endpoint + credentials and let AI author the live connector.</div>
       <button id="bc-add-adapter" ${state.bcBusy ? "disabled" : ""} class="mt-4 px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Connect a system</button>
     </div>`;
 }
@@ -1253,10 +1258,10 @@ function bcOverviewPanel(d) {
     <tr class="border-t border-stone-100">
       <td class="px-3 py-2 text-stone-700">${escapeHtml(e.name)}</td>
       <td class="px-3 py-2 text-stone-500">${escapeHtml(e.role || "")}</td>
-      <td class="px-3 py-2 mono text-xs text-stone-500">${escapeHtml(e.aggregateRoot || "")}</td>
+      <td class="px-3 py-2 mono text-xs text-stone-500">${escapeHtml(prettyEntity(e.aggregateRoot || ""))}</td>
       <td class="px-3 py-2">${e.derived ? `<span class="text-amber-600 text-xs font-semibold">DERIVED</span>` : ""}</td>
     </tr>`).join("");
-  const chips = (arr, cls) => (arr || []).map((x) => `<span class="inline-block px-2 py-1 mr-1 mb-1 rounded ${cls} text-xs">${escapeHtml(x.name)}</span>`).join("") || `<span class="text-stone-400 text-sm">none</span>`;
+  const chips = (arr, cls) => (arr || []).map((x) => `<span class="inline-block px-2 py-1 mr-1 mb-1 rounded ${cls} text-xs">${escapeHtml(prettyEntity(x.name))}</span>`).join("") || `<span class="text-stone-400 text-sm">none</span>`;
   return `
     <div class="space-y-6 max-w-4xl">
       <section><div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Entities</div><div>${chips(d.entities, "bg-sky-50 text-sky-700")}</div></section>
@@ -1280,7 +1285,7 @@ function bcConnectionPanel(d, adapter) {
         <div class="flex items-center justify-between gap-4">
           <div>
             <div class="font-medium text-stone-900">${escapeHtml(adapter.id)}</div>
-            <div class="text-xs text-stone-500">kind: ${escapeHtml(adapter.kind)} · target: ${escapeHtml(adapter.targetEntity)} · mode: ${escapeHtml(adapter.mode)}</div>
+            <div class="text-xs text-stone-500">kind: ${escapeHtml(adapter.kind)} · target: ${escapeHtml(prettyEntity(adapter.targetEntity))} · mode: ${escapeHtml(adapter.mode)}</div>
           </div>
           <button id="bc-verify" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 shrink-0">Verify connection</button>
         </div>
@@ -1375,7 +1380,7 @@ function bcRawPanel(d, adapter) {
   const r = state.bcRaw;
   let body = `<div class="text-stone-400 text-sm">Click <b>Load raw rows</b> to read the ingestion table.</div>`;
   if (r) {
-    if (r.tableMissing) body = `<div class="text-stone-400 text-sm">No ingestion table for <span class="mono">${escapeHtml(r.entity || d.defaultEntity || "")}</span> yet — run an ingest from the Test tab.</div>`;
+    if (r.tableMissing) body = `<div class="text-stone-400 text-sm">No ingestion table for <span class="mono">${escapeHtml(prettyEntity(r.entity || d.defaultEntity || ""))}</span> yet — run an ingest from the Test tab.</div>`;
     else if (!r.rows.length) body = `<div class="text-stone-400 text-sm">Table <span class="mono">gen_${escapeHtml(r.entity)}</span> is empty.</div>`;
     else {
       const cols = Object.keys(r.rows[0]);
@@ -1478,41 +1483,21 @@ function bindBcWorkbench() {
 
 async function loadDetail() {
   await loadMeta();
-  // Generic (non-Ericsson): per-run detail from the model-generic simulator.
-  if (state.meta.ericsson === false) {
-    const [instance, events, cur] = await Promise.all([
-      api("/sim/instance/" + encodeURIComponent(state.demandId)),
-      api("/sim/events"),
-      api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
-      loadRegistryStatus(),
-    ]);
-    // Keep the pre-step instance so the detail view can mark what this step
-    // changed (mirrors the Ericsson path's state.prev / rowChanged). Only diff
-    // within the same run — switching runs starts clean.
-    state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
-    state.instance = instance;
-    state.events = events;
-    // newest-first so lastEventCaption() / businessByStep read the latest first
-    // (matches the Ericsson /sim/event-log desc ordering).
-    state.log = (instance.events || []).slice().reverse();
-    state.currentIndex = cur.index;
-    render();
-    return;
-  }
-  const [events, snapshot, log, cur, demands] = await Promise.all([
+  // Per-run detail from the model-generic simulator.
+  const [instance, events, cur] = await Promise.all([
+    api("/sim/instance/" + encodeURIComponent(state.demandId)),
     api("/sim/events"),
-    api("/sim/snapshot?demandId=" + encodeURIComponent(state.demandId)),
-    api("/sim/event-log?limit=200&demandId=" + encodeURIComponent(state.demandId)),
     api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
-    api("/sim/demands"),
     loadRegistryStatus(),
   ]);
+  // Keep the pre-step instance so the detail view can mark what this step
+  // changed. Only diff within the same run — switching runs starts clean.
+  state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
+  state.instance = instance;
   state.events = events;
-  state.prev = state.snapshot;
-  state.snapshot = snapshot;
-  state.log = log;
+  // newest-first so lastEventCaption() / businessByStep read the latest first.
+  state.log = (instance.events || []).slice().reverse();
   state.currentIndex = cur.index;
-  state.demands = demands;
   render();
 }
 
@@ -1522,7 +1507,7 @@ async function doNext() {
   try {
     await api("/sim/next", {
       method: "POST",
-      body: JSON.stringify({ demandId: state.demandId, withDisruptions: state.withDisruptions }),
+      body: JSON.stringify({ demandId: state.demandId }),
     });
     await loadDetail();
   } catch (e) {
@@ -1538,7 +1523,7 @@ async function doRunAll() {
   try {
     await api("/sim/run-all", {
       method: "POST",
-      body: JSON.stringify({ demandId: state.demandId, withDisruptions: state.withDisruptions }),
+      body: JSON.stringify({ demandId: state.demandId }),
     });
     await loadDetail();
   } catch (e) {
@@ -1679,15 +1664,27 @@ function businessByStep() {
   return m;
 }
 
+// Readable business date. Rendered in UTC so it's stable regardless of the
+// viewer's timezone (the businessAt value is a date carried in the event data).
 function fmtBizDate(iso) {
   if (!iso) return null;
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function daysBetween(isoA, isoB) {
+function minutesBetween(isoA, isoB) {
   if (!isoA || !isoB) return null;
-  const ms = new Date(isoB).getTime() - new Date(isoA).getTime();
-  return Math.round(ms / 86_400_000);
+  return Math.round((new Date(isoB).getTime() - new Date(isoA).getTime()) / 60_000);
+}
+
+// Compact elapsed-time label for the gap between two fired steps: minutes within
+// the hour, hours within the day, days beyond (+30m, +2h, +9h, +14d) — so the
+// timeline reads naturally whether a model's steps are minutes or weeks apart.
+function fmtGap(min) {
+  if (min < 60) return `+${min}m`;
+  const h = Math.floor(min / 60), mm = min % 60;
+  if (h < 24) return mm ? `+${h}h${mm}m` : `+${h}h`;
+  const d = Math.floor(h / 24), hh = h % 24;
+  return hh ? `+${d}d${hh}h` : `+${d}d`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1794,6 +1791,19 @@ function timeline() {
   const W = (layout.cols - 1) * colPitch + cardW;
   const H = (layout.lanes - 1) * rowPitch + cardH;
 
+  // Per-lane "frontier" = the most recently fired event on each lane (its
+  // highest linear step index). Stepping interleaves the lanes, so each branch
+  // has advanced to a different point: any fired event *before* its lane's
+  // frontier is that branch's past and gets a green tint; the frontier itself
+  // (the branch's latest) and not-yet-fired events do not.
+  const laneFrontier = new Map();
+  state.events.forEach((e, i) => {
+    if (i >= state.currentIndex) return;
+    const lane = layout.place.get(e.ref)?.lane ?? 0;
+    const cur = laneFrontier.get(lane);
+    if (cur == null || i > cur) laneFrontier.set(lane, i);
+  });
+
   // Iterate in declared (linear) order so `data-step`, the fired/current logic,
   // and the business-date gap accumulation all stay tied to the step sequence;
   // each card is then *positioned* by its lane/column placement.
@@ -1803,20 +1813,22 @@ function timeline() {
     const isCurrent = i === state.currentIndex - 1;
     const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
     const ringClass = isCurrent ? "ring-2 ring-amber-400" : "";
+    // Already-completed on this branch (fired and before the lane's frontier).
+    const isPast = fired && i < (laneFrontier.get(pos.lane) ?? -1);
 
     const bizIso = biz.get(e.ref);
     const bizLabel = fired ? fmtBizDate(bizIso) : null;
-    const gapDays = fired && prevBizIso && bizIso ? daysBetween(prevBizIso, bizIso) : null;
+    const gapMin = fired && prevBizIso && bizIso ? minutesBetween(prevBizIso, bizIso) : null;
     if (fired && bizIso) prevBizIso = bizIso;
 
-    // Highlight long gaps (>10 days) in amber so the supplier-slip moment pops.
-    const gapTone = gapDays != null && gapDays >= 10 ? "text-amber-700 font-semibold" : "text-stone-500";
+    // Highlight long gaps (≥10 days) in amber so the supplier-slip moment pops.
+    const gapTone = gapMin != null && gapMin >= 10 * 1440 ? "text-amber-700 font-semibold" : "text-stone-500";
 
     // Each step's source mode = its bounded context's configured mode.
     const provMode = provModeForBC(e.boundedContext);
 
     return `
-      <div data-step="${i}" class="absolute rounded-md border ${phaseBorder} ${ringClass} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
+      <div data-step="${i}" class="absolute rounded-md border ${isPast ? "border-emerald-200" : phaseBorder} ${ringClass} ${isPast ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
            style="left:${pos.col * colPitch}px; top:${pos.lane * rowPitch}px; width:${cardW}px; height:${cardH}px; ${provHatch(provMode)}">
         <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
           <span class="truncate">${i+1}. ${e.boundedContext}</span>
@@ -1829,8 +1841,8 @@ function timeline() {
         <div class="text-[10px] text-stone-500 mt-1">${e.role}</div>
         ${fired ? `
           <div class="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
-            <span class="text-stone-700 font-medium">${bizLabel ?? "—"}</span>
-            ${gapDays != null && gapDays > 0 ? `<span class="${gapTone}">+${gapDays}d</span>` : ""}
+            <span class="text-stone-700 font-medium mono">${bizLabel ?? "—"}</span>
+            ${gapMin != null && gapMin > 0 ? `<span class="${gapTone}">${fmtGap(gapMin)}</span>` : ""}
           </div>
         ` : ""}
       </div>
@@ -1930,22 +1942,7 @@ function bcPanel(panel) {
 }
 
 function detailView() {
-  if (state.meta.ericsson === false) return genericDetailView();
-  return `
-    ${detailHeader()}
-    ${timeline()}
-    ${lastEventCaption()}
-    <main class="flex-1 overflow-auto p-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
-        ${BC_PANELS.map(bcPanel).join("")}
-      </div>
-    </main>
-    <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
-      <span>Generated from the live Qlerify model.</span>
-      <span class="mx-2">·</span>
-      <span>${state.events.length} events · ${state.meta.boundedContextCount} systems · ${state.meta.aggregateCount} aggregates</span>
-    </footer>
-  `;
+  return genericDetailView();
 }
 
 // ---------------------------------------------------------------------------
@@ -2128,7 +2125,7 @@ function genNode(agg, row, ctx, depth, prominent) {
   return `
     <div class="rounded-lg border ${changed ? "border-amber-300 ring-1 ring-amber-200" : "border-stone-200"} bg-white ${prominent ? "p-4" : "p-3"}">
       <div class="flex items-center gap-2 mb-2">
-        <span class="font-semibold text-stone-800 ${prominent ? "text-sm" : "text-[12px]"}">${escapeHtml(agg)}</span>
+        <span class="font-semibold text-stone-800 ${prominent ? "text-sm" : "text-[12px]"}">${escapeHtml(prettyEntity(agg))}</span>
         ${bcChip}${idChip}${updatedChip}
       </div>
       <div class="grid grid-cols-2 ${prominent ? "md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6" : "sm:grid-cols-2"} gap-x-4 gap-y-1.5">${grid}</div>
@@ -2166,7 +2163,7 @@ function genericDetailView() {
         <button id="btn-back" class="p-1.5 -ml-1 rounded text-stone-500 hover:text-stone-900 hover:bg-stone-100" title="Back to dashboard">←</button>
         <div class="flex-1 min-w-0">
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} · ${root.id ? escapeHtml(String(root.id).slice(0, 16)) + "…" : ""}</div>
-          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(m.rootAggregate)} ${root.status ? pill(String(root.status), String(root.status)) : ""}</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(prettyEntity(m.rootAggregate))} ${root.status ? pill(String(root.status), String(root.status)) : ""}</div>
         </div>
         <div class="text-sm text-stone-500 mr-2 tabular-nums">step <span class="font-semibold text-stone-800">${state.currentIndex}</span> / ${total}</div>
         <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
@@ -2190,9 +2187,6 @@ function bindDetail() {
   document.getElementById("btn-next")?.addEventListener("click", doNext);
   document.getElementById("btn-all")?.addEventListener("click", doRunAll);
   document.getElementById("btn-reset")?.addEventListener("click", doReset);
-  document.getElementById("disrupt")?.addEventListener("change", (e) => {
-    state.withDisruptions = e.target.checked;
-  });
 }
 
 // ---------------------------------------------------------------------------

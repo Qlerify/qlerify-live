@@ -12,7 +12,7 @@ import { genericApply } from "../commands/base.js";
 import { kebabCase } from "../kernel/codegen/introspect.js";
 import { applyModel, applyStatus } from "../twin/apply.js";
 import {
-  isEricssonModel, genericNewInstance, genericStep, genericCurrentStep,
+  genericNewInstance, genericStep, genericCurrentStep,
   genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
 } from "../twin/sim.js";
 import { provenanceMeta } from "../twin/provenance.js";
@@ -45,9 +45,6 @@ import { prisma } from "../db.js";
 import { EVENTS, registryError } from "../events/registry.js";
 import { ontologyView, getOntology } from "../ontology/model.js";
 import { fetchLatestModel, modelStatus, rollModel, restoreModel, modelFile, getModelSource, writeSourceOverride } from "../ontology/sync.js";
-import {
-  nextStep, currentStepIndex, newDemand, resetDemand, resetAll,
-} from "../simulator/stepper.js";
 import { runAgentTurn } from "../chat/agent.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
 import { TOOLS } from "../chat/tools.js";
@@ -381,9 +378,6 @@ export function registerRoutes(app: FastifyInstance) {
       boundedContextCount: o.boundedContexts.length,
       aggregateCount: new Set(o.events.map((e) => e.aggregateRoot).filter(Boolean)).size,
       eventCount: EVENTS.length,
-      // Whether the hand-written Ericsson simulator drives this model, or the
-      // model-generic simulator. The frontend renders the dashboard accordingly.
-      ericsson: isEricssonModel(),
       // True when the projection tables don't match the model yet — the UI
       // auto-rebuilds (with the loader) so no manual "Rebuild" button is needed.
       rebuildNeeded: await rebuildNeeded(),
@@ -392,8 +386,8 @@ export function registerRoutes(app: FastifyInstance) {
       provenance: await provenanceMeta(o.boundedContexts, o.events, eventCountByContext),
     };
   });
-  // Generic per-run detail (root row + events + rows created in the run) — used
-  // by the dashboard detail view for non-Ericsson models.
+  // Per-run detail (root row + events + rows created in the run) — used by the
+  // dashboard detail view.
   app.get("/sim/instance/:id", async (req) => genericInstanceDetail((req.params as any).id));
 
   // ---------------- Source adapters (Part 2.2) ----------------
@@ -452,37 +446,13 @@ export function registerRoutes(app: FastifyInstance) {
     }
   });
 
-  // List all demands with progress (the dashboard's main query). For non-Ericsson
-  // models, list the root-aggregate instances via the generic simulator.
-  app.get("/sim/demands", async () => {
-    if (!isEricssonModel()) return genericListInstances();
-    const demands = await prisma.demand.findMany({ orderBy: { createdAt: "desc" } });
-    const out: any[] = [];
-    const nowMs = Date.now();
-    for (const d of demands) {
-      const refs = await prisma.eventLog.findMany({
-        where: { demandId: d.id },
-        distinct: ["eventRef"],
-        select: { eventRef: true },
-      });
-      const last = await prisma.eventLog.findFirst({
-        where: { demandId: d.id },
-        orderBy: { occurredAt: "desc" },
-        select: { eventName: true, eventRef: true, occurredAt: true, businessAt: true, boundedContext: true, provenance: true },
-      });
-      // dwellSeconds = real wall-clock idleness since the last event the user
-      // triggered (good for "how long ago did I click step forward on this one").
-      const dwellSeconds = last ? Math.round((nowMs - new Date(last.occurredAt).getTime()) / 1000) : null;
-      out.push({ ...d, progress: refs.length, total: EVENTS.length, lastEvent: last, dwellSeconds });
-    }
-    return out;
-  });
+  // List all runs with progress (the dashboard's main query) — the loaded model's
+  // root-aggregate instances, via the generic simulator.
+  app.get("/sim/demands", async () => genericListInstances());
 
-  // Create a fresh demand (fires Hardware Demand Created). Guarded: returns a
-  // clean 422 when the loaded model isn't the one the simulator is wired to.
+  // Create a fresh run of the loaded model (instantiates the root aggregate).
   app.post("/sim/demands", async (_req, reply) => {
     try {
-      if (isEricssonModel()) return await newDemand();
       const inst = await genericNewInstance();
       return { id: inst.id, template: { aggregate: inst.aggregate } };
     } catch (err) {
@@ -494,62 +464,44 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/current-step", async (req) => {
     const demandId = (req.query as any)?.demandId as string | undefined;
     if (!demandId) return { error: "demandId required" };
-    if (!isEricssonModel()) return { ...(await genericCurrentStep(demandId)), demandId };
-    return { index: await currentStepIndex(demandId), total: EVENTS.length, demandId };
+    return { ...(await genericCurrentStep(demandId)), demandId };
   });
 
   app.post("/sim/next", async (req, reply) => {
-    const body = (req.body ?? {}) as { demandId?: string; withDisruptions?: boolean };
+    const body = (req.body ?? {}) as { demandId?: string };
     if (!body.demandId) throw new Error("demandId required");
     try {
-      if (!isEricssonModel()) return await genericStep(body.demandId);
-      return await nextStep(body.demandId, body.withDisruptions ?? true);
+      return await genericStep(body.demandId);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;
     }
   });
-  // DELETE — remove an item entirely (the dashboard's ✕). Distinct from /sim/reset.
-  // Generic: delete the run's rows (root + everything it created) + its events.
-  // Ericsson: resetDemand wipes the demand's whole chain (and the demand row).
+  // DELETE — remove a run entirely (the dashboard's ✕): its root row, every row
+  // it created, and its event-log entries. Distinct from /sim/reset.
   app.post("/sim/delete", async (req) => {
     const body = (req.body ?? {}) as { demandId?: string };
     if (!body.demandId) throw new Error("demandId required");
-    if (!isEricssonModel()) await genericDeleteInstance(body.demandId);
-    else await resetDemand(body.demandId);
+    await genericDeleteInstance(body.demandId);
     return { ok: true };
   });
 
-  // RESET — start over / clear (the detail view's Reset button). For a generic
-  // model with a demandId this also removes the run; without one it clears all.
+  // RESET — start over / clear (the detail view's Reset button). With a demandId
+  // this removes that one run; without one it clears all runs.
   app.post("/sim/reset", async (req) => {
     const body = (req.body ?? {}) as { demandId?: string };
-    if (!isEricssonModel()) {
-      if (body.demandId) await genericDeleteInstance(body.demandId);
-      else await genericDeleteAll();
-      return { ok: true };
-    }
-    if (body.demandId) await resetDemand(body.demandId);
-    else await resetAll();
+    if (body.demandId) await genericDeleteInstance(body.demandId);
+    else await genericDeleteAll();
     return { ok: true };
   });
   app.post("/sim/run-all", async (req) => {
-    const body = (req.body ?? {}) as { demandId?: string; withDisruptions?: boolean };
+    const body = (req.body ?? {}) as { demandId?: string };
     if (!body.demandId) throw new Error("demandId required");
     const steps: any[] = [];
-    if (!isEricssonModel()) {
-      for (let guard = 0; guard < 500; guard++) {
-        const step = await genericStep(body.demandId);
-        steps.push(step);
-        if (step.done) break;
-      }
-      return { steps };
-    }
-    while (true) {
-      const idx = await currentStepIndex(body.demandId);
-      if (idx >= EVENTS.length) break;
-      const step = await nextStep(body.demandId, body.withDisruptions ?? true);
+    for (let guard = 0; guard < 500; guard++) {
+      const step = await genericStep(body.demandId);
       steps.push(step);
+      if (step.done) break;
     }
     return { steps };
   });

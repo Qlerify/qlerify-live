@@ -4,7 +4,7 @@
 
 import { prisma } from "../db.js";
 import { wireDerivedEvents } from "../events/derived.js";
-import { setBusinessClock, businessTimeForStep } from "../events/clock.js";
+import { setBusinessClock } from "../events/clock.js";
 import { provenanceFor } from "../twin/provenance.js";
 import { getOntology } from "../ontology/model.js";
 import { DomainError } from "../errors.js";
@@ -31,6 +31,22 @@ import {
 } from "../logistics/shipment/commands.js";
 
 import { EVENTS, type EventDef } from "../events/registry.js";
+
+// Ericsson demo business clock. The hand-written 28-step storyline has curated
+// per-step durations (supplier ETA slip = +14d, transit = +4d, …) so the demo
+// timeline reads as ~9 weeks of compressed business time. This is specific to
+// the Ericsson reference flow and lives with it; the model-generic path derives
+// businessAt from the event's own data instead (see events/bus.ts).
+const SIM_BASE_MS = new Date("2026-04-01T08:00:00Z").getTime();
+const STEP_DURATIONS_HOURS: ReadonlyArray<number> = [
+  0, 24, 120, 72, 24, 24, 48, 72, 336, 0, 120, 72, 48, 24, 24, 24, 24, 24, 48,
+  120, 0, 24, 72, 48, 24, 24, 24, 96,
+];
+function businessTimeForStep(stepIdx: number): Date {
+  let hours = 0;
+  for (let i = 0; i <= stepIdx && i < STEP_DURATIONS_HOURS.length; i++) hours += STEP_DURATIONS_HOURS[i] ?? 0;
+  return new Date(SIM_BASE_MS + hours * 3_600_000);
+}
 
 export interface StepResult {
   index: number;

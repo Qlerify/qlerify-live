@@ -1,16 +1,16 @@
 // In-process event bus. Each command handler emits its event after the
 // aggregate write commits. Subscribers run synchronously on the same tick;
-// derived events (Material Shortage Identified, Material Kit Completed)
-// subscribe to upstream events and emit their own.
+// derived events subscribe to upstream events and emit their own.
 
 import { prisma } from "../db.js";
-import { findEvent } from "./registry.js";
+import { findEvent, type EventDef } from "./registry.js";
 import { getBusinessClock } from "./clock.js";
+import { getOntology } from "../ontology/model.js";
 import { provenanceFor, type ProvMode } from "../twin/provenance.js";
 import type { Role } from "../auth.js";
 
 export interface EmittedEvent {
-  ref: string;             // e.g. "#/domainEvents/HardwareDemandCreated"
+  ref: string;             // e.g. "#/domainEvents/LeadCaptured"
   aggregateId: string;
   role: Role;
   payload: Record<string, unknown>;
@@ -126,6 +126,69 @@ export function subscribeAll(fn: Subscriber) {
   wildcardSubscribers.push(fn);
 }
 
+// businessAt resolution ------------------------------------------------------
+// The event's business date follows the data: it comes from a date attribute
+// carried in the event's own payload (the command/source record), so the
+// timeline's per-step durations are simply the difference between consecutive
+// events' dates — nothing is hard-coded to a particular model. We consult the
+// model's field metadata (command args + entity columns) for a date-typed or
+// date-named field whose payload value parses to a real Date, preferring an
+// explicit occurrence-style attribute. Caller override wins; no date at all →
+// the real recorded time (resolved at the call site).
+
+const DATE_NAME_RE = /(date|time|timestamp|occurr|deadline|eta)/i;
+const OCCURRENCE_NAME_RE = /(occurr|eventdate|event_date|happened|recorded|timestamp)/i;
+
+function toDate(v: unknown): Date | null {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "string") {
+    const d = new Date(v.trim());
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function businessDateFromPayload(def: EventDef, payload: Record<string, unknown>): Date | null {
+  let ont: ReturnType<typeof getOntology>;
+  try { ont = getOntology(); } catch { return null; }
+  const event = ont.eventByRef(def.ref);
+  const command = event ? ont.command(event.commandName) : undefined;
+  const entity = ont.entity(def.aggregateRoot);
+
+  // Score each model field the payload carries: an explicit occurrence-style
+  // name beats a date dataType beats a merely date-ish name.
+  const scored: Array<{ name: string; score: number }> = [];
+  const seen = new Set<string>();
+  for (const f of [...(command?.fields ?? []), ...(entity?.fields ?? [])]) {
+    if (seen.has(f.name) || !(f.name in payload)) continue;
+    seen.add(f.name);
+    const isDateType = /date|time/i.test(f.dataType ?? "");
+    if (!isDateType && !DATE_NAME_RE.test(f.name)) continue;
+    let score = isDateType ? 2 : 1;
+    if (OCCURRENCE_NAME_RE.test(f.name)) score += 2;
+    scored.push({ name: f.name, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  for (const { name } of scored) {
+    const d = toDate(payload[name]);
+    if (d) return d;
+  }
+
+  // Adapter-shaped rows whose columns aren't declared in the model: accept any
+  // date-ish payload key as a last resort.
+  for (const [k, v] of Object.entries(payload)) {
+    if (seen.has(k) || !DATE_NAME_RE.test(k)) continue;
+    const d = toDate(v);
+    if (d) return d;
+  }
+  return null;
+}
+
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
   const demandId = scopeOverride ?? (await resolveDemandId(def.aggregateRoot, ev.aggregateId, ev.payload));
@@ -141,7 +204,7 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       demandId,
       role: ev.role,
       payload: JSON.stringify(ev.payload),
-      businessAt: getBusinessClock(),
+      businessAt: getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date(),
       provenance,
     },
   });

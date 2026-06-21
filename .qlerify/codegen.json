@@ -1,11 +1,11 @@
 {
-  "workflowId": "b0b1362b-ac9c-42b6-a4da-7216627aa405",
+  "workflowId": "9e7f0a4b-64b1-4938-a38e-04a49ad206c8",
   "projectId": "9879090f-905d-4d8e-a1a0-735d2dad9f1e",
-  "workflowName": "Ericsson HW Flow",
-  "modelHash": "c6af622c20b9e2478ff5d411ec593ff2bdf31788b0f4263f57fb9ec3f4be800a",
+  "workflowName": "Hardware Development Flow 2",
+  "modelHash": "cfb69e7f70bb1689382ddb939a7b3bcf3727e0d01b8a2e503263d1ae36e46b3e",
   "modelFile": ".qlerify/workflow.json",
   "generatedAt": "2026-05-20T20:12:30Z",
-  "lastSyncedAt": "2026-05-20T22:42:00Z",
+  "lastSyncedAt": "2026-06-14T07:10:08Z",
   "syncedFromCode": [
     "BuildPlan.status: added SUPERSEDED value (set by Update Build Plan on the prior version)",
     "Unit.shipmentId: added nullable FK populated by Units Picked And Packed",
@@ -19,22 +19,57 @@
     "testRunner": "Vitest 2",
     "frontend": "Vanilla JS + Tailwind (CDN) — served statically from /web"
   },
-  "boundedContexts": ["Helix", "PRIM", "SAP", "ESTER", "Compass", "Test", "Logistics"],
+  "boundedContexts": [
+    "Helix",
+    "PRIM",
+    "SAP",
+    "ESTER",
+    "Compass",
+    "Test",
+    "Logistics"
+  ],
   "aggregates": {
-    "Helix": ["Demand", "BuildPlan", "Build"],
-    "PRIM": ["Project", "EngineeringRelease"],
-    "SAP": ["PurchaseOrder"],
-    "ESTER": ["EngineeringChange"],
-    "Compass": ["LineBooking"],
-    "Test": ["TestResult"],
-    "Logistics": ["Shipment"]
+    "Helix": [
+      "Demand",
+      "BuildPlan",
+      "Build"
+    ],
+    "PRIM": [
+      "Project",
+      "EngineeringRelease"
+    ],
+    "SAP": [
+      "PurchaseOrder"
+    ],
+    "ESTER": [
+      "EngineeringChange"
+    ],
+    "Compass": [
+      "LineBooking"
+    ],
+    "Test": [
+      "TestResult"
+    ],
+    "Logistics": [
+      "Shipment"
+    ]
   },
   "ownedEntities": {
-    "Project": ["BomItem"],
-    "Build": ["BuildDemand"],
-    "Shipment": ["Unit"]
+    "Project": [
+      "BomItem"
+    ],
+    "Build": [
+      "BuildDemand"
+    ],
+    "Shipment": [
+      "Unit"
+    ]
   },
-  "referenceEntities": ["ProductionSite", "ProductionLine", "WorkOrder"],
+  "referenceEntities": [
+    "ProductionSite",
+    "ProductionLine",
+    "WorkOrder"
+  ],
   "persistenceDecisions": [
     "Owned-entity collections are stored in separate tables with FK + ON DELETE CASCADE to the aggregate root (BomItem→Project, BuildDemand→Build, Unit→Shipment). Embedding as JSON would block the read-model queries that filter on child attributes (e.g. List Builds At Risk needs PO ETAs).",
     "Optimistic locking via a `version` integer column on every aggregate root; child entities update through the root, so they don't need their own version column.",
@@ -68,7 +103,12 @@
   "fileLayout": {
     "schema": "prisma/schema.prisma",
     "seed": "prisma/seed.ts",
-    "shared": ["src/db.ts", "src/errors.ts", "src/auth.ts", "src/util/"],
+    "shared": [
+      "src/db.ts",
+      "src/errors.ts",
+      "src/auth.ts",
+      "src/util/"
+    ],
     "events": "src/events/ (registry.ts, bus.ts, derived.ts)",
     "aggregates": "src/{boundedContext}/{aggregate}/commands.ts",
     "queries": "src/{boundedContext}/queries.ts",

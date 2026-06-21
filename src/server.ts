@@ -8,7 +8,14 @@ import { existsSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
 import { wireDerivedEvents } from "./events/derived.js";
+import { startOntologyWatch, onOntologyReload } from "./ontology/model.js";
+import { loadPacks } from "./packs/loadPacks.js";
+import { getMeta, setMeta } from "./twin/projection-store.js";
+import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
+import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
+import { registerControlRoutes } from "./platform/http/control-routes.js";
+import { seedSystemOrg } from "./platform/provisioning/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(here, "..", "web");
@@ -21,8 +28,41 @@ export async function buildServer() {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
   }
 
+  // Multi-tenant control plane: seed the system tenant BEFORE serving so the
+  // demo's header-less requests can resolve to it, then bind a tenant context to
+  // every request (org_id derived from identity, never from client input).
+  try {
+    await seedSystemOrg();
+  } catch (err) {
+    app.log.error({ err }, "system-org seed failed — tenant resolution will reject requests until fixed");
+  }
+  registerTenantPlugin(app);
+
   registerRoutes(app);
+  registerControlRoutes(app);
   wireDerivedEvents();
+  startOntologyWatch(app.log);
+
+  // Discover + register source-system packs (additive, fail-soft, dynamic import).
+  // Re-run on every ontology reload so a swapped model re-resolves its adapters.
+  try {
+    const n = await loadPacks(app.log);
+    app.log.info(`loaded ${n} adapter(s) from packs`);
+  } catch (err) {
+    app.log.warn({ err }, "pack loading skipped");
+  }
+  onOntologyReload(() => {
+    loadPacks(app.log).catch((err) => app.log.warn({ err }, "pack reload failed"));
+  });
+
+  // Claim the existing transactional data for the currently-loaded model if it
+  // isn't marked yet, so a later switch to a DIFFERENT model is detected and
+  // triggers a clean-slate rebuild (instead of showing the previous model's rows).
+  try {
+    if ((await getMeta("dataModel")) === null) await setMeta("dataModel", dataModelSignature());
+  } catch (err) {
+    app.log.warn({ err }, "data-model marker init skipped");
+  }
   return app;
 }
 

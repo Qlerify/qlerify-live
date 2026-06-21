@@ -17,5 +17,5 @@
     "lib": ["ES2022"]
   },
   "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist", "web"]
+  "exclude": ["node_modules", "dist", "web", "src/packs/*/generated"]
 }

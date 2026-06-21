@@ -1,3106 +1,3267 @@
 {
   "$schema": "https://app.qlerify.com/schemas/domain-model/v1.json",
   "version": 1,
-  "boundedContexts": [
-    "Compass",
-    "ESTER",
-    "Helix",
-    "Logistics",
-    "PRIM",
-    "SAP",
-    "Test"
+  "boundedContext": "Situation Reporting",
+  "roles": [
+    "Automation",
+    "Wing Ops Duty Officer",
+    "Air Tasking Cell",
+    "Subordinate Unit",
+    "Chief of Staff",
+    "Current Ops Officer",
+    "Wing Commander",
+    "Force Protection Ops"
   ],
   "domainEvents": {
-    "HardwareDemandCreated": {
-      "event": "Hardware Demand Created",
-      "role": "Product Manager",
+    "PatrolReportSubmitted": {
+      "event": "Patrol Report Submitted",
+      "role": "Subordinate Unit",
       "follows": [
-        "start"
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/CreateDemand"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Demand"
-      },
-      "readModels": [
         {
-          "$ref": "#/schemas/queries/ListDemands",
-          "description": "List Demands"
+          "$ref": "#/externalBoundedContexts/AirTasking/domainEvents/AirTaskingOrderDistributed"
         }
       ],
+      "command": {
+        "$ref": "#/schemas/commands/SubmitPatrolReport"
+      },
+      "aggregateRoot": {
+        "$ref": "#/schemas/entities/PatrolReport"
+      },
       "acceptanceCriteria": [
-        "Given a customer hardware need exists, When the product manager submits a new demand, Then a demand row is created with status NEW"
+        "Given a completed ground-defence patrol, When the company compiles the patrol report (CC-8), Then it is submitted to Wing Ops as input to the intelligence assessment at the main base"
       ]
     },
-    "BuildQuantityDefined": {
-      "event": "Build Quantity Defined",
-      "role": "Planner",
+    "DailyReportSubmitted": {
+      "event": "Daily Report Submitted",
+      "role": "Subordinate Unit",
       "follows": [
         {
-          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/BOMFrozenAtDS1"
+          "$ref": "#/domainEvents/PatrolReportSubmitted"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/DefineBuildQuantity"
+        "$ref": "#/schemas/commands/SubmitDailyReport"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
+        "$ref": "#/schemas/entities/DailyReport"
       },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetDemandWithBOMStatus",
-          "description": "Get Demand With BOM Status"
-        }
-      ],
       "acceptanceCriteria": [
-        "Given the BOM is frozen at DS1, When the planner defines the build quantity, Then a build_plan v1 with status DRAFT and N builds with status PLANNED are created"
+        "Given each unit on main base KAX, When it submits its daily report (dygnsrapport) by 1100LT, Then PEDARS, function status and combat-value status are reported to the unit chief",
+        "Given the unit chief with DUC, When the ILM order meeting is held at 1300LT, Then the consolidated daily report is presented to Wing Ops"
       ]
     },
-    "MaterialDemandSpecified": {
-      "event": "Material Demand Specified",
-      "role": "Supply Planner",
+    "SituationPictureUpdated": {
+      "event": "Situation Picture Updated",
+      "role": "Current Ops Officer",
       "follows": [
         {
-          "$ref": "#/domainEvents/BuildQuantityDefined"
+          "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/CoordinationMeetingHeld"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/SpecifyMaterialDemand"
+        "$ref": "#/schemas/commands/UpdateSituationPicture"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
+        "$ref": "#/schemas/entities/SituationPicture"
       },
       "readModels": [
         {
-          "$ref": "#/schemas/queries/GetBuildWithBOM",
-          "description": "Get Build With BOM"
+          "$ref": "#/schemas/queries/ListDailyReports",
+          "description": "List Daily Reports"
+        },
+        {
+          "$ref": "#/schemas/queries/ListPatrolReports",
+          "description": "List Patrol Reports"
         }
       ],
       "acceptanceCriteria": [
-        "Given builds exist, When the supply planner specifies material demand, Then build_demand rows and draft purchase_orders are created"
+        "Given the submitted unit and patrol reports, When Current Ops (A3) consolidates them, Then the wing situation picture (lägessammanställning) is updated and disseminated as own situation, intel/security situation and assessed enemy situation"
       ]
     },
-    "MaterialShortageIdentified": {
-      "event": "Material Shortage Identified",
-      "role": "Automation",
+    "WingReportCompiled": {
+      "event": "Wing Report Compiled",
+      "role": "Current Ops Officer",
       "follows": [
         {
-          "$ref": "#/externalBoundedContexts/SAP/domainEvents/MaterialETAChanged"
+          "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/OrderIssued"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/FlagMaterialShortage"
+        "$ref": "#/schemas/commands/CompileWingReport"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
+        "$ref": "#/schemas/entities/WingReport"
       },
       "readModels": [
         {
-          "$ref": "#/schemas/queries/ListBuildsAtRisk",
-          "description": "List Builds At Risk"
+          "$ref": "#/schemas/queries/GetSituationPicture",
+          "description": "Get Situation Picture"
         }
       ],
       "acceptanceCriteria": [
-        "Given a purchase order confirmed_eta is later than a build planned_start, When the simulator detects the shortage, Then the build material_status becomes AT_RISK"
+        "Given the updated situation picture, When Current Ops compiles the wing report (förbandsrapport) using the FVC/SOFO NAT template, Then a draft wing report covering the whole war unit is ready for approval"
       ]
     },
-    "BuildPrioritySet": {
-      "event": "Build Priority Set",
-      "role": "Planner",
+    "WingReportApproved": {
+      "event": "Wing Report Approved",
+      "role": "Chief of Staff",
       "follows": [
         {
-          "$ref": "#/externalBoundedContexts/PRIM/domainEvents/EngineeringReleaseApproved"
+          "$ref": "#/domainEvents/WingReportCompiled"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/SetBuildPriority"
+        "$ref": "#/schemas/commands/ApproveWingReport"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
+        "$ref": "#/schemas/entities/WingReport"
       },
       "readModels": [
         {
-          "$ref": "#/schemas/queries/ListBuilds",
-          "description": "List Builds"
+          "$ref": "#/schemas/queries/GetWingReport",
+          "description": "Get Wing Report"
         }
       ],
       "acceptanceCriteria": [
-        "Given builds exist, When the planner sets priority, Then build.priority is updated"
+        "Given a drafted wing report, When the Chief of Staff (or successor in line) approves it, Then it is released for submission to higher command"
       ]
     },
-    "BuildPlanUpdated": {
-      "event": "Build Plan Updated",
-      "role": "Planner",
+    "WingReportSubmitted": {
+      "event": "Wing Report Submitted",
+      "role": "Current Ops Officer",
       "follows": [
         {
-          "$ref": "#/domainEvents/BuildPrioritySet"
+          "$ref": "#/domainEvents/WingReportApproved"
         }
       ],
       "command": {
-        "$ref": "#/schemas/commands/UpdateBuildPlan"
+        "$ref": "#/schemas/commands/SubmitWingReport"
       },
       "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
+        "$ref": "#/schemas/entities/WingReport"
       },
       "readModels": [
         {
-          "$ref": "#/schemas/queries/GetBuildPlanDisruptions",
-          "description": "Get Build Plan Disruptions"
+          "$ref": "#/schemas/queries/GetWingReport",
+          "description": "Get Wing Report"
         }
       ],
       "acceptanceCriteria": [
-        "Given an ETA change, ER approval, priority change, or site change occurred, When the planner triggers a replan, Then a new build_plan version with status DRAFT is created and the previous version is archived"
-      ]
-    },
-    "BuildPlanLocked": {
-      "event": "Build Plan Locked",
-      "role": "Configuration Manager",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BuildPlanUpdated"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/LockBuildPlan"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/BuildPlan"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildPlanLockReadiness",
-          "description": "Get Build Plan Lock Readiness"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given DS2 is frozen and engineering_release is APPROVED and a work_order is CREATED, When the CM locks the latest build_plan, Then build_plan.status becomes LOCKED and locked_at is set"
-      ]
-    },
-    "BuildReleasedToSite": {
-      "event": "Build Released To Site",
-      "role": "Planner",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BuildPlanLocked"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ReleaseBuildToSite"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Compass/schemas/queries/ListProductionSites",
-          "description": "List Production Sites"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the build_plan is LOCKED, When the HWM releases the build to a site, Then build.site_id is set, build.status becomes RELEASED, and build_plan.status becomes RELEASED"
-      ]
-    },
-    "MaterialKitCompleted": {
-      "event": "Material Kit Completed",
-      "role": "Automation",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/SAP/domainEvents/MaterialReceivedAtSite"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/CompleteMaterialKit"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildMaterialStatus",
-          "description": "Get Build Material Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given every build_demand for a build has qty_available greater than or equal to qty_required, When the simulator detects completion, Then build.material_status becomes KIT_READY"
-      ]
-    },
-    "ProductionStarted": {
-      "event": "Production Started",
-      "role": "Production",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/MaterialKitCompleted"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/StartProduction"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildProductionReadiness",
-          "description": "Get Build Production Readiness"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the line is BOOKED and material is KIT_READY, When production begins, Then line_booking.status becomes RUNNING and build.status becomes IN_PROGRESS with actual_start set"
-      ]
-    },
-    "BuildReachedRTD": {
-      "event": "Build Reached RTD",
-      "role": "Quality Engineer",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Test/domainEvents/FirstArticleInspectionPassed"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/MarkBuildAsRTD"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Build"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetBuildTestStatus",
-          "description": "Get Build Test Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given FAI passed and qty produced, When the build reaches RTD, Then build.status becomes RTD with actual_end set, line_booking.status becomes DONE, work_order.status becomes CLOSED, and N unit rows with status BUILT are created"
-      ]
-    },
-    "ProjectCreated": {
-      "event": "Project Created",
-      "role": "Product Manager",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/HardwareDemandCreated"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/CreateProject"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Project"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/queries/GetDemand",
-          "description": "Get Demand"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a demand exists, When the product manager creates a project, Then a project linked to the demand is created"
-      ]
-    },
-    "BOMDefined": {
-      "event": "BOM Defined",
-      "role": "Designer",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/ProjectCreated"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/DefineBOM"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Project"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetProject",
-          "description": "Get Project"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a project exists, When the designer defines the BOM, Then bom_item rows are inserted with design_state DRAFT"
-      ]
-    },
-    "BOMFrozenAtDS1": {
-      "event": "BOM Frozen At DS1",
-      "role": "Configuration Manager",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BOMDefined"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/FreezeBOMAtDS1"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Project"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetProjectWithBOM",
-          "description": "Get Project With BOM"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a project has at least one bom_item, When the CM freezes the BOM at DS1, Then all bom_items design_state becomes DS1 and frozen_at is set"
-      ]
-    },
-    "BOMFrozenAtDS2": {
-      "event": "BOM Frozen At DS2",
-      "role": "Configuration Manager",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/ESTER/domainEvents/EngineeringChangeApproved"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/FreezeBOMAtDS2"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Project"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetProjectStatus",
-          "description": "Get Project Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given all open engineering changes are resolved, When the CM freezes the BOM at DS2, Then all bom_items design_state becomes DS2_PROD"
-      ]
-    },
-    "EngineeringReleaseApproved": {
-      "event": "Engineering Release Approved",
-      "role": "Configuration Manager",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BOMFrozenAtDS2"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ApproveEngineeringRelease"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/EngineeringRelease"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetProjectStatus",
-          "description": "Get Project Status"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given DS2 is frozen, When the release authority approves the release, Then an engineering_release row with status APPROVED and approved_at is created"
-      ]
-    },
-    "MaterialOrdered": {
-      "event": "Material Ordered",
-      "role": "Buyer",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/MaterialDemandSpecified"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/OrderMaterial"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/PurchaseOrder"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListDraftPurchaseOrders",
-          "description": "List Draft Purchase Orders"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a purchase order is in DRAFT, When the buyer orders the material, Then the purchase order status becomes ORDERED and requested_date is set"
-      ]
-    },
-    "SupplierConfirmedOrderWithETA": {
-      "event": "Supplier Confirmed Order With ETA",
-      "role": "Supplier",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/MaterialOrdered"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ConfirmOrderWithETA"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/PurchaseOrder"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetPurchaseOrder",
-          "description": "Get Purchase Order"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a purchase order is ORDERED, When the supplier confirms, Then the purchase order status becomes CONFIRMED and confirmed_eta is set"
-      ]
-    },
-    "MaterialETAChanged": {
-      "event": "Material ETA Changed",
-      "role": "Supplier",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/SupplierConfirmedOrderWithETA"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ChangeMaterialETA"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/PurchaseOrder"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetPurchaseOrder",
-          "description": "Get Purchase Order"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a purchase order is CONFIRMED, When the supplier updates the ETA to a date strictly later than the current confirmed_eta, Then confirmed_eta is updated to the new value",
-        "Given a purchase order is CONFIRMED, When the supplier submits a new ETA that is equal to or earlier than the current confirmed_eta, Then the change is rejected with a domain error and confirmed_eta is unchanged"
-      ]
-    },
-    "MaterialReceivedAtSite": {
-      "event": "Material Received At Site",
-      "role": "Goods Receiving",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Compass/domainEvents/ProductionLineBooked"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ReceiveMaterial"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/PurchaseOrder"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetPurchaseOrder",
-          "description": "Get Purchase Order"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a PO is CONFIRMED and the ETA has been reached, When goods are received, Then purchase_order.status becomes RECEIVED, actual_receipt_date is set, and build_demand.qty_available is updated"
-      ]
-    },
-    "EngineeringChangeRaised": {
-      "event": "Engineering Change Raised",
-      "role": "Designer",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/MaterialShortageIdentified"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/RaiseEngineeringChange"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/EngineeringChange"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/PRIM/schemas/queries/GetBOMItem",
-          "description": "Get BOM Item"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a BOM is frozen at DS1, When a designer raises an engineering change, Then an engineering_change row is created with status OPEN"
-      ]
-    },
-    "EngineeringChangeApproved": {
-      "event": "Engineering Change Approved",
-      "role": "Configuration Manager",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/EngineeringChangeRaised"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ApproveEngineeringChange"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/EngineeringChange"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListOpenEngineeringChanges",
-          "description": "List Open Engineering Changes"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given an engineering change is OPEN, When the CM approves it, Then the status becomes APPROVED and the affected bom_item is updated"
-      ]
-    },
-    "ProductionLineBooked": {
-      "event": "Production Line Booked",
-      "role": "Production Planner",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/BuildReleasedToSite"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/BookProductionLine"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/LineBooking"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListProductionLines",
-          "description": "List Production Lines"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given a build is RELEASED, When the production planner books a line, Then a line_booking row with status BOOKED is created"
-      ]
-    },
-    "BoardTestPassed": {
-      "event": "Board Test Passed",
-      "role": "Test Engineer",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/ProductionStarted"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/RecordBoardTestPass"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/TestResult"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/queries/ListBuildsInProduction",
-          "description": "List Builds In Production"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given production is IN_PROGRESS, When board test passes, Then a test_result row with test_type BOARD and result PASS is created per produced unit"
-      ]
-    },
-    "FirstArticleInspectionPassed": {
-      "event": "First Article Inspection Passed",
-      "role": "Quality Engineer",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/BoardTestPassed"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/RecordFAIPass"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/TestResult"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/queries/ListBuildsReadyForFAI",
-          "description": "List Builds Ready For FAI"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given board tests have passed, When FAI passes, Then a test_result row with test_type FAI and result PASS is created"
-      ]
-    },
-    "UnitsPickedAndPacked": {
-      "event": "Units Picked And Packed",
-      "role": "Warehouse",
-      "follows": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/domainEvents/BuildReachedRTD"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/PickAndPackUnits"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Shipment"
-      },
-      "readModels": [
-        {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/queries/ListBuildsReadyForPack",
-          "description": "List Builds Ready For Pack"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the build is RTD, When the warehouse picks and packs, Then a shipment row with status READY is created with packed_at set and unit.status becomes PACKED"
-      ]
-    },
-    "ShipmentDispatched": {
-      "event": "Shipment Dispatched",
-      "role": "Logistics",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/UnitsPickedAndPacked"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/DispatchShipment"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Shipment"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/ListShipmentsReady",
-          "description": "List Shipments Ready"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the shipment is READY, When dispatched, Then shipment.status becomes IN_TRANSIT with shipped_at set, unit.status becomes SHIPPED, and build.status becomes SHIPPED"
-      ]
-    },
-    "UnitReceivedByCustomer": {
-      "event": "Unit Received By Customer",
-      "role": "Customer",
-      "follows": [
-        {
-          "$ref": "#/domainEvents/ShipmentDispatched"
-        }
-      ],
-      "command": {
-        "$ref": "#/schemas/commands/ConfirmShipmentDelivered"
-      },
-      "aggregateRoot": {
-        "$ref": "#/schemas/entities/Shipment"
-      },
-      "readModels": [
-        {
-          "$ref": "#/schemas/queries/GetShipment",
-          "description": "Get Shipment"
-        }
-      ],
-      "acceptanceCriteria": [
-        "Given the shipment is IN_TRANSIT, When the customer receives it, Then shipment.status becomes DELIVERED with delivered_at set, unit.status becomes DELIVERED, and demand.status becomes DELIVERED"
+        "Given an approved wing report, When it is submitted, Then higher command (FVC/FS) receives the förbandsrapport no later than 1500LT"
       ]
     }
   },
   "schemas": {
-    "entities": {
-      "Demand": {
-        "description": "A customer hardware order placed at the start of the flow; tracks the request from NEW through DELIVERED.",
-        "required": [
-          "id",
-          "customerId",
-          "productName",
-          "qty",
-          "requestedWeek",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the demand",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "customerId",
-            "description": "Customer who placed the demand",
-            "exampleData": [
-              "cust-10",
-              "cust-22",
-              "cust-07"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "productName",
-            "description": "Product/variant the customer is ordering",
-            "exampleData": [
-              "Radio Unit X",
-              "Baseband 6630",
-              "Antenna AIR 3239"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Number of units requested",
-            "exampleData": [
-              "20",
-              "5",
-              "100"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "requestedWeek",
-            "description": "ISO week the customer wants the units delivered",
-            "exampleData": [
-              "2026-W18",
-              "2026-W22",
-              "2026-W30"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Demand lifecycle status (NEW, PLANNED, DELIVERED)",
-            "exampleData": [
-              "NEW",
-              "PLANNED",
-              "DELIVERED"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "Helix"
-      },
-      "BomItem": {
-        "description": "A single line of the Bill of Materials within a project, with its design-state lifecycle.",
-        "required": [
-          "id",
-          "projectId",
-          "partNumber",
-          "qtyPerUnit",
-          "designState"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the BOM item",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project that owns this BOM line",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "partNumber",
-            "description": "Part number for this BOM line",
-            "exampleData": [
-              "PN-4711",
-              "PN-4712",
-              "PN-4713"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qtyPerUnit",
-            "description": "Quantity of this part required per produced unit",
-            "exampleData": [
-              "1",
-              "2",
-              "4"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "designState",
-            "description": "Design state of the BOM line (DRAFT, DS1, DS2_PROD)",
-            "exampleData": [
-              "DRAFT",
-              "DS1",
-              "DS2_PROD"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "frozenAt",
-            "description": "Timestamp when the BOM line was frozen at its current design state",
-            "exampleData": [
-              "2026-02-01T10:00:00Z",
-              "2026-02-15T14:30:00Z",
-              "2026-03-05T09:15:00Z"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "PRIM"
-      },
-      "BuildPlan": {
-        "description": "Versioned plan of builds for a demand; walks DRAFT → LOCKED → RELEASED.",
-        "required": [
-          "id",
-          "demandId",
-          "version",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build plan",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "demandId",
-            "description": "Demand this build plan was created for",
-            "exampleData": [
-              "dmd-001",
-              "dmd-002",
-              "dmd-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "version",
-            "description": "Plan version, incremented on every Build Plan Updated event",
-            "exampleData": [
-              "1",
-              "2",
-              "3"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "status",
-            "description": "Plan lifecycle status (DRAFT, LOCKED, RELEASED, SUPERSEDED). SUPERSEDED is set on the prior version when Update Build Plan creates a new one — preserving history while keeping a single current plan per demand.",
-            "exampleData": [
-              "DRAFT",
-              "LOCKED",
-              "RELEASED",
-              "SUPERSEDED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "lockedAt",
-            "description": "Timestamp when the plan transitioned to LOCKED",
-            "exampleData": [
-              "2026-03-15T10:00:00Z",
-              "2026-04-01T11:00:00Z",
-              "2026-04-15T09:30:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "releasedAt",
-            "description": "Timestamp when the plan transitioned to RELEASED",
-            "exampleData": [
-              "2026-03-16T10:00:00Z",
-              "2026-04-02T11:00:00Z",
-              "2026-04-16T09:30:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "reason",
-            "description": "Trigger that caused the latest plan version (ETA_CHANGED, ER_APPROVED, PRIORITY_CHANGED, SITE_CHANGED)",
-            "exampleData": [
-              "ETA_CHANGED",
-              "ER_APPROVED",
-              "PRIORITY_CHANGED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "builds",
-            "description": "Builds scheduled under this plan",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Build"
-            },
-            "dataType": "object"
-          }
-        ],
-        "boundedContext": "Helix"
-      },
-      "Build": {
-        "description": "A planned production batch under a build plan; tracks material readiness and production status.",
-        "required": [
-          "id",
-          "buildPlanId",
-          "buildNo",
-          "qty",
-          "materialStatus",
-          "plannedStart",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildPlanId",
-            "description": "Build plan that owns this build",
-            "exampleData": [
-              "bp-001",
-              "bp-002",
-              "bp-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildNo",
-            "description": "Human-readable sequence number for this build inside the plan",
-            "exampleData": [
-              "B1",
-              "B2",
-              "B3"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Number of units this build produces",
-            "exampleData": [
-              "10",
-              "5",
-              "20"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "priority",
-            "description": "Build priority used for sequencing",
-            "exampleData": [
-              "1",
-              "5",
-              "10"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "siteId",
-            "description": "Production site the build is released to",
-            "exampleData": [
-              "site-stockholm",
-              "site-tallinn",
-              "site-krakow"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "materialStatus",
-            "description": "Material readiness status (OPEN, AT_RISK, KIT_READY)",
-            "exampleData": [
-              "OPEN",
-              "AT_RISK",
-              "KIT_READY"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "plannedStart",
-            "description": "Planned production start date",
-            "exampleData": [
-              "2026-04-20",
-              "2026-05-04",
-              "2026-05-18"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "actualStart",
-            "description": "Actual production start timestamp",
-            "exampleData": [
-              "2026-04-21T08:00:00Z",
-              "2026-05-05T08:00:00Z",
-              "2026-05-19T08:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "actualEnd",
-            "description": "Actual production end timestamp (RTD)",
-            "exampleData": [
-              "2026-04-25T17:00:00Z",
-              "2026-05-09T17:00:00Z",
-              "2026-05-23T17:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Build lifecycle status (PLANNED, RELEASED, IN_PROGRESS, RTD, SHIPPED)",
-            "exampleData": [
-              "PLANNED",
-              "RELEASED",
-              "IN_PROGRESS"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildDemand",
-            "description": "Material requirements per part for this build",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
-            },
-            "dataType": "object"
-          },
-          {
-            "name": "units",
-            "description": "Units produced by this build",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
-            },
-            "dataType": "object"
-          }
-        ],
-        "boundedContext": "Helix"
-      },
-      "BuildDemand": {
-        "description": "Per-build, per-part material requirement; required vs available quantity.",
-        "required": [
-          "id",
-          "buildId",
-          "partNumber",
-          "qtyRequired",
-          "qtyAvailable"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the build demand line",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build this material line belongs to",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "partNumber",
-            "description": "Part number required for this build",
-            "exampleData": [
-              "PN-4711",
-              "PN-4712",
-              "PN-4713"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qtyRequired",
-            "description": "Quantity of the part required to complete the build",
-            "exampleData": [
-              "10",
-              "20",
-              "40"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "qtyAvailable",
-            "description": "Quantity of the part currently received and available",
-            "exampleData": [
-              "0",
-              "10",
-              "40"
-            ],
-            "dataType": "number"
-          }
-        ],
-        "boundedContext": "Helix"
-      },
-      "ProductionSite": {
-        "description": "Manufacturing site where builds are produced.",
-        "required": [
-          "id",
-          "name"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the production site",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "name",
-            "description": "Human-readable site name",
-            "exampleData": [
-              "Stockholm",
-              "Tallinn",
-              "Krakow"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "Compass"
-      },
-      "Unit": {
-        "description": "An individual hardware unit produced from a build; tracked through pack and shipment.",
-        "required": [
-          "id",
-          "buildId",
-          "serialNo",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the unit",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build that produced this unit",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "serialNo",
-            "description": "Unit serial number",
-            "exampleData": [
-              "SN-0001",
-              "SN-0002",
-              "SN-0003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Unit lifecycle status (BUILT, PICKED, PACKED, SHIPPED, DELIVERED, LOST)",
-            "exampleData": [
-              "BUILT",
-              "PACKED",
-              "DELIVERED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "shipmentId",
-            "description": "Shipment this unit was packed into; null until Units Picked And Packed fires. Set atomically with the unit's PACKED status transition.",
-            "exampleData": [
-              "ship-A1B2",
-              "ship-C3D4",
-              "ship-E5F6"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "Logistics"
-      },
-      "Project": {
-        "description": "PRIM project that owns the product structure and BOM for a demand.",
-        "required": [
-          "id",
-          "demandId",
-          "productName"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the project",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "demandId",
-            "description": "Demand this project was created for",
-            "exampleData": [
-              "dmd-001",
-              "dmd-002",
-              "dmd-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "productName",
-            "description": "Product variant the project covers",
-            "exampleData": [
-              "Radio Unit X",
-              "Baseband 6630",
-              "Antenna AIR 3239"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Project lifecycle status",
-            "exampleData": [
-              "ACTIVE",
-              "ON_HOLD",
-              "CLOSED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "bomItems",
-            "description": "Bill of Materials lines belonging to this project",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BomItem"
-            },
-            "dataType": "object"
-          },
-          {
-            "name": "engineeringRelease",
-            "description": "Signed-off design package gating production for this project",
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/EngineeringRelease"
-            },
-            "dataType": "object"
-          }
-        ],
-        "boundedContext": "PRIM"
-      },
-      "EngineeringRelease": {
-        "description": "Signed-off design package gating production lock; separate from the BOM freeze.",
-        "required": [
-          "id",
-          "projectId",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the engineering release",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project this release belongs to",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Release status (OPEN, APPROVED)",
-            "exampleData": [
-              "OPEN",
-              "APPROVED",
-              "APPROVED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "approvedAt",
-            "description": "Timestamp the release was approved",
-            "exampleData": [
-              "2026-03-10T10:00:00Z",
-              "2026-03-12T16:00:00Z",
-              "2026-04-01T09:00:00Z"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "PRIM"
-      },
-      "PurchaseOrder": {
-        "description": "Procurement order for a part from a supplier; walks DRAFT → ORDERED → CONFIRMED → RECEIVED.",
-        "required": [
-          "id",
-          "projectId",
-          "partNumber",
-          "qty",
-          "supplierId",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the purchase order",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project this PO sources material for",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "partNumber",
-            "description": "Part number being procured",
-            "exampleData": [
-              "PN-4711",
-              "PN-4712",
-              "PN-4713"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Quantity ordered",
-            "exampleData": [
-              "100",
-              "200",
-              "500"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "supplierId",
-            "description": "Supplier providing the part",
-            "exampleData": [
-              "sup-A",
-              "sup-B",
-              "sup-C"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "requestedDate",
-            "description": "Date the buyer requested delivery on",
-            "exampleData": [
-              "2026-04-10",
-              "2026-04-15",
-              "2026-04-20"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "confirmedEta",
-            "description": "ETA confirmed by the supplier; may slip later",
-            "exampleData": [
-              "2026-04-12",
-              "2026-04-25",
-              "2026-05-05"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "actualReceiptDate",
-            "description": "Date goods were actually received",
-            "exampleData": [
-              "2026-04-12",
-              "2026-04-26",
-              "2026-05-06"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "PO lifecycle status (DRAFT, ORDERED, CONFIRMED, RECEIVED)",
-            "exampleData": [
-              "DRAFT",
-              "ORDERED",
-              "CONFIRMED"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "SAP"
-      },
-      "WorkOrder": {
-        "description": "Production work order created as a precondition to Build Plan Lock.",
-        "required": [
-          "id",
-          "projectId",
-          "buildId",
-          "qty",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the work order",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project this work order belongs to",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build the work order is for",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "qty",
-            "description": "Quantity to be produced",
-            "exampleData": [
-              "10",
-              "5",
-              "20"
-            ],
-            "dataType": "number"
-          },
-          {
-            "name": "status",
-            "description": "Work order lifecycle status (CREATED, RELEASED, CLOSED)",
-            "exampleData": [
-              "CREATED",
-              "RELEASED",
-              "CLOSED"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "SAP"
-      },
-      "EngineeringChange": {
-        "description": "A trouble report or change request against a BOM item, with OPEN/APPROVED/REJECTED lifecycle.",
-        "required": [
-          "id",
-          "projectId",
-          "bomItemId",
-          "description",
-          "status",
-          "createdAt"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the engineering change",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "projectId",
-            "description": "Project the engineering change belongs to",
-            "exampleData": [
-              "proj-001",
-              "proj-002",
-              "proj-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "bomItemId",
-            "description": "BOM line the change targets",
-            "exampleData": [
-              "bom-101",
-              "bom-102",
-              "bom-103"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "description",
-            "description": "What needs to change and why",
-            "exampleData": [
-              "Swap supplier for capacitor PN-4711",
-              "Tolerance change on PN-4715",
-              "Cosmetic rework on housing"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Change lifecycle status (OPEN, APPROVED, REJECTED)",
-            "exampleData": [
-              "OPEN",
-              "APPROVED",
-              "REJECTED"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "createdAt",
-            "description": "Timestamp the change was raised",
-            "exampleData": [
-              "2026-02-20T09:00:00Z",
-              "2026-03-01T14:00:00Z",
-              "2026-03-10T11:30:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "approvedAt",
-            "description": "Timestamp the change was approved",
-            "exampleData": [
-              "2026-02-22T16:00:00Z",
-              "2026-03-03T10:00:00Z",
-              "2026-03-12T15:00:00Z"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "ESTER"
-      },
-      "ProductionLine": {
-        "description": "A production line within a site, with weekly capacity.",
-        "required": [
-          "id",
-          "siteId",
-          "name",
-          "capacityPerWeek"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the production line",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "siteId",
-            "description": "Production site this line belongs to",
-            "exampleData": [
-              "site-stockholm",
-              "site-tallinn",
-              "site-krakow"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "name",
-            "description": "Line name",
-            "exampleData": [
-              "Line A",
-              "Line B",
-              "Line C"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "capacityPerWeek",
-            "description": "Weekly production capacity in units",
-            "exampleData": [
-              "50",
-              "100",
-              "200"
-            ],
-            "dataType": "number"
-          }
-        ],
-        "boundedContext": "Compass"
-      },
-      "LineBooking": {
-        "description": "Reservation of a production line for a specific build.",
-        "required": [
-          "id",
-          "lineId",
-          "buildId",
-          "plannedStart",
-          "plannedEnd",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the line booking",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "lineId",
-            "description": "Production line reserved",
-            "exampleData": [
-              "line-A1",
-              "line-B2",
-              "line-C3"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build the line is booked for",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "plannedStart",
-            "description": "Planned start of the line booking",
-            "exampleData": [
-              "2026-04-21T08:00:00Z",
-              "2026-05-05T08:00:00Z",
-              "2026-05-19T08:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "plannedEnd",
-            "description": "Planned end of the line booking",
-            "exampleData": [
-              "2026-04-25T17:00:00Z",
-              "2026-05-09T17:00:00Z",
-              "2026-05-23T17:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Booking lifecycle status (BOOKED, RUNNING, DONE)",
-            "exampleData": [
-              "BOOKED",
-              "RUNNING",
-              "DONE"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "Compass"
-      },
-      "TestResult": {
-        "description": "Recorded outcome of a specific test type for a build or unit.",
-        "required": [
-          "id",
-          "buildId",
-          "unitSerial",
-          "testType",
-          "result",
-          "executedAt"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the test result",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "buildId",
-            "description": "Build the test was executed on",
-            "exampleData": [
-              "build-001",
-              "build-002",
-              "build-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "unitSerial",
-            "description": "Serial number of the unit tested",
-            "exampleData": [
-              "SN-0001",
-              "SN-0002",
-              "SN-0003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "testType",
-            "description": "Type of test (BOARD, FAI, FA2, FUNCTIONAL)",
-            "exampleData": [
-              "BOARD",
-              "FAI",
-              "FUNCTIONAL"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "result",
-            "description": "Test outcome (PASS, FAIL)",
-            "exampleData": [
-              "PASS",
-              "PASS",
-              "FAIL"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "executedAt",
-            "description": "Timestamp the test was executed",
-            "exampleData": [
-              "2026-04-22T10:00:00Z",
-              "2026-04-23T14:00:00Z",
-              "2026-04-24T09:00:00Z"
-            ],
-            "dataType": "string"
-          }
-        ],
-        "boundedContext": "Test"
-      },
-      "Shipment": {
-        "description": "Outbound shipment of one or more units to the customer.",
-        "required": [
-          "id",
-          "demandId",
-          "status"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "description": "Unique identifier for the shipment",
-            "exampleData": [],
-            "dataType": "string"
-          },
-          {
-            "name": "demandId",
-            "description": "Demand the shipment fulfils",
-            "exampleData": [
-              "dmd-001",
-              "dmd-002",
-              "dmd-003"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "packedAt",
-            "description": "Timestamp the units were packed",
-            "exampleData": [
-              "2026-04-26T09:00:00Z",
-              "2026-05-10T09:00:00Z",
-              "2026-05-24T09:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "shippedAt",
-            "description": "Timestamp the shipment was dispatched",
-            "exampleData": [
-              "2026-04-26T15:00:00Z",
-              "2026-05-10T15:00:00Z",
-              "2026-05-24T15:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "deliveredAt",
-            "description": "Timestamp the shipment was confirmed delivered",
-            "exampleData": [
-              "2026-04-30T11:00:00Z",
-              "2026-05-14T11:00:00Z",
-              "2026-05-28T11:00:00Z"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "status",
-            "description": "Shipment lifecycle status (PREPARING, READY, IN_TRANSIT, DELIVERED)",
-            "exampleData": [
-              "PREPARING",
-              "READY",
-              "IN_TRANSIT"
-            ],
-            "dataType": "string"
-          },
-          {
-            "name": "units",
-            "description": "Units included in this shipment",
-            "array": true,
-            "exampleData": [
-              "Object",
-              "Object",
-              "Object"
-            ],
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
-            },
-            "dataType": "object"
-          }
-        ],
-        "boundedContext": "Logistics"
-      }
-    },
     "commands": {
-      "CreateDemand": {
+      "SubmitPatrolReport": {
         "required": [
-          "customerId",
-          "productName",
-          "qty",
-          "requestedWeek"
+          "company",
+          "patrolLeader",
+          "periodFrom",
+          "periodTo"
         ],
         "fields": [
           {
-            "name": "customerId",
+            "name": "company",
             "hideInForm": false
           },
           {
-            "name": "productName",
+            "name": "platoon",
             "hideInForm": false
           },
           {
-            "name": "qty",
+            "name": "squad",
             "hideInForm": false
           },
           {
-            "name": "requestedWeek",
-            "hideInForm": false
-          }
-        ]
-      },
-      "DefineBuildQuantity": {
-        "required": [
-          "demandId",
-          "builds"
-        ],
-        "fields": [
-          {
-            "name": "demandId",
+            "name": "patrolLeader",
             "hideInForm": false
           },
           {
-            "name": "builds",
+            "name": "periodFrom",
+            "hideInForm": false
+          },
+          {
+            "name": "periodTo",
+            "hideInForm": false
+          },
+          {
+            "name": "tasks",
+            "hideInForm": false
+          },
+          {
+            "name": "limitations",
+            "hideInForm": false
+          },
+          {
+            "name": "observations",
             "relatedEntity": {
-              "$ref": "#/schemas/entities/Build"
+              "$ref": "#/schemas/valueObjects/PatrolObservation"
             },
             "array": true,
-            "required": [
-              "buildNo",
-              "qty",
-              "plannedStart"
-            ],
             "fields": [
               {
-                "name": "buildNo"
+                "name": "timeNumber"
               },
               {
-                "name": "qty"
+                "name": "location"
               },
               {
-                "name": "plannedStart"
+                "name": "activity"
+              },
+              {
+                "name": "source"
               }
             ],
             "hideInForm": false
+          },
+          {
+            "name": "submittedTo",
+            "hideInForm": false
           }
         ]
       },
-      "SpecifyMaterialDemand": {
+      "SubmitDailyReport": {
         "required": [
-          "id",
-          "buildDemand"
+          "reportingUnit",
+          "periodFrom",
+          "periodTo"
         ],
         "fields": [
           {
-            "name": "id",
+            "name": "reportingUnit",
             "hideInForm": false
           },
           {
-            "name": "buildDemand",
+            "name": "periodFrom",
+            "hideInForm": false
+          },
+          {
+            "name": "periodTo",
+            "hideInForm": false
+          },
+          {
+            "name": "commanderSummary",
+            "hideInForm": false
+          },
+          {
+            "name": "pedars",
             "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
+              "$ref": "#/schemas/valueObjects/PedarsStatus"
             },
-            "array": true,
-            "required": [
-              "partNumber",
-              "qtyRequired"
-            ],
             "fields": [
               {
-                "name": "partNumber"
+                "name": "personnelIn"
               },
               {
-                "name": "qtyRequired"
+                "name": "personnelOut"
+              },
+              {
+                "name": "replacement"
+              },
+              {
+                "name": "fuel"
+              },
+              {
+                "name": "ammunition"
+              },
+              {
+                "name": "repairs"
+              },
+              {
+                "name": "combatValue"
+              },
+              {
+                "name": "comment"
               }
             ],
             "hideInForm": false
-          }
-        ]
-      },
-      "FlagMaterialShortage": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "SetBuildPriority": {
-        "required": [
-          "id",
-          "priority"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
           },
           {
-            "name": "priority",
-            "hideInForm": false
-          }
-        ]
-      },
-      "UpdateBuildPlan": {
-        "required": [
-          "demandId",
-          "reason"
-        ],
-        "fields": [
-          {
-            "name": "demandId",
-            "hideInForm": false
-          },
-          {
-            "name": "reason",
-            "hideInForm": false
-          }
-        ]
-      },
-      "LockBuildPlan": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ReleaseBuildToSite": {
-        "required": [
-          "id",
-          "siteId"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "siteId",
-            "hideInForm": false
-          }
-        ]
-      },
-      "CompleteMaterialKit": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "StartProduction": {
-        "required": [
-          "id",
-          "actualStart"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "actualStart",
-            "hideInForm": false
-          }
-        ]
-      },
-      "MarkBuildAsRTD": {
-        "required": [
-          "id",
-          "actualEnd"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "actualEnd",
-            "hideInForm": false
-          }
-        ]
-      },
-      "CreateProject": {
-        "required": [
-          "demandId",
-          "productName"
-        ],
-        "fields": [
-          {
-            "name": "demandId",
-            "hideInForm": false
-          },
-          {
-            "name": "productName",
-            "hideInForm": false
-          }
-        ]
-      },
-      "DefineBOM": {
-        "required": [
-          "id",
-          "bomItems"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "bomItems",
+            "name": "functionStatus",
             "relatedEntity": {
-              "$ref": "#/schemas/entities/BomItem"
+              "$ref": "#/schemas/valueObjects/FunctionStatus"
             },
-            "array": true,
-            "required": [
-              "partNumber",
-              "qtyPerUnit"
-            ],
             "fields": [
               {
-                "name": "partNumber"
+                "name": "aircraftStatus"
               },
               {
-                "name": "qtyPerUnit"
+                "name": "aircraftAmmunitionStatus"
+              },
+              {
+                "name": "aviationFuelStatus"
+              },
+              {
+                "name": "sparesStatus"
+              },
+              {
+                "name": "supplyStatus"
+              },
+              {
+                "name": "technicalStatus"
+              },
+              {
+                "name": "transportStatus"
+              },
+              {
+                "name": "color"
+              },
+              {
+                "name": "comment"
               }
             ],
             "hideInForm": false
-          }
-        ]
-      },
-      "FreezeBOMAtDS1": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "FreezeBOMAtDS2": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ApproveEngineeringRelease": {
-        "required": [
-          "projectId"
-        ],
-        "fields": [
-          {
-            "name": "projectId",
-            "hideInForm": false
-          }
-        ]
-      },
-      "OrderMaterial": {
-        "required": [
-          "id",
-          "requestedDate"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
           },
           {
-            "name": "requestedDate",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ConfirmOrderWithETA": {
-        "required": [
-          "id",
-          "confirmedEta"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "confirmedEta",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ChangeMaterialETA": {
-        "required": [
-          "id",
-          "confirmedEta"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "confirmedEta",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ReceiveMaterial": {
-        "required": [
-          "id",
-          "actualReceiptDate"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          },
-          {
-            "name": "actualReceiptDate",
-            "hideInForm": false
-          }
-        ]
-      },
-      "RaiseEngineeringChange": {
-        "required": [
-          "projectId",
-          "bomItemId",
-          "description"
-        ],
-        "fields": [
-          {
-            "name": "projectId",
-            "hideInForm": false
-          },
-          {
-            "name": "bomItemId",
-            "hideInForm": false
-          },
-          {
-            "name": "description",
-            "hideInForm": false
-          }
-        ]
-      },
-      "ApproveEngineeringChange": {
-        "required": [
-          "id"
-        ],
-        "fields": [
-          {
-            "name": "id",
-            "hideInForm": false
-          }
-        ]
-      },
-      "BookProductionLine": {
-        "required": [
-          "lineId",
-          "buildId",
-          "plannedStart",
-          "plannedEnd"
-        ],
-        "fields": [
-          {
-            "name": "lineId",
-            "hideInForm": false
-          },
-          {
-            "name": "buildId",
-            "hideInForm": false
-          },
-          {
-            "name": "plannedStart",
-            "hideInForm": false
-          },
-          {
-            "name": "plannedEnd",
-            "hideInForm": false
-          }
-        ]
-      },
-      "RecordBoardTestPass": {
-        "required": [
-          "buildId",
-          "unitSerial",
-          "executedAt"
-        ],
-        "fields": [
-          {
-            "name": "buildId",
-            "hideInForm": false
-          },
-          {
-            "name": "unitSerial",
-            "hideInForm": false
-          },
-          {
-            "name": "executedAt",
-            "hideInForm": false
-          }
-        ]
-      },
-      "RecordFAIPass": {
-        "required": [
-          "buildId",
-          "unitSerial",
-          "executedAt"
-        ],
-        "fields": [
-          {
-            "name": "buildId",
-            "hideInForm": false
-          },
-          {
-            "name": "unitSerial",
-            "hideInForm": false
-          },
-          {
-            "name": "executedAt",
-            "hideInForm": false
-          }
-        ]
-      },
-      "PickAndPackUnits": {
-        "required": [
-          "demandId",
-          "buildId",
-          "packedAt",
-          "units"
-        ],
-        "fields": [
-          {
-            "name": "demandId",
-            "hideInForm": false
-          },
-          {
-            "name": "buildId",
-            "hideInForm": false
-          },
-          {
-            "name": "packedAt",
-            "hideInForm": false
-          },
-          {
-            "name": "units",
+            "name": "readinessAssessments",
             "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
+              "$ref": "#/schemas/valueObjects/ReadinessAssessment"
             },
             "array": true,
-            "required": [
-              "id",
-              "status"
-            ],
             "fields": [
               {
-                "name": "id"
+                "name": "area"
               },
               {
                 "name": "status"
+              },
+              {
+                "name": "comment"
+              }
+            ],
+            "hideInForm": false
+          },
+          {
+            "name": "submittedTo",
+            "hideInForm": false
+          }
+        ]
+      },
+      "UpdateSituationPicture": {
+        "required": [
+          "asOf",
+          "ownSituation",
+          "updatedBy"
+        ],
+        "fields": [
+          {
+            "name": "asOf",
+            "hideInForm": false
+          },
+          {
+            "name": "ownSituation",
+            "hideInForm": false
+          },
+          {
+            "name": "intelSecuritySituation",
+            "hideInForm": false
+          },
+          {
+            "name": "enemyAssessedSituation",
+            "hideInForm": false
+          },
+          {
+            "name": "updatedBy",
+            "hideInForm": false
+          }
+        ]
+      },
+      "CompileWingReport": {
+        "required": [
+          "periodFrom",
+          "periodTo",
+          "compiledBy"
+        ],
+        "fields": [
+          {
+            "name": "periodFrom",
+            "hideInForm": false
+          },
+          {
+            "name": "periodTo",
+            "hideInForm": false
+          },
+          {
+            "name": "ownPositionAssessment",
+            "hideInForm": false
+          },
+          {
+            "name": "conclusions",
+            "hideInForm": false
+          },
+          {
+            "name": "baseStatus",
+            "hideInForm": false
+          },
+          {
+            "name": "readiness",
+            "hideInForm": false
+          },
+          {
+            "name": "compiledBy",
+            "hideInForm": false
+          },
+          {
+            "name": "pedars",
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/PedarsStatus"
+            },
+            "fields": [
+              {
+                "name": "personnelIn"
+              },
+              {
+                "name": "personnelOut"
+              },
+              {
+                "name": "replacement"
+              },
+              {
+                "name": "fuel"
+              },
+              {
+                "name": "ammunition"
+              },
+              {
+                "name": "repairs"
+              },
+              {
+                "name": "combatValue"
+              },
+              {
+                "name": "comment"
+              }
+            ],
+            "hideInForm": false
+          },
+          {
+            "name": "functionStatus",
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/FunctionStatus"
+            },
+            "fields": [
+              {
+                "name": "aircraftStatus"
+              },
+              {
+                "name": "aircraftAmmunitionStatus"
+              },
+              {
+                "name": "aviationFuelStatus"
+              },
+              {
+                "name": "sparesStatus"
+              },
+              {
+                "name": "supplyStatus"
+              },
+              {
+                "name": "technicalStatus"
+              },
+              {
+                "name": "transportStatus"
+              },
+              {
+                "name": "color"
+              },
+              {
+                "name": "comment"
+              }
+            ],
+            "hideInForm": false
+          },
+          {
+            "name": "combatValue",
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/ReadinessAssessment"
+            },
+            "array": true,
+            "fields": [
+              {
+                "name": "area"
+              },
+              {
+                "name": "status"
+              },
+              {
+                "name": "comment"
               }
             ],
             "hideInForm": false
           }
         ]
       },
-      "DispatchShipment": {
+      "ApproveWingReport": {
         "required": [
           "id",
-          "shippedAt"
+          "approvedBy",
+          "approvedAt"
         ],
         "fields": [
           {
             "name": "id",
+            "hideInForm": true
+          },
+          {
+            "name": "approvedBy",
             "hideInForm": false
           },
           {
-            "name": "shippedAt",
+            "name": "approvedAt",
             "hideInForm": false
           }
         ]
       },
-      "ConfirmShipmentDelivered": {
+      "SubmitWingReport": {
         "required": [
           "id",
-          "deliveredAt"
+          "submittedAt",
+          "submittedTo"
         ],
         "fields": [
           {
             "name": "id",
+            "hideInForm": true
+          },
+          {
+            "name": "submittedAt",
             "hideInForm": false
           },
           {
-            "name": "deliveredAt",
+            "name": "submittedTo",
             "hideInForm": false
           }
         ]
       }
     },
     "queries": {
-      "ListDemands": {
-        "description": "Browse all demands with their lifecycle status and simulator progress. Powers the multi-demand dashboard view.",
+      "ListDailyReports": {
+        "description": "All daily reports submitted for the period, used by Current Ops to consolidate the situation picture.",
         "entity": {
-          "$ref": "#/schemas/entities/Demand"
+          "$ref": "#/schemas/entities/DailyReport"
         },
         "array": true,
         "fields": [
           {
-            "name": "id"
-          },
-          {
-            "name": "customerId"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "progress",
-            "description": "Count of distinct domain events fired for this demand across the 28-event workflow (0-28).",
-            "computed": true
-          },
-          {
-            "name": "lastEventRef",
-            "description": "$ref of the most recent domain event recorded for this demand, or null if no events have fired yet.",
-            "computed": true
-          },
-          {
-            "name": "lastEventAt",
-            "description": "Timestamp of the most recent domain event recorded for this demand, or null if no events have fired yet.",
-            "computed": true
-          }
-        ]
-      },
-      "GetDemand": {
-        "description": "Read the demand that this project will be linked to.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/entities/Demand"
-        },
-        "fields": [
-          {
-            "name": "demandId",
+            "name": "periodFrom",
             "isFilter": true
           },
           {
-            "name": "id"
-          },
-          {
-            "name": "customerId"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          }
-        ]
-      },
-      "GetDemandWithBOMStatus": {
-        "description": "Demand details enriched with whether its project BOM is frozen at DS1, used before defining build quantity.",
-        "entity": {
-          "$ref": "#/schemas/entities/Demand"
-        },
-        "fields": [
-          {
-            "name": "demandId",
+            "name": "periodTo",
             "isFilter": true
           },
           {
-            "name": "id"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "requestedWeek"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "projectStatus",
-            "description": "Latest design-state of the project's BOM (DRAFT, DS1, DS2_PROD).",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildWithBOM": {
-        "description": "Build context together with its project's BOM lines, used to compute material requirements.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
+            "name": "reportingUnit",
             "isFilter": true
           },
           {
-            "name": "id"
+            "name": "commanderSummary"
           },
           {
-            "name": "qty"
-          },
-          {
-            "name": "bomItems",
-            "description": "BOM lines pulled from the parent project of this build.",
+            "name": "pedars",
             "relatedEntity": {
-              "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
+              "$ref": "#/schemas/valueObjects/PedarsStatus"
             },
             "fields": [
               {
-                "name": "partNumber"
+                "name": "combatValue"
               },
               {
-                "name": "qtyPerUnit"
-              }
-            ],
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsAtRisk": {
-        "description": "Builds whose confirmed PO ETA is later than the build's planned_start. Computed by the simulator after every ETA change.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "plannedStart"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "latestPoEta",
-            "description": "Maximum confirmed_eta across the build's purchase orders.",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuilds": {
-        "description": "Builds visible to the planner for prioritization.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "buildPlanId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "priority"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "materialStatus"
-          }
-        ]
-      },
-      "GetBuildPlanDisruptions": {
-        "description": "Current plan together with the disruption signals that justify a replan.",
-        "entity": {
-          "$ref": "#/schemas/entities/BuildPlan"
-        },
-        "fields": [
-          {
-            "name": "demandId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "version"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "etaSlips",
-            "description": "POs whose confirmed_eta moved later than the relevant build's planned_start.",
-            "computed": true
-          },
-          {
-            "name": "approvedEngineeringChanges",
-            "description": "ECs approved since the current plan version was created.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildPlanLockReadiness": {
-        "description": "Pre-flight check for the Lock gate: DS2 frozen, engineering release approved, work order created.",
-        "entity": {
-          "$ref": "#/schemas/entities/BuildPlan"
-        },
-        "fields": [
-          {
-            "name": "buildPlanId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "version"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "ds2Frozen",
-            "description": "True when all bom_items design_state is DS2_PROD.",
-            "computed": true
-          },
-          {
-            "name": "engineeringReleaseApproved",
-            "description": "True when the project's engineering_release is APPROVED.",
-            "computed": true
-          },
-          {
-            "name": "workOrderCreated",
-            "description": "True when a work_order exists for this plan.",
-            "computed": true
-          }
-        ]
-      },
-      "ListProductionSites": {
-        "description": "Available manufacturing sites.",
-        "entity": {
-          "$ref": "#/schemas/entities/ProductionSite"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "name"
-          }
-        ]
-      },
-      "GetBuildMaterialStatus": {
-        "description": "Build with its build_demand rollup; the simulator checks whether qty_available >= qty_required for every part.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "buildDemand",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BuildDemand"
-            },
-            "fields": [
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qtyRequired"
-              },
-              {
-                "name": "qtyAvailable"
-              }
-            ]
-          },
-          {
-            "name": "isKitComplete",
-            "description": "True when every build_demand has qty_available >= qty_required.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildProductionReadiness": {
-        "description": "Build context with line booking and material readiness; production may only start when both gates are met.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "materialStatus"
-          },
-          {
-            "name": "lineBookingStatus",
-            "description": "Latest line_booking.status for this build (BOOKED, RUNNING, DONE).",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsInProduction": {
-        "description": "Builds currently IN_PROGRESS, awaiting board test.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "status",
-            "description": "Filter on build.status (IN_PROGRESS).",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "actualStart"
-          }
-        ]
-      },
-      "ListBuildsReadyForFAI": {
-        "description": "Builds whose board tests have passed and are ready for First Article Inspection.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "boardTestsPassed",
-            "description": "True when every produced unit has a BOARD test_result with result PASS.",
-            "computed": true
-          }
-        ]
-      },
-      "GetBuildTestStatus": {
-        "description": "Build with rollup of board test and FAI outcomes, used to confirm RTD readiness.",
-        "entity": {
-          "$ref": "#/schemas/entities/Build"
-        },
-        "fields": [
-          {
-            "name": "buildId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "qty"
-          },
-          {
-            "name": "boardTestsPassed",
-            "computed": true
-          },
-          {
-            "name": "faiPassed",
-            "description": "True when a FAI test_result with PASS exists.",
-            "computed": true
-          }
-        ]
-      },
-      "ListBuildsReadyForPack": {
-        "description": "Builds at RTD with their associated units, awaiting pick and pack.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/Helix/schemas/entities/Build"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "status",
-            "description": "Filter on build.status (RTD).",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "buildNo"
-          },
-          {
-            "name": "units",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/Unit"
-            },
-            "fields": [
-              {
-                "name": "id"
-              },
-              {
-                "name": "serialNo"
-              },
-              {
-                "name": "status"
+                "name": "comment"
               }
             ]
           }
         ]
       },
-      "GetProject": {
-        "description": "Project that the BOM is being defined for.",
+      "ListPatrolReports": {
+        "description": "Patrol reports for the period, feeding the intelligence picture.",
         "entity": {
-          "$ref": "#/schemas/entities/Project"
-        },
-        "fields": [
-          {
-            "name": "projectId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "demandId"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "status"
-          }
-        ]
-      },
-      "GetProjectWithBOM": {
-        "description": "Project with its BOM lines, used before freezing the BOM at DS1.",
-        "entity": {
-          "$ref": "#/schemas/entities/Project"
-        },
-        "fields": [
-          {
-            "name": "projectId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "productName"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "bomItems",
-            "relatedEntity": {
-              "$ref": "#/schemas/entities/BomItem"
-            },
-            "fields": [
-              {
-                "name": "id"
-              },
-              {
-                "name": "partNumber"
-              },
-              {
-                "name": "qtyPerUnit"
-              },
-              {
-                "name": "designState"
-              }
-            ]
-          }
-        ]
-      },
-      "GetBOMItem": {
-        "description": "BOM item the engineering change refers to.",
-        "entity": {
-          "$ref": "#/externalBoundedContexts/PRIM/schemas/entities/BomItem"
-        },
-        "fields": [
-          {
-            "name": "bomItemId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "partNumber"
-          },
-          {
-            "name": "qtyPerUnit"
-          },
-          {
-            "name": "designState"
-          }
-        ]
-      },
-      "GetProjectStatus": {
-        "description": "Project with gating signals: BOM design-state aggregate and count of open engineering changes.",
-        "entity": {
-          "$ref": "#/schemas/entities/Project"
-        },
-        "fields": [
-          {
-            "name": "projectId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "status"
-          },
-          {
-            "name": "bomDesignState",
-            "description": "Most-restrictive design state across the BOM (DRAFT, DS1, DS2_PROD).",
-            "computed": true
-          },
-          {
-            "name": "openEngineeringChanges",
-            "description": "Count of engineering changes still OPEN for this project.",
-            "computed": true
-          }
-        ]
-      },
-      "ListDraftPurchaseOrders": {
-        "description": "Draft POs awaiting buyer action.",
-        "entity": {
-          "$ref": "#/schemas/entities/PurchaseOrder"
+          "$ref": "#/schemas/entities/PatrolReport"
         },
         "array": true,
         "fields": [
           {
-            "name": "status",
-            "description": "Filter on PO status (DRAFT).",
+            "name": "periodFrom",
             "isFilter": true
           },
           {
-            "name": "id"
+            "name": "periodTo",
+            "isFilter": true
           },
           {
-            "name": "partNumber"
+            "name": "company",
+            "isFilter": true
           },
           {
-            "name": "qty"
+            "name": "patrolLeader"
           },
           {
-            "name": "supplierId"
+            "name": "tasks"
           }
         ]
       },
-      "GetPurchaseOrder": {
-        "description": "Read a specific PO; reused across multiple PO lifecycle events.",
+      "GetSituationPicture": {
+        "description": "Latest consolidated situation picture used to brief the commander, support the decision and compile the wing report.",
         "entity": {
-          "$ref": "#/schemas/entities/PurchaseOrder"
+          "$ref": "#/schemas/entities/SituationPicture"
+        },
+        "fields": [
+          {
+            "name": "asOf",
+            "isFilter": true
+          },
+          {
+            "name": "ownSituation"
+          },
+          {
+            "name": "intelSecuritySituation"
+          },
+          {
+            "name": "enemyAssessedSituation"
+          }
+        ]
+      },
+      "GetWingReport": {
+        "description": "The drafted wing report under review before approval and submission to higher command.",
+        "entity": {
+          "$ref": "#/schemas/entities/WingReport"
         },
         "fields": [
           {
             "name": "id",
-            "description": "Purchase order to retrieve",
             "isFilter": true
           },
           {
-            "name": "partNumber"
+            "name": "periodFrom"
           },
           {
-            "name": "qty"
-          },
-          {
-            "name": "supplierId"
-          },
-          {
-            "name": "requestedDate"
-          },
-          {
-            "name": "confirmedEta"
-          },
-          {
-            "name": "actualReceiptDate"
+            "name": "periodTo"
           },
           {
             "name": "status"
-          }
-        ]
-      },
-      "ListOpenEngineeringChanges": {
-        "description": "Engineering changes still in OPEN status, awaiting approval.",
-        "entity": {
-          "$ref": "#/schemas/entities/EngineeringChange"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "projectId",
-            "isFilter": true
           },
           {
-            "name": "status",
-            "description": "Filter on EC status (OPEN).",
-            "isFilter": true
+            "name": "ownPositionAssessment"
           },
           {
-            "name": "id"
+            "name": "conclusions"
           },
           {
-            "name": "bomItemId"
+            "name": "compiledBy"
           },
           {
-            "name": "description"
-          },
-          {
-            "name": "createdAt"
-          }
-        ]
-      },
-      "ListProductionLines": {
-        "description": "Production lines and their weekly capacity, filtered by site.",
-        "entity": {
-          "$ref": "#/schemas/entities/ProductionLine"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "siteId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "name"
-          },
-          {
-            "name": "capacityPerWeek"
-          }
-        ]
-      },
-      "ListShipmentsReady": {
-        "description": "Shipments with status READY waiting for dispatch.",
-        "entity": {
-          "$ref": "#/schemas/entities/Shipment"
-        },
-        "array": true,
-        "fields": [
-          {
-            "name": "status",
-            "description": "Filter on shipment.status (READY).",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "demandId"
-          },
-          {
-            "name": "packedAt"
-          }
-        ]
-      },
-      "GetShipment": {
-        "description": "Current state of the shipment, used by the receiver to confirm delivery.",
-        "entity": {
-          "$ref": "#/schemas/entities/Shipment"
-        },
-        "fields": [
-          {
-            "name": "shipmentId",
-            "isFilter": true
-          },
-          {
-            "name": "id"
-          },
-          {
-            "name": "demandId"
-          },
-          {
-            "name": "packedAt"
-          },
-          {
-            "name": "shippedAt"
-          },
-          {
-            "name": "deliveredAt"
-          },
-          {
-            "name": "status"
+            "name": "approvedBy"
           }
         ]
       }
     },
-    "valueObjects": {}
-  }
+    "entities": {
+      "DailyReport": {
+        "description": "Dygnsrapport submitted by a subordinate unit (DUC) covering its status for the period; carries PEDARS, function status and combat-value status.",
+        "required": [
+          "id",
+          "reportingUnit",
+          "periodFrom",
+          "periodTo"
+        ],
+        "fields": [
+          {
+            "name": "id",
+            "description": "Unique identifier of the daily report",
+            "exampleData": [
+              "dr-2026-0608-211bas",
+              "dr-2026-0608-212sfdiv",
+              "dr-2026-0609-flyge"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "reportingUnit",
+            "description": "Unit (DUC) the report covers",
+            "exampleData": [
+              "211.flygbasbat",
+              "212.sfdiv",
+              "FlygE"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodFrom",
+            "description": "Start of the reporting period (time number)",
+            "exampleData": [
+              "080500ZJUN26",
+              "090500ZJUN26",
+              "100500ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodTo",
+            "description": "End of the reporting period (time number)",
+            "exampleData": [
+              "081500ZJUN26",
+              "091500ZJUN26",
+              "101500ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "commanderSummary",
+            "description": "Chief's summary of essential and limiting factors",
+            "exampleData": [
+              "all tasks solvable",
+              "limited by aviation fuel",
+              "green across the board"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "pedars",
+            "description": "PEDARS line (personnel, replacement, fuel, ammunition, repairs, combat value)",
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/PedarsStatus"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "functionStatus",
+            "description": "Function report section (funktionsrapport)",
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/FunctionStatus"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "readinessAssessments",
+            "description": "Combat-value report lines (stridsvardesrapport)",
+            "array": true,
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/ReadinessAssessment"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "submittedTo",
+            "description": "Recipient of the report",
+            "exampleData": [
+              "unit chief",
+              "Wing Ops",
+              "DUC chief"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "submittedAt",
+            "description": "Time the report was submitted",
+            "exampleData": [
+              "081050ZJUN26",
+              "091045ZJUN26",
+              "101055ZJUN26"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "PatrolReport": {
+        "description": "Patrullrapport (CC-8) compiled at company level from a ground-defence patrol; feeds the intelligence assessment at the main base.",
+        "required": [
+          "id",
+          "company",
+          "patrolLeader",
+          "periodFrom",
+          "periodTo"
+        ],
+        "fields": [
+          {
+            "name": "id",
+            "description": "Unique identifier of the patrol report",
+            "exampleData": [
+              "pr-2026-0608-3komp",
+              "pr-2026-0608-1pl",
+              "pr-2026-0609-2pl"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "company",
+            "description": "Reporting company",
+            "exampleData": [
+              "3.komp",
+              "1.komp",
+              "2.komp"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "platoon",
+            "description": "Reporting platoon",
+            "exampleData": [
+              "1.pluton",
+              "2.pluton",
+              "3.pluton"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "squad",
+            "description": "Reporting squad",
+            "exampleData": [
+              "1.grupp",
+              "2.grupp",
+              "3.grupp"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "patrolLeader",
+            "description": "Patrol leader (gruppchef)",
+            "exampleData": [
+              "Serg Lind",
+              "Serg Berg",
+              "Furir Ek"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodFrom",
+            "description": "Start time number of the patrol",
+            "exampleData": [
+              "080600ZJUN26",
+              "090600ZJUN26",
+              "100600ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodTo",
+            "description": "End time number of the patrol",
+            "exampleData": [
+              "080900ZJUN26",
+              "090900ZJUN26",
+              "100900ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "tasks",
+            "description": "Tasks assigned to the patrol",
+            "exampleData": [
+              "recce perimeter",
+              "screen VCP",
+              "patrol sector 3"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "limitations",
+            "description": "Limitations on solving the task",
+            "exampleData": [
+              "none",
+              "darkness",
+              "weather"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "observations",
+            "description": "Chronological observations (Stund, Stalle, Sysselsattning, Sagesman)",
+            "array": true,
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/PatrolObservation"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "submittedTo",
+            "description": "Recipient of the patrol report",
+            "exampleData": [
+              "Wing Ops",
+              "company HQ",
+              "A2"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "submittedAt",
+            "description": "Time the patrol report was submitted",
+            "exampleData": [
+              "081000ZJUN26",
+              "091000ZJUN26",
+              "101000ZJUN26"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "SituationPicture": {
+        "description": "Consolidated wing situation picture (lagessammanstallning) maintained by Current Ops from received reports; own situation, intel/security situation and assessed enemy situation.",
+        "required": [
+          "id",
+          "asOf",
+          "ownSituation",
+          "updatedBy"
+        ],
+        "fields": [
+          {
+            "name": "id",
+            "description": "Unique identifier of the situation picture snapshot",
+            "exampleData": [
+              "sp-2026-0608",
+              "sp-2026-0609",
+              "sp-2026-0610"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "asOf",
+            "description": "Timestamp the picture is valid as of",
+            "exampleData": [
+              "081200ZJUN26",
+              "091200ZJUN26",
+              "101200ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "ownSituation",
+            "description": "Own situation (vart lage)",
+            "exampleData": [
+              "HBS nominal",
+              "one base limited by fuel",
+              "green"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "intelSecuritySituation",
+            "description": "Intelligence and security situation",
+            "exampleData": [
+              "elevated FIE threat",
+              "open UAS sighting under review",
+              "nominal"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "enemyAssessedSituation",
+            "description": "Assessed enemy situation (fiendens bedomda lage)",
+            "exampleData": [
+              "no change",
+              "possible reconnaissance",
+              "low activity"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "updatedBy",
+            "description": "Who updated the picture",
+            "exampleData": [
+              "A3 Current",
+              "WOC",
+              "Current Ops"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "WingReport": {
+        "description": "Forbandsrapport sent daily from the wing to higher command (FVC/FS) reporting the status of the war unit as a whole, using the FVC/SOFO NAT template.",
+        "required": [
+          "id",
+          "periodFrom",
+          "periodTo",
+          "compiledBy"
+        ],
+        "fields": [
+          {
+            "name": "id",
+            "description": "Unique identifier of the wing report",
+            "exampleData": [
+              "wr-2026-0608",
+              "wr-2026-0609",
+              "wr-2026-0610"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodFrom",
+            "description": "Start of the reporting period",
+            "exampleData": [
+              "080500ZJUN26",
+              "090500ZJUN26",
+              "100500ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "periodTo",
+            "description": "End of the reporting period",
+            "exampleData": [
+              "081500ZJUN26",
+              "091500ZJUN26",
+              "101500ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "status",
+            "description": "Lifecycle status of the wing report",
+            "exampleData": [
+              "draft",
+              "approved",
+              "submitted"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "ownPositionAssessment",
+            "description": "Position, situation and conclusions for the war unit as a whole",
+            "exampleData": [
+              "HBS delivered",
+              "green",
+              "minor limitations"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "conclusions",
+            "description": "Key conclusions for higher command",
+            "exampleData": [
+              "no support needed",
+              "request C-UAS reinforcement",
+              "fuel resupply required"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "baseStatus",
+            "description": "Status per base",
+            "exampleData": [
+              "KAX green",
+              "JOK yellow",
+              "ARV green"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "readiness",
+            "description": "Readiness (beredskap)",
+            "exampleData": [
+              "normal",
+              "high",
+              "lowest"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "compiledBy",
+            "description": "Who compiled the report",
+            "exampleData": [
+              "A3 Current",
+              "rapportredaktor",
+              "Current Ops"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "approvedBy",
+            "description": "Who approved the report (SC)",
+            "exampleData": [
+              "SC",
+              "Stf SC",
+              "C A3"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "approvedAt",
+            "description": "Time of approval",
+            "exampleData": [
+              "081420ZJUN26",
+              "091425ZJUN26",
+              "101415ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "submittedAt",
+            "description": "Time submitted to higher command",
+            "exampleData": [
+              "081455ZJUN26",
+              "091450ZJUN26",
+              "101458ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "submittedTo",
+            "description": "Recipient at higher command",
+            "exampleData": [
+              "FVC",
+              "FS",
+              "higher command"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "pedars",
+            "description": "Aggregated PEDARS line",
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/PedarsStatus"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "functionStatus",
+            "description": "Aggregated function report",
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/FunctionStatus"
+            },
+            "dataType": "object"
+          },
+          {
+            "name": "combatValue",
+            "description": "Aggregated combat-value report lines",
+            "array": true,
+            "exampleData": [
+              "Object",
+              "Object",
+              "Object"
+            ],
+            "relatedEntity": {
+              "$ref": "#/schemas/valueObjects/ReadinessAssessment"
+            },
+            "dataType": "object"
+          }
+        ]
+      }
+    },
+    "valueObjects": {
+      "PedarsStatus": {
+        "description": "Value object capturing the PEDARS line of a daily report: personnel, replacement, fuel, ammunition, repairs and overall combat value.",
+        "fields": [
+          {
+            "name": "personnelIn",
+            "description": "Personnel in",
+            "exampleData": [
+              "3",
+              "0",
+              "12"
+            ],
+            "dataType": "number"
+          },
+          {
+            "name": "personnelOut",
+            "description": "Personnel out",
+            "exampleData": [
+              "1",
+              "0",
+              "4"
+            ],
+            "dataType": "number"
+          },
+          {
+            "name": "replacement",
+            "description": "Replacement status (Ersattning)",
+            "exampleData": [
+              "none requested",
+              "2 requested",
+              "awaiting"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "fuel",
+            "description": "Fuel status (Drivmedel)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "ammunition",
+            "description": "Ammunition status",
+            "exampleData": [
+              "GREEN",
+              "N/A",
+              "YELLOW"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "repairs",
+            "description": "Repairs status (Reparationer)",
+            "exampleData": [
+              "none",
+              "1 vehicle",
+              "2 ongoing"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "combatValue",
+            "description": "Overall combat value (Stridsvarde): RED, YELLOW or GREEN",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "comment",
+            "description": "Free-text comment",
+            "exampleData": [
+              "fully operational",
+              "limited by fuel",
+              "see remarks"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "FunctionStatus": {
+        "description": "Value object capturing the function report (funktionsrapport) section of a daily report.",
+        "fields": [
+          {
+            "name": "aircraftStatus",
+            "description": "Aircraft status (Flygplanlage)",
+            "exampleData": [
+              "6 serviceable",
+              "4 of 6",
+              "all up"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "aircraftAmmunitionStatus",
+            "description": "Aircraft ammunition status (Flygamlage)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "N/A"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "aviationFuelStatus",
+            "description": "Aviation fuel status (Flygdrivmlage)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "sparesStatus",
+            "description": "Spares and repair status (UE/RD lage)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "supplyStatus",
+            "description": "Supplies status (Fornodenhetsforsorjning)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "technicalStatus",
+            "description": "Technical materiel status (Teknisk status mtrl)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "transportStatus",
+            "description": "Transport service status (Transporttjanst)",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "color",
+            "description": "Overall function colour",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "comment",
+            "description": "Free-text comment",
+            "exampleData": [
+              "nominal",
+              "fuel resupply needed",
+              "see remarks"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "ReadinessAssessment": {
+        "description": "Value object for one capability line of the combat-value report (stridsvardesrapport), e.g. command, mobility, effect, protection, endurance, intelligence.",
+        "fields": [
+          {
+            "name": "area",
+            "description": "Capability area (Ledning, Rorlighet, Verkan, Skydd, Uthallighet, Underrattelse, Transporttjanst)",
+            "exampleData": [
+              "Ledning",
+              "Skydd",
+              "Uthallighet"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "status",
+            "description": "Capability status: RED, YELLOW or GREEN",
+            "exampleData": [
+              "GREEN",
+              "YELLOW",
+              "RED"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "comment",
+            "description": "Limitation and freedom-of-action prognosis",
+            "exampleData": [
+              "no limitations",
+              "limited, prognosis 24h",
+              "critical, see remarks"
+            ],
+            "dataType": "string"
+          }
+        ]
+      },
+      "PatrolObservation": {
+        "description": "Value object for a single chronological observation in a patrol report (Stund, Stalle, Sysselsattning, Sagesman).",
+        "fields": [
+          {
+            "name": "timeNumber",
+            "description": "Time number of the observation (tnr)",
+            "exampleData": [
+              "080630ZJUN26",
+              "080715ZJUN26",
+              "080900ZJUN26"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "location",
+            "description": "Location of the observation",
+            "exampleData": [
+              "VCP north",
+              "perimeter sector 3",
+              "road junction 12"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "activity",
+            "description": "Observed activity / occupation (Sysselsattning)",
+            "exampleData": [
+              "civilian vehicle passing",
+              "no activity",
+              "unknown person observed"
+            ],
+            "dataType": "string"
+          },
+          {
+            "name": "source",
+            "description": "Source (Sagesman)",
+            "exampleData": [
+              "patrol leader",
+              "sentry",
+              "local"
+            ],
+            "dataType": "string"
+          }
+        ]
+      }
+    }
+  },
+  "externalBoundedContexts": {
+    "CommandAndBattleRhythm": {
+      "domainEvents": {
+        "OperationsDayOpened": {
+          "event": "Operations Day Opened",
+          "role": "Automation",
+          "follows": [
+            "start"
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/OpenOperationsDay"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/OperationsDay"
+          },
+          "acceptanceCriteria": [
+            "Given the wing battle-rhythm schedule, When the scheduled start time (0500Z) is reached, Then a new operations day (dygn) is opened and the day watch is activated"
+          ]
+        },
+        "DutyOfficerHandedOver": {
+          "event": "Duty Officer Handed Over",
+          "role": "Wing Ops Duty Officer",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/OperationsDayOpened"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/HandOverNightWatch"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/WatchHandover"
+          },
+          "acceptanceCriteria": [
+            "Given the night watch (Jour VB) has maintained the situation overnight, When the day watch assumes duty, Then the watch is handed over with current status and standing tasks briefed"
+          ]
+        },
+        "CommanderUpdateDelivered": {
+          "event": "Commander Update Delivered",
+          "role": "Chief of Staff",
+          "follows": [
+            {
+              "$ref": "#/domainEvents/DailyReportSubmitted"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/DeliverCommanderUpdate"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/CommanderUpdate"
+          },
+          "readModels": [
+            {
+              "$ref": "#/schemas/queries/GetSituationPicture",
+              "description": "Get Situation Picture"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given the current situation, When the Chief of Staff (SC) updates the Wing Commander once per day (chefens uppdatering), Then the commander has a current picture for decisions"
+          ]
+        },
+        "CoordinationMeetingHeld": {
+          "event": "Coordination Meeting Held",
+          "role": "Chief of Staff",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/CommanderUpdateDelivered"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/HoldCoordinationMeeting"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/CoordinationMeeting"
+          },
+          "acceptanceCriteria": [
+            "Given the commander's update and base order have been given, When the Chief of Staff holds the SC coordination meeting with department chiefs, Then a common situational understanding and resource priorities are established"
+          ]
+        },
+        "CommanderDecisionMade": {
+          "event": "Commander Decision Made",
+          "role": "Wing Commander",
+          "follows": [
+            {
+              "$ref": "#/domainEvents/SituationPictureUpdated"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/MakeCommanderDecision"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/Order"
+          },
+          "readModels": [
+            {
+              "$ref": "#/schemas/queries/GetSituationPicture",
+              "description": "Get Situation Picture"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given the decision brief at the decision meeting (beslutsföredragning), When the Wing Commander decides, Then the chosen course of action is recorded for order production"
+          ]
+        },
+        "OrderIssued": {
+          "event": "Order Issued",
+          "role": "Chief of Staff",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/CommanderDecisionMade"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/IssueOrder"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/Order"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/queries/GetOrder",
+              "description": "Get Order"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given the commander's decision, When the Chief of Staff approves the order (FljO/FragO), Then it is issued to DUC over TAKTIL in connection with the 1300LT order meeting"
+          ]
+        },
+        "DayWatchHandedOver": {
+          "event": "Day Watch Handed Over",
+          "role": "Wing Ops Duty Officer",
+          "follows": [
+            {
+              "$ref": "#/domainEvents/WingReportSubmitted"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/HandOverDayWatch"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/WatchHandover"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/queries/GetOperationsDay",
+              "description": "Get Operations Day"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given the end of the day shift, When the night watch (Jour VB) assumes duty, Then the watch is handed over with current status and standing tasks"
+          ]
+        },
+        "OperationsDayClosed": {
+          "event": "Operations Day Closed",
+          "role": "Automation",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/DayWatchHandedOver"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/CloseOperationsDay"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/OperationsDay"
+          },
+          "acceptanceCriteria": [
+            "Given all daily reporting for the period is complete, When the operations day ends, Then it is closed and the next day's battle-rhythm cycle is scheduled"
+          ]
+        },
+        "WarDiaryEntryLogged": {
+          "event": "War Diary Entry Logged",
+          "role": "Wing Ops Duty Officer",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/domainEvents/IncidentResolved"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/commands/LogWarDiaryEntry"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/WarDiaryEntry"
+          },
+          "acceptanceCriteria": [
+            "Given a resolved incident or a battle-staff decision that falls outside the standing order, When it occurs, Then A3 records it in the war diary (krigsdagbok) in TAKTIL for traceability"
+          ]
+        }
+      },
+      "schemas": {
+        "commands": {
+          "OpenOperationsDay": {
+            "required": [
+              "dayDate",
+              "startsAt"
+            ],
+            "fields": [
+              {
+                "name": "dayDate",
+                "hideInForm": false
+              },
+              {
+                "name": "startsAt",
+                "hideInForm": false
+              },
+              {
+                "name": "endsAt",
+                "hideInForm": false
+              },
+              {
+                "name": "battleRhythmTemplate",
+                "hideInForm": false
+              }
+            ]
+          },
+          "CloseOperationsDay": {
+            "required": [
+              "id",
+              "closedAt"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "hideInForm": true
+              },
+              {
+                "name": "closedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "dailyReportingComplete",
+                "hideInForm": false
+              },
+              {
+                "name": "nextDayScheduledAt",
+                "hideInForm": false
+              }
+            ]
+          },
+          "HandOverNightWatch": {
+            "required": [
+              "handoverType",
+              "outgoingWatchkeeper",
+              "incomingWatchkeeper",
+              "handoverTime"
+            ],
+            "fields": [
+              {
+                "name": "handoverType",
+                "hideInForm": false
+              },
+              {
+                "name": "outgoingWatchkeeper",
+                "hideInForm": false
+              },
+              {
+                "name": "incomingWatchkeeper",
+                "hideInForm": false
+              },
+              {
+                "name": "handoverTime",
+                "hideInForm": false
+              },
+              {
+                "name": "outstandingMatters",
+                "hideInForm": false
+              }
+            ]
+          },
+          "HandOverDayWatch": {
+            "required": [
+              "handoverType",
+              "outgoingWatchkeeper",
+              "incomingWatchkeeper",
+              "handoverTime"
+            ],
+            "fields": [
+              {
+                "name": "handoverType",
+                "hideInForm": false
+              },
+              {
+                "name": "outgoingWatchkeeper",
+                "hideInForm": false
+              },
+              {
+                "name": "incomingWatchkeeper",
+                "hideInForm": false
+              },
+              {
+                "name": "handoverTime",
+                "hideInForm": false
+              },
+              {
+                "name": "outstandingMatters",
+                "hideInForm": false
+              }
+            ]
+          },
+          "DeliverCommanderUpdate": {
+            "required": [
+              "briefedAt",
+              "briefedBy",
+              "situationSummary"
+            ],
+            "fields": [
+              {
+                "name": "briefedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "briefedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "situationSummary",
+                "hideInForm": false
+              }
+            ]
+          },
+          "HoldCoordinationMeeting": {
+            "required": [
+              "heldAt"
+            ],
+            "fields": [
+              {
+                "name": "heldAt",
+                "hideInForm": false
+              },
+              {
+                "name": "attendees",
+                "hideInForm": false
+              },
+              {
+                "name": "prioritiesAgreed",
+                "hideInForm": false
+              },
+              {
+                "name": "resourceDecisions",
+                "hideInForm": false
+              }
+            ]
+          },
+          "MakeCommanderDecision": {
+            "required": [
+              "orderType",
+              "decision",
+              "decidedBy",
+              "decidedAt"
+            ],
+            "fields": [
+              {
+                "name": "orderType",
+                "hideInForm": false
+              },
+              {
+                "name": "decision",
+                "hideInForm": false
+              },
+              {
+                "name": "decidedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "decidedAt",
+                "hideInForm": false
+              }
+            ]
+          },
+          "IssueOrder": {
+            "required": [
+              "id",
+              "content",
+              "approvedBy",
+              "issuedAt"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "hideInForm": true
+              },
+              {
+                "name": "content",
+                "hideInForm": false
+              },
+              {
+                "name": "approvedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "issuedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "distributionList",
+                "hideInForm": false
+              }
+            ]
+          },
+          "LogWarDiaryEntry": {
+            "required": [
+              "loggedAt",
+              "loggedBy",
+              "entryText"
+            ],
+            "fields": [
+              {
+                "name": "loggedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "loggedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "eventTimeNumber",
+                "hideInForm": false
+              },
+              {
+                "name": "category",
+                "hideInForm": false
+              },
+              {
+                "name": "entryText",
+                "hideInForm": false
+              }
+            ]
+          }
+        },
+        "queries": {
+          "GetOrder": {
+            "description": "The decided order awaiting approval and issue.",
+            "entity": {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/Order"
+            },
+            "fields": [
+              {
+                "name": "id",
+                "isFilter": true
+              },
+              {
+                "name": "orderType"
+              },
+              {
+                "name": "decision"
+              },
+              {
+                "name": "decidedBy"
+              },
+              {
+                "name": "content"
+              }
+            ]
+          },
+          "GetOperationsDay": {
+            "description": "Current operations-day status and standing tasks, used to brief the incoming watch.",
+            "entity": {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/schemas/entities/OperationsDay"
+            },
+            "fields": [
+              {
+                "name": "id",
+                "isFilter": true
+              },
+              {
+                "name": "dayDate"
+              },
+              {
+                "name": "status"
+              },
+              {
+                "name": "startsAt"
+              },
+              {
+                "name": "endsAt"
+              }
+            ]
+          }
+        },
+        "entities": {
+          "OperationsDay": {
+            "description": "The recurring battle-rhythm cycle (dygn) for Wing Ops; opened on schedule at shift start and closed at day end, framing the daily reporting tick.",
+            "required": [
+              "id",
+              "dayDate",
+              "startsAt"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the operations day",
+                "exampleData": [
+                  "od-2026-0608",
+                  "od-2026-0609",
+                  "od-2026-0610"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "dayDate",
+                "description": "Calendar date of the operations day",
+                "exampleData": [
+                  "2026-06-08",
+                  "2026-06-09",
+                  "2026-06-10"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "startsAt",
+                "description": "Scheduled start of the day cycle (shift start)",
+                "exampleData": [
+                  "080500ZJUN26",
+                  "090500ZJUN26",
+                  "100500ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "endsAt",
+                "description": "Scheduled end of the day cycle",
+                "exampleData": [
+                  "090500ZJUN26",
+                  "100500ZJUN26",
+                  "110500ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "battleRhythmTemplate",
+                "description": "Battle-rhythm template applied (per stabsberedskap)",
+                "exampleData": [
+                  "GENOMFOR",
+                  "ETABLERA",
+                  "AVVECKLA"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "status",
+                "description": "Lifecycle status of the operations day",
+                "exampleData": [
+                  "open",
+                  "closed",
+                  "scheduled"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "closedAt",
+                "description": "Time the day was closed",
+                "exampleData": [
+                  "090500ZJUN26",
+                  "100500ZJUN26",
+                  "110500ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "dailyReportingComplete",
+                "description": "Whether all daily reporting for the period is complete",
+                "exampleData": [
+                  "true",
+                  "false",
+                  "true"
+                ],
+                "dataType": "boolean"
+              },
+              {
+                "name": "nextDayScheduledAt",
+                "description": "Scheduled start of the next day's cycle",
+                "exampleData": [
+                  "090500ZJUN26",
+                  "100500ZJUN26",
+                  "110500ZJUN26"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "WatchHandover": {
+            "description": "Skiftavlosning between the day watch and night watch (Jour VB) in Wing Ops, transferring current status and standing tasks.",
+            "required": [
+              "id",
+              "handoverType",
+              "outgoingWatchkeeper",
+              "incomingWatchkeeper",
+              "handoverTime"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the watch handover",
+                "exampleData": [
+                  "wh-2026-0608-day",
+                  "wh-2026-0608-night",
+                  "wh-2026-0609-day"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "handoverType",
+                "description": "Direction of handover",
+                "exampleData": [
+                  "night-to-day",
+                  "day-to-night",
+                  "night-to-day"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "outgoingWatchkeeper",
+                "description": "Outgoing duty officer (VB)",
+                "exampleData": [
+                  "Jour VB Lind",
+                  "VB Berg",
+                  "Jour VB Ek"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "incomingWatchkeeper",
+                "description": "Incoming duty officer (VB)",
+                "exampleData": [
+                  "VB Berg",
+                  "Jour VB Ek",
+                  "VB Lind"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "handoverTime",
+                "description": "Time of the handover",
+                "exampleData": [
+                  "080500ZJUN26",
+                  "081500ZJUN26",
+                  "090500ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "outstandingMatters",
+                "description": "Standing tasks and open matters briefed at handover",
+                "exampleData": [
+                  "UAS watch on platta 2",
+                  "fuel resupply pending",
+                  "none"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "CommanderUpdate": {
+            "description": "Chefens uppdatering: the once-per-day briefing in which the Chief of Staff updates the Wing Commander on the situation.",
+            "required": [
+              "id",
+              "briefedAt",
+              "briefedBy",
+              "situationSummary"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the commander update",
+                "exampleData": [
+                  "cu-2026-0608",
+                  "cu-2026-0609",
+                  "cu-2026-0610"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "briefedAt",
+                "description": "Time of the commander update",
+                "exampleData": [
+                  "080900ZJUN26",
+                  "090900ZJUN26",
+                  "100900ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "briefedBy",
+                "description": "Who delivered the update (SC)",
+                "exampleData": [
+                  "SC",
+                  "Stf SC",
+                  "C A3"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "situationSummary",
+                "description": "Summary briefed to the commander",
+                "exampleData": [
+                  "HBS nominal",
+                  "one base limited by fuel",
+                  "elevated UAS activity"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "CoordinationMeeting": {
+            "description": "SC koordineringsmote held with department chiefs to align the situational picture and resource priorities.",
+            "required": [
+              "id",
+              "heldAt"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the coordination meeting",
+                "exampleData": [
+                  "cm-2026-0608-am",
+                  "cm-2026-0608-pm",
+                  "cm-2026-0609-am"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "heldAt",
+                "description": "Time the meeting was held",
+                "exampleData": [
+                  "081000ZJUN26",
+                  "091000ZJUN26",
+                  "101600ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "attendees",
+                "description": "Department chiefs present",
+                "exampleData": [
+                  "A1-A8",
+                  "all dept chiefs",
+                  "A2 A3 A4 A6"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "prioritiesAgreed",
+                "description": "Common picture and priorities agreed",
+                "exampleData": [
+                  "prioritise C-UAS",
+                  "fuel to JOK",
+                  "no change"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "resourceDecisions",
+                "description": "Resource allocation decisions",
+                "exampleData": [
+                  "reallocate MP to H81",
+                  "add fire team night",
+                  "none"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "Order": {
+            "description": "A wing order (FljO) or fragmentary order (FragO) decided by the Wing Commander and issued by the Chief of Staff to subordinate units over TAKTIL.",
+            "required": [
+              "id",
+              "orderType",
+              "decision",
+              "decidedBy"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the order",
+                "exampleData": [
+                  "ord-FljO-003",
+                  "ord-FragO-012",
+                  "ord-FragO-013"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "orderType",
+                "description": "Order type (FljO or FragO)",
+                "exampleData": [
+                  "FljO",
+                  "FragO",
+                  "FragO"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "decision",
+                "description": "The commander's decision the order implements",
+                "exampleData": [
+                  "reinforce C-UAS",
+                  "shift fuel to JOK",
+                  "tighten access control"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "decidedBy",
+                "description": "Who made the decision (C F 21)",
+                "exampleData": [
+                  "C F 21",
+                  "Stf C F 21",
+                  "C F 21"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "decidedAt",
+                "description": "Time of decision",
+                "exampleData": [
+                  "081230ZJUN26",
+                  "091230ZJUN26",
+                  "101230ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "content",
+                "description": "Order content/body",
+                "exampleData": [
+                  "see order body",
+                  "tasks to DUC",
+                  "FragO text"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "approvedBy",
+                "description": "Who approved/established the order (SC)",
+                "exampleData": [
+                  "SC",
+                  "lowest A-chef",
+                  "C A3"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "issuedAt",
+                "description": "Time the order was issued",
+                "exampleData": [
+                  "081300ZJUN26",
+                  "091300ZJUN26",
+                  "101300ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "distributionList",
+                "description": "Recipients of the order",
+                "exampleData": [
+                  "all DUC",
+                  "Fbasbat",
+                  "flying units"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "status",
+                "description": "Lifecycle status",
+                "exampleData": [
+                  "decided",
+                  "issued",
+                  "superseded"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "WarDiaryEntry": {
+            "description": "Krigsdagbok entry kept by A3 in TAKTIL, recording battle-staff decisions and events outside the standing order for traceability.",
+            "required": [
+              "id",
+              "loggedAt",
+              "loggedBy",
+              "entryText"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the war diary entry",
+                "exampleData": [
+                  "wd-2026-0608-001",
+                  "wd-2026-0608-002",
+                  "wd-2026-0609-001"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "loggedAt",
+                "description": "Time the entry was logged",
+                "exampleData": [
+                  "080746ZJUN26",
+                  "091006ZJUN26",
+                  "101151ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "loggedBy",
+                "description": "Who logged the entry (A3)",
+                "exampleData": [
+                  "A3",
+                  "VB",
+                  "WOC"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "eventTimeNumber",
+                "description": "Time number of the event being recorded",
+                "exampleData": [
+                  "080712ZJUN26",
+                  "090930ZJUN26",
+                  "101115ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "category",
+                "description": "Category of entry (decision, incident, out-of-order event)",
+                "exampleData": [
+                  "incident",
+                  "decision",
+                  "event"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "entryText",
+                "description": "The log text",
+                "exampleData": [
+                  "UAS over platta 2, alarm force dispatched",
+                  "C F 21 decided to reinforce C-UAS",
+                  "fuel resupply diverted to JOK"
+                ],
+                "dataType": "string"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "IncidentAndForceProtection": {
+      "domainEvents": {
+        "IncidentReported": {
+          "event": "Incident Reported",
+          "role": "Subordinate Unit",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/DutyOfficerHandedOver"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/commands/ReportIncident"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/Incident"
+          },
+          "acceptanceCriteria": [
+            "Given an observed event on or around the base, When a unit reports it immediately on the incident channel, Then Wing Ops registers the incident using the relevant template (8S event report, METHANE for mass casualty, or the UAS report)",
+            "Given a UAS observation, When reported per CC-7, Then the C-UAS 5C handling (Confirm, Clear, Cordon, Communicate, Control) is initiated"
+          ]
+        },
+        "SupportResourcesAllocated": {
+          "event": "Support Resources Allocated",
+          "role": "Force Protection Ops",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/domainEvents/IncidentReported"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/commands/AllocateSupportResources"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/SupportTasking"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/queries/GetIncident",
+              "description": "Get Incident"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given an incoming incident report, When FP Ops assesses it, Then support resources are allocated even beyond the ordered standby alarm forces (fire, medical, defence) and the appropriate command net (MF, SJV, R3 or TP) is assigned"
+          ]
+        },
+        "AlarmForceDispatched": {
+          "event": "Alarm Force Dispatched",
+          "role": "Force Protection Ops",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/domainEvents/SupportResourcesAllocated"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/commands/DispatchAlarmForce"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/SupportTasking"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/queries/GetSupportTasking",
+              "description": "Get Support Tasking"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given allocated support resources, When FP Ops dispatches the alarm force, Then it responds on the assigned command net"
+          ]
+        },
+        "IncidentResolved": {
+          "event": "Incident Resolved",
+          "role": "Wing Ops Duty Officer",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/domainEvents/AlarmForceDispatched"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/commands/ResolveIncident"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/Incident"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/queries/GetIncident",
+              "description": "Get Incident"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given a dispatched response, When the incident is handled, Then it is resolved and the outcome is confirmed to Wing Ops"
+          ]
+        }
+      },
+      "schemas": {
+        "commands": {
+          "ReportIncident": {
+            "required": [
+              "incidentType",
+              "reportedAt",
+              "location",
+              "reportingUnit"
+            ],
+            "fields": [
+              {
+                "name": "incidentType",
+                "hideInForm": false
+              },
+              {
+                "name": "reportedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "location",
+                "hideInForm": false
+              },
+              {
+                "name": "strength",
+                "hideInForm": false
+              },
+              {
+                "name": "appearance",
+                "hideInForm": false
+              },
+              {
+                "name": "activity",
+                "hideInForm": false
+              },
+              {
+                "name": "markings",
+                "hideInForm": false
+              },
+              {
+                "name": "reportingUnit",
+                "hideInForm": false
+              },
+              {
+                "name": "description",
+                "hideInForm": false
+              }
+            ]
+          },
+          "ResolveIncident": {
+            "required": [
+              "id",
+              "resolvedAt",
+              "resolution",
+              "resolvedBy"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "hideInForm": true
+              },
+              {
+                "name": "resolvedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "resolution",
+                "hideInForm": false
+              },
+              {
+                "name": "resolvedBy",
+                "hideInForm": false
+              }
+            ]
+          },
+          "AllocateSupportResources": {
+            "required": [
+              "commandNet",
+              "allocatedBy",
+              "allocatedAt"
+            ],
+            "fields": [
+              {
+                "name": "incident",
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/Incident"
+                },
+                "hideInForm": false
+              },
+              {
+                "name": "commandNet",
+                "hideInForm": false
+              },
+              {
+                "name": "allocatedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "allocatedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "allocatedResources",
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/valueObjects/AllocatedResource"
+                },
+                "array": true,
+                "fields": [
+                  {
+                    "name": "resourceType"
+                  },
+                  {
+                    "name": "callsign"
+                  },
+                  {
+                    "name": "quantity"
+                  }
+                ],
+                "hideInForm": false
+              }
+            ]
+          },
+          "DispatchAlarmForce": {
+            "required": [
+              "id",
+              "dispatchedAt",
+              "dispatchedBy",
+              "alarmForce"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "hideInForm": true
+              },
+              {
+                "name": "dispatchedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "dispatchedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "alarmForce",
+                "hideInForm": false
+              }
+            ]
+          }
+        },
+        "queries": {
+          "GetIncident": {
+            "description": "Reported incident details used by FP Ops to allocate resources and by the duty officer to resolve it.",
+            "entity": {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/Incident"
+            },
+            "fields": [
+              {
+                "name": "id",
+                "isFilter": true
+              },
+              {
+                "name": "incidentType"
+              },
+              {
+                "name": "location"
+              },
+              {
+                "name": "reportedAt"
+              },
+              {
+                "name": "reportingUnit"
+              },
+              {
+                "name": "strength"
+              },
+              {
+                "name": "appearance"
+              },
+              {
+                "name": "activity"
+              },
+              {
+                "name": "description"
+              }
+            ]
+          },
+          "GetSupportTasking": {
+            "description": "The support tasking with allocated resources, used to dispatch the alarm force.",
+            "entity": {
+              "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/SupportTasking"
+            },
+            "fields": [
+              {
+                "name": "id",
+                "isFilter": true
+              },
+              {
+                "name": "commandNet"
+              },
+              {
+                "name": "allocatedBy"
+              },
+              {
+                "name": "allocatedResources",
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/valueObjects/AllocatedResource"
+                },
+                "fields": [
+                  {
+                    "name": "resourceType"
+                  },
+                  {
+                    "name": "callsign"
+                  },
+                  {
+                    "name": "quantity"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "entities": {
+          "Incident": {
+            "description": "An event-driven incident reported on the incident channel (8S event report, METHANE mass-casualty report, or UAS report) and tracked by Wing Ops to resolution.",
+            "required": [
+              "id",
+              "incidentType",
+              "reportedAt",
+              "location",
+              "reportingUnit"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the incident",
+                "exampleData": [
+                  "inc-2026-0608-001",
+                  "inc-2026-0608-002",
+                  "inc-2026-0609-001"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "incidentType",
+                "description": "Type of incident and report template used",
+                "exampleData": [
+                  "8S",
+                  "METHANE",
+                  "UAS"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "reportedAt",
+                "description": "Time of detection/report (Stund)",
+                "exampleData": [
+                  "080712ZJUN26",
+                  "090930ZJUN26",
+                  "101115ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "location",
+                "description": "Location of the incident (Stalle)",
+                "exampleData": [
+                  "perimeter sector 3",
+                  "platta 2",
+                  "JOK"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "strength",
+                "description": "Strength/number observed (Styrka)",
+                "exampleData": [
+                  "1 UAS",
+                  "2 persons",
+                  "unknown"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "appearance",
+                "description": "Appearance (Slag) - e.g. UAS WEFT/REFT",
+                "exampleData": [
+                  "fixed-wing",
+                  "multicopter quad",
+                  "delta-wing"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "activity",
+                "description": "Observed activity/flight pattern (Sysselsattning)",
+                "exampleData": [
+                  "circling overhead",
+                  "stationary",
+                  "passed over"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "markings",
+                "description": "Markings/symbols (Symbol)",
+                "exampleData": [
+                  "none",
+                  "red blinking lights",
+                  "civilian"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "reportingUnit",
+                "description": "Reporting unit and person (Sagesman)",
+                "exampleData": [
+                  "sentry KAX",
+                  "3.komp",
+                  "MP patrol"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "description",
+                "description": "Event description",
+                "exampleData": [
+                  "UAS observed over platta",
+                  "casualty at VCP",
+                  "suspicious vehicle"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "status",
+                "description": "Lifecycle status",
+                "exampleData": [
+                  "reported",
+                  "resolved",
+                  "escalated"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "resolvedAt",
+                "description": "Time the incident was resolved",
+                "exampleData": [
+                  "080745ZJUN26",
+                  "091005ZJUN26",
+                  "101150ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "resolution",
+                "description": "How the incident was resolved",
+                "exampleData": [
+                  "UAS departed, no loss",
+                  "casualty evacuated",
+                  "handed to civil police"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "resolvedBy",
+                "description": "Who confirmed resolution",
+                "exampleData": [
+                  "VB",
+                  "duty officer",
+                  "WOC"
+                ],
+                "dataType": "string"
+              }
+            ]
+          },
+          "SupportTasking": {
+            "description": "Allocation and dispatch of support resources (fire, medical, defence) by FP Ops in response to an incident, on the assigned command net.",
+            "required": [
+              "id",
+              "commandNet",
+              "allocatedBy"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the support tasking",
+                "exampleData": [
+                  "st-2026-0608-001",
+                  "st-2026-0608-002",
+                  "st-2026-0609-001"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "incident",
+                "description": "The incident this tasking responds to",
+                "exampleData": [
+                  "Object",
+                  "Object",
+                  "Object"
+                ],
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/entities/Incident"
+                },
+                "dataType": "object"
+              },
+              {
+                "name": "commandNet",
+                "description": "Assigned command net (MF/SJV/R3/TP-ledning)",
+                "exampleData": [
+                  "MF-ledning",
+                  "SJV-ledning",
+                  "R3-ledning"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "allocatedBy",
+                "description": "Who allocated the resources",
+                "exampleData": [
+                  "FP Ops",
+                  "FP Ops",
+                  "Base Ops"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "allocatedAt",
+                "description": "Time of allocation",
+                "exampleData": [
+                  "080715ZJUN26",
+                  "090935ZJUN26",
+                  "101118ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "allocatedResources",
+                "description": "Support resources allocated",
+                "array": true,
+                "exampleData": [
+                  "Object",
+                  "Object",
+                  "Object"
+                ],
+                "relatedEntity": {
+                  "$ref": "#/externalBoundedContexts/IncidentAndForceProtection/schemas/valueObjects/AllocatedResource"
+                },
+                "dataType": "object"
+              },
+              {
+                "name": "dispatchedAt",
+                "description": "Time the alarm force was dispatched",
+                "exampleData": [
+                  "080718ZJUN26",
+                  "090938ZJUN26",
+                  "101120ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "dispatchedBy",
+                "description": "Who dispatched the alarm force",
+                "exampleData": [
+                  "FP Ops",
+                  "Base Ops",
+                  "VB"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "alarmForce",
+                "description": "The alarm force dispatched",
+                "exampleData": [
+                  "fire team",
+                  "medical team",
+                  "defence squad"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "status",
+                "description": "Lifecycle status",
+                "exampleData": [
+                  "allocated",
+                  "dispatched",
+                  "stood down"
+                ],
+                "dataType": "string"
+              }
+            ]
+          }
+        },
+        "valueObjects": {
+          "AllocatedResource": {
+            "description": "Value object for a support resource allocated to an incident (e.g. fire, medical or defence element) with its callsign and quantity.",
+            "fields": [
+              {
+                "name": "resourceType",
+                "description": "Type of resource (fire, medical, defence)",
+                "exampleData": [
+                  "fire",
+                  "medical",
+                  "defence"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "callsign",
+                "description": "Callsign of the dispatched element",
+                "exampleData": [
+                  "BRAND 1",
+                  "SJV 2",
+                  "MF 3"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "quantity",
+                "description": "Number of elements",
+                "exampleData": [
+                  "1",
+                  "2",
+                  "1"
+                ],
+                "dataType": "number"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "AirTasking": {
+      "domainEvents": {
+        "AirTaskingOrderReceived": {
+          "event": "Air Tasking Order Received",
+          "role": "Air Tasking Cell",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/CommandAndBattleRhythm/domainEvents/DutyOfficerHandedOver"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/AirTasking/schemas/commands/ReceiveAirTaskingOrder"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/AirTasking/schemas/entities/AirTaskingOrder"
+          },
+          "acceptanceCriteria": [
+            "Given CAOC Bodö publishes the ATO/ACO/SPINS for the day, When it arrives over NS WAN, Then A3 WOC registers the air tasking order in Wing Ops"
+          ]
+        },
+        "AirTaskingOrderDistributed": {
+          "event": "Air Tasking Order Distributed",
+          "role": "Air Tasking Cell",
+          "follows": [
+            {
+              "$ref": "#/externalBoundedContexts/AirTasking/domainEvents/AirTaskingOrderReceived"
+            }
+          ],
+          "command": {
+            "$ref": "#/externalBoundedContexts/AirTasking/schemas/commands/DistributeAirTaskingOrder"
+          },
+          "aggregateRoot": {
+            "$ref": "#/externalBoundedContexts/AirTasking/schemas/entities/AirTaskingOrder"
+          },
+          "readModels": [
+            {
+              "$ref": "#/externalBoundedContexts/AirTasking/schemas/queries/GetAirTaskingOrder",
+              "description": "Get Air Tasking Order"
+            }
+          ],
+          "acceptanceCriteria": [
+            "Given a registered air tasking order, When STEX distributes it, Then flying units and affected DUC receive their tasking"
+          ]
+        }
+      },
+      "schemas": {
+        "commands": {
+          "ReceiveAirTaskingOrder": {
+            "required": [
+              "atoDate",
+              "source",
+              "receivedVia",
+              "receivedAt"
+            ],
+            "fields": [
+              {
+                "name": "atoDate",
+                "hideInForm": false
+              },
+              {
+                "name": "source",
+                "hideInForm": false
+              },
+              {
+                "name": "receivedVia",
+                "hideInForm": false
+              },
+              {
+                "name": "receivedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "validFrom",
+                "hideInForm": false
+              },
+              {
+                "name": "validTo",
+                "hideInForm": false
+              }
+            ]
+          },
+          "DistributeAirTaskingOrder": {
+            "required": [
+              "id",
+              "distributedAt",
+              "distributedBy",
+              "distributionList"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "hideInForm": true
+              },
+              {
+                "name": "distributedAt",
+                "hideInForm": false
+              },
+              {
+                "name": "distributedBy",
+                "hideInForm": false
+              },
+              {
+                "name": "distributionList",
+                "hideInForm": false
+              }
+            ]
+          }
+        },
+        "queries": {
+          "GetAirTaskingOrder": {
+            "description": "The received air tasking order to be distributed to flying units.",
+            "entity": {
+              "$ref": "#/externalBoundedContexts/AirTasking/schemas/entities/AirTaskingOrder"
+            },
+            "fields": [
+              {
+                "name": "id",
+                "isFilter": true
+              },
+              {
+                "name": "atoDate"
+              },
+              {
+                "name": "source"
+              },
+              {
+                "name": "validFrom"
+              },
+              {
+                "name": "validTo"
+              }
+            ]
+          }
+        },
+        "entities": {
+          "AirTaskingOrder": {
+            "description": "The ATO/ACO/SPINS received from CAOC Bodo over NS WAN and distributed to flying units; drives the day's flight operations.",
+            "required": [
+              "id",
+              "atoDate",
+              "source",
+              "receivedVia",
+              "receivedAt"
+            ],
+            "fields": [
+              {
+                "name": "id",
+                "description": "Unique identifier of the air tasking order",
+                "exampleData": [
+                  "ato-2026-0608",
+                  "ato-2026-0609",
+                  "ato-2026-0610"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "atoDate",
+                "description": "Date the ATO is valid for",
+                "exampleData": [
+                  "08JUN26",
+                  "09JUN26",
+                  "10JUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "source",
+                "description": "Issuing authority",
+                "exampleData": [
+                  "CAOC Bodo",
+                  "CAOC Bodo",
+                  "CAOC Bodo"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "receivedVia",
+                "description": "Channel the order arrived over",
+                "exampleData": [
+                  "NS WAN",
+                  "NS WAN",
+                  "AIRCOM portal"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "receivedAt",
+                "description": "Time the order was received",
+                "exampleData": [
+                  "072200ZJUN26",
+                  "082200ZJUN26",
+                  "092200ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "validFrom",
+                "description": "Start of validity",
+                "exampleData": [
+                  "080000ZJUN26",
+                  "090000ZJUN26",
+                  "100000ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "validTo",
+                "description": "End of validity",
+                "exampleData": [
+                  "082359ZJUN26",
+                  "092359ZJUN26",
+                  "102359ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "distributedAt",
+                "description": "Time the order was distributed",
+                "exampleData": [
+                  "080430ZJUN26",
+                  "090430ZJUN26",
+                  "100430ZJUN26"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "distributedBy",
+                "description": "Who distributed it (via STEX)",
+                "exampleData": [
+                  "A3 WOC",
+                  "STEX",
+                  "A3 WOC"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "distributionList",
+                "description": "Recipients",
+                "exampleData": [
+                  "72/211/212 sfdiv",
+                  "flying units",
+                  "DUC"
+                ],
+                "dataType": "string"
+              },
+              {
+                "name": "status",
+                "description": "Lifecycle status",
+                "exampleData": [
+                  "received",
+                  "distributed",
+                  "superseded"
+                ],
+                "dataType": "string"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "groups": [],
+  "releases": []
 }

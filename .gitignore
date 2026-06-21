@@ -7,3 +7,18 @@ prisma/dev.db*
 .DS_Store
 web/dist/
 web/node_modules/
+
+# Runtime model version history (created by the in-app "Fetch model" button)
+.qlerify/history/
+# Optional per-machine model source URL override
+.qlerify/model-source.json
+
+# AI-authored adapter bodies (Part 2.3) — generated, not source-controlled
+src/packs/*/generated/
+# Adapter sidecars (credentials KEYs + config; per-machine)
+.qlerify/adapters/
+# Per-organization content-addressed blob store (ontology version bodies).
+# Generated/regenerable; the relational metadata is the system of record.
+.qlerify/orgs/
+# Seeded superuser credentials (printed for the operator; never commit).
+.qlerify/superadmin.local.txt

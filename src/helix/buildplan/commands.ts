@@ -126,7 +126,7 @@ export interface LockBuildPlanArgs {
 }
 
 export async function lockBuildPlan(args: LockBuildPlanArgs, role: Role) {
-  assertRole(role, "Configuration Manager");
+  assertRole(role, "Planner");
   requireString("id", args.id);
 
   const plan = await prisma.buildPlan.findUnique({ where: { id: args.id } });

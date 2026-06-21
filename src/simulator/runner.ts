@@ -141,7 +141,7 @@ export async function runHappyPath(opts: RunOptions = {}): Promise<{ events: num
   }
 
   // 17 — Build Plan Locked
-  await lockBuildPlan({ id: plan.id }, "Configuration Manager");
+  await lockBuildPlan({ id: plan.id }, "Planner");
 
   // 18 — Build Released To Site
   await releaseBuildToSite({ id: build.id, siteId: "site-stockholm" }, "Planner");

@@ -4,7 +4,10 @@
 
 import { prisma } from "../db.js";
 import { wireDerivedEvents } from "../events/derived.js";
-import { setBusinessClock, businessTimeForStep } from "../events/clock.js";
+import { setBusinessClock } from "../events/clock.js";
+import { provenanceFor } from "../twin/provenance.js";
+import { getOntology } from "../ontology/model.js";
+import { DomainError } from "../errors.js";
 import { createDemand } from "../helix/demand/commands.js";
 import { defineBuildQuantity, updateBuildPlan, lockBuildPlan } from "../helix/buildplan/commands.js";
 import {
@@ -28,6 +31,22 @@ import {
 } from "../logistics/shipment/commands.js";
 
 import { EVENTS, type EventDef } from "../events/registry.js";
+
+// Ericsson demo business clock. The hand-written 28-step storyline has curated
+// per-step durations (supplier ETA slip = +14d, transit = +4d, …) so the demo
+// timeline reads as ~9 weeks of compressed business time. This is specific to
+// the Ericsson reference flow and lives with it; the model-generic path derives
+// businessAt from the event's own data instead (see events/bus.ts).
+const SIM_BASE_MS = new Date("2026-04-01T08:00:00Z").getTime();
+const STEP_DURATIONS_HOURS: ReadonlyArray<number> = [
+  0, 24, 120, 72, 24, 24, 48, 72, 336, 0, 120, 72, 48, 24, 24, 24, 24, 24, 48,
+  120, 0, 24, 72, 48, 24, 24, 24, 96,
+];
+function businessTimeForStep(stepIdx: number): Date {
+  let hours = 0;
+  for (let i = 0; i <= stepIdx && i < STEP_DURATIONS_HOURS.length; i++) hours += STEP_DURATIONS_HOURS[i] ?? 0;
+  return new Date(SIM_BASE_MS + hours * 3_600_000);
+}
 
 export interface StepResult {
   index: number;
@@ -66,7 +85,24 @@ const DEFAULT_DEMAND_TEMPLATES = [
   { customerId: "cust-15", productName: "Radio Unit X", qty: 2, requestedWeek: "2026-W26" },
 ];
 
+// The step-through dashboard simulator is hardcoded to the Ericsson demo
+// workflow (its 28 step bodies call Ericsson commands and emit Ericsson events).
+// When a different model is loaded, those events aren't in the registry, so
+// firing a step would 500 with a cryptic "unknown event ref". Guard with a clear,
+// actionable message instead. (Generalizing the simulator to drive ANY model via
+// the generic base command is a separate, larger piece — see ARCHITECTURE.md.)
+function assertSimulatorModel(): void {
+  if (!getOntology().eventByKey("HardwareDemandCreated")) {
+    throw new DomainError(
+      `The step-through simulator is wired to the Ericsson demo workflow, but the loaded model is "${getOntology().title}". ` +
+        `The dashboard's "+ New" and step buttons can't drive a different model yet. ` +
+        `The model-driven process graph (/api/ontology) does reflect your model; to run a model end-to-end, apply it with the swap to materialise its tables + commands, then drive them via the command API.`,
+    );
+  }
+}
+
 export async function newDemand(): Promise<{ id: string; template: typeof DEFAULT_DEMAND_TEMPLATES[number] }> {
+  assertSimulatorModel();
   wireDerivedEvents();
   const existing = await prisma.demand.count();
   const tmpl = DEFAULT_DEMAND_TEMPLATES[existing % DEFAULT_DEMAND_TEMPLATES.length]!;
@@ -209,8 +245,8 @@ async function runStep(index: number, demandId: string, withDisruptions: boolean
         where: { demandId, status: "DRAFT" },
         orderBy: { versionNo: "desc" },
       });
-      await lockBuildPlan({ id: plan.id }, "Configuration Manager");
-      return "🔒 CM locks the build plan — no further changes to build_demand";
+      await lockBuildPlan({ id: plan.id }, "Planner");
+      return "🔒 Planner locks the build plan — no further changes to build_demand";
     }
     case 17: {
       const b = await prisma.build.findFirstOrThrow({
@@ -323,6 +359,7 @@ export async function currentStepIndex(demandId: string): Promise<number> {
 }
 
 export async function nextStep(demandId: string, withDisruptions = true): Promise<StepResult> {
+  assertSimulatorModel();
   wireDerivedEvents();
   const idx = await currentStepIndex(demandId);
   if (idx >= EVENTS.length) {
@@ -350,6 +387,7 @@ export async function nextStep(demandId: string, withDisruptions = true): Promis
           role: event.role,
           payload: JSON.stringify({ skipped: true, caption }),
           businessAt,
+          provenance: await provenanceFor(event.boundedContext),
         },
       });
     }

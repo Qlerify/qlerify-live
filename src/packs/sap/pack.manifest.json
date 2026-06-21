@@ -1,0 +1,6 @@
+{
+  "name": "SAP",
+  "entry": "index.js",
+  "description": "SAP purchase-order ingestion. Starts simulated (zero credentials); the wizard climbs simulated → recorded → live as a real OData connector is wired.",
+  "sourceSystem": "SAP S/4HANA — Purchasing (OData)"
+}

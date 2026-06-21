@@ -1,62 +1,108 @@
-// Canonical registry of all 28 domain events from the Qlerify workflow.
-// Each entry encodes: name (human-readable), ref ($ref path), bounded context,
-// aggregate root, and the role/lane that emits it. Used by the event bus,
-// the simulator runner, and the demo UI to render the timeline.
+// Canonical registry of the model's domain events, used by the event bus, the
+// simulator runner, and the demo UI to render the timeline.
+//
+// Every fact here is sourced from the live model: the event identity, role,
+// bounded context and aggregate root come from the Qlerify ontology
+// (.qlerify/workflow.json); the linear *order*, 5-act *phase* grouping, and
+// *derived* flag come from the overlay sidecar (.qlerify/overlay.json), merged
+// into the ontology by src/ontology/model.ts. Nothing is hardcoded to a specific
+// domain anymore — swap the model + overlay and EVENTS reconfigures itself.
+// A conformance test locks the linkage: tests/ontology/conformance.test.ts.
 
 import type { Role } from "../auth.js";
+import { getOntology, onOntologyReload, ontologyCacheKey } from "../ontology/model.js";
 
 export interface EventDef {
   name: string;
   ref: string;
-  boundedContext: "Helix" | "PRIM" | "SAP" | "ESTER" | "Compass" | "Test" | "Logistics";
+  boundedContext: string;
   aggregateRoot: string;
   role: Role;
-  phase: 1 | 2 | 3 | 4 | 5;
+  phase: number;
   derived?: boolean;
+  /** Refs of the events that must occur before this one (the `follows` DAG
+   * edges). Carried through so the UI can lay the workflow out as branching
+   * lanes instead of a single flattened line. */
+  predecessors: string[];
 }
 
-export const EVENTS: ReadonlyArray<EventDef> = [
-  // Phase 1 — Demand & Product Structure
-  { name: "Hardware Demand Created",      ref: "#/domainEvents/HardwareDemandCreated",      boundedContext: "Helix",  aggregateRoot: "Demand",             role: "Product Manager",       phase: 1 },
-  { name: "Project Created",              ref: "#/domainEvents/ProjectCreated",             boundedContext: "PRIM",   aggregateRoot: "Project",            role: "Product Manager",       phase: 1 },
-  { name: "BOM Defined",                  ref: "#/domainEvents/BOMDefined",                 boundedContext: "PRIM",   aggregateRoot: "Project",            role: "Designer",              phase: 1 },
-  { name: "BOM Frozen At DS1",            ref: "#/domainEvents/BOMFrozenAtDS1",             boundedContext: "PRIM",   aggregateRoot: "Project",            role: "Configuration Manager", phase: 1 },
-  { name: "Build Quantity Defined",       ref: "#/domainEvents/BuildQuantityDefined",       boundedContext: "Helix",  aggregateRoot: "BuildPlan",          role: "Planner",               phase: 1 },
+// Build the ordered event list from the model: linearOrder() honors the
+// overlay's `order` where present and falls back to topological order, so a
+// model with no overlay still yields a sensible (DAG-respecting) sequence.
+function buildEvents(): EventDef[] {
+  const o = getOntology();
+  return o.linearOrder().map((key) => {
+    const e = o.eventByKey(key)!;
+    return {
+      name: e.name,
+      ref: e.ref,
+      boundedContext: e.boundedContext,
+      aggregateRoot: e.aggregateRoot,
+      role: e.role,
+      phase: e.phase ?? 1,
+      // Predecessor keys → canonical refs, so they match the `ref` of the
+      // events they point at (same scheme model.ts uses to mint each ref).
+      predecessors: e.predecessors.map((k) => `#/domainEvents/${k}`),
+      ...(e.derived ? { derived: true as const } : {}),
+    };
+  });
+}
 
-  // Phase 2 — Supply & Material Readiness
-  { name: "Material Demand Specified",    ref: "#/domainEvents/MaterialDemandSpecified",    boundedContext: "Helix",  aggregateRoot: "Build",              role: "Supply Planner",        phase: 2 },
-  { name: "Material Ordered",             ref: "#/domainEvents/MaterialOrdered",            boundedContext: "SAP",    aggregateRoot: "PurchaseOrder",      role: "Buyer",                 phase: 2 },
-  { name: "Supplier Confirmed Order With ETA", ref: "#/domainEvents/SupplierConfirmedOrderWithETA", boundedContext: "SAP", aggregateRoot: "PurchaseOrder", role: "Supplier",            phase: 2 },
-  { name: "Material ETA Changed",         ref: "#/domainEvents/MaterialETAChanged",         boundedContext: "SAP",    aggregateRoot: "PurchaseOrder",      role: "Supplier",              phase: 2 },
-  { name: "Material Shortage Identified", ref: "#/domainEvents/MaterialShortageIdentified", boundedContext: "Helix",  aggregateRoot: "Build",              role: "Automation",            phase: 2, derived: true },
+// `let` + reassignment makes this an ESM live binding: importers always see the
+// latest array, so a hot-reload of the model (onOntologyReload) is reflected
+// everywhere EVENTS is used without any consumer changes.
+export let EVENTS: ReadonlyArray<EventDef> = [];
 
-  // Phase 3 — Build Planning & Engineering Gates
-  { name: "Engineering Change Raised",    ref: "#/domainEvents/EngineeringChangeRaised",    boundedContext: "ESTER",  aggregateRoot: "EngineeringChange",  role: "Designer",              phase: 3 },
-  { name: "Engineering Change Approved",  ref: "#/domainEvents/EngineeringChangeApproved",  boundedContext: "ESTER",  aggregateRoot: "EngineeringChange",  role: "Configuration Manager", phase: 3 },
-  { name: "BOM Frozen At DS2",            ref: "#/domainEvents/BOMFrozenAtDS2",             boundedContext: "PRIM",   aggregateRoot: "Project",            role: "Configuration Manager", phase: 3 },
-  { name: "Engineering Release Approved", ref: "#/domainEvents/EngineeringReleaseApproved", boundedContext: "PRIM",   aggregateRoot: "EngineeringRelease", role: "Configuration Manager", phase: 3 },
-  { name: "Build Priority Set",           ref: "#/domainEvents/BuildPrioritySet",           boundedContext: "Helix",  aggregateRoot: "Build",              role: "Planner",               phase: 3 },
-  { name: "Build Plan Updated",           ref: "#/domainEvents/BuildPlanUpdated",           boundedContext: "Helix",  aggregateRoot: "BuildPlan",          role: "Planner",               phase: 3 },
+// If buildEvents() throws (e.g. a malformed model slipped past the loader), we
+// must NOT let that crash the process at import time — it would take the whole
+// server down before it can even report the problem. Instead we capture the
+// message here, leave EVENTS as the last good array (empty on first failure),
+// and let the frontend surface it via /sim/registry-status. registryError is a
+// live binding too, so a later hot-reload that fixes the model clears it.
+export let registryError: string | null = null;
 
-  // Phase 4 — Lock & Production Execution
-  { name: "Build Plan Locked",            ref: "#/domainEvents/BuildPlanLocked",            boundedContext: "Helix",  aggregateRoot: "BuildPlan",          role: "Configuration Manager", phase: 4 },
-  { name: "Build Released To Site",       ref: "#/domainEvents/BuildReleasedToSite",        boundedContext: "Helix",  aggregateRoot: "Build",              role: "Planner",               phase: 4 },
-  { name: "Production Line Booked",       ref: "#/domainEvents/ProductionLineBooked",       boundedContext: "Compass", aggregateRoot: "LineBooking",       role: "Production Planner",    phase: 4 },
-  { name: "Material Received At Site",    ref: "#/domainEvents/MaterialReceivedAtSite",     boundedContext: "SAP",    aggregateRoot: "PurchaseOrder",      role: "Goods Receiving",       phase: 4 },
-  { name: "Material Kit Completed",       ref: "#/domainEvents/MaterialKitCompleted",       boundedContext: "Helix",  aggregateRoot: "Build",              role: "Automation",            phase: 4, derived: true },
-  { name: "Production Started",           ref: "#/domainEvents/ProductionStarted",          boundedContext: "Helix",  aggregateRoot: "Build",              role: "Production",            phase: 4 },
+function rebuildEvents(): void {
+  try {
+    EVENTS = buildEvents();
+    registryError = null;
+  } catch (err) {
+    registryError = err instanceof Error ? err.message : String(err);
+    // Keep the previous EVENTS so consumers that were already working keep
+    // working until a corrected model is loaded.
+  }
+}
 
-  // Phase 5 — Test, Release & Delivery
-  { name: "Board Test Passed",            ref: "#/domainEvents/BoardTestPassed",            boundedContext: "Test",   aggregateRoot: "TestResult",         role: "Test Engineer",         phase: 5 },
-  { name: "First Article Inspection Passed", ref: "#/domainEvents/FirstArticleInspectionPassed", boundedContext: "Test", aggregateRoot: "TestResult",      role: "Quality Engineer",      phase: 5 },
-  { name: "Build Reached RTD",            ref: "#/domainEvents/BuildReachedRTD",            boundedContext: "Helix",  aggregateRoot: "Build",              role: "Quality Engineer",      phase: 5 },
-  { name: "Units Picked And Packed",      ref: "#/domainEvents/UnitsPickedAndPacked",       boundedContext: "Logistics", aggregateRoot: "Shipment",        role: "Warehouse",             phase: 5 },
-  { name: "Shipment Dispatched",          ref: "#/domainEvents/ShipmentDispatched",         boundedContext: "Logistics", aggregateRoot: "Shipment",        role: "Logistics",             phase: 5 },
-  { name: "Unit Received By Customer",    ref: "#/domainEvents/UnitReceivedByCustomer",     boundedContext: "Logistics", aggregateRoot: "Shipment",        role: "Customer",              phase: 5 },
-];
+rebuildEvents();
+onOntologyReload(rebuildEvents);
+
+// Per-PROJECT events. EVENTS (above) stays the SYSTEM/current-model live binding
+// for system-context consumers (chat, the legacy stepper, conformance); events()
+// resolves the ACTIVE project's events, keyed by the same content-hash cache key
+// getOntology() uses. This is what makes emit()/findEvent resolve the RIGHT model
+// when a non-system project is active.
+const eventsByKey = new Map<string, ReadonlyArray<EventDef>>();
+
+export function events(): ReadonlyArray<EventDef> {
+  const key = ontologyCacheKey();
+  const cached = eventsByKey.get(key);
+  if (cached) return cached;
+  try {
+    const evs = buildEvents();
+    eventsByKey.set(key, evs);
+    return evs;
+  } catch {
+    // Do NOT cache a failure (so a corrected model retries). The system path
+    // keeps its last-good EVENTS array; a non-system project with a bad model
+    // yields [] for this call only.
+    return key === "system" ? EVENTS : [];
+  }
+}
+
+// A system-model reload changes what the "system" key resolves to → drop the cache.
+onOntologyReload(() => eventsByKey.clear());
 
 export function findEvent(ref: string): EventDef {
-  const ev = EVENTS.find((e) => e.ref === ref);
+  const ev = events().find((e) => e.ref === ref);
   if (!ev) throw new Error(`unknown event ref: ${ref}`);
   return ev;
 }

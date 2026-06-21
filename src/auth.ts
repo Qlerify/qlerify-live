@@ -4,38 +4,21 @@
 
 import { AuthError } from "./errors.js";
 import type { FastifyRequest } from "fastify";
+import { getOntology } from "./ontology/model.js";
 
-export type Role =
-  | "Product Manager"
-  | "Designer"
-  | "Configuration Manager"
-  | "Planner"
-  | "Supply Planner"
-  | "Buyer"
-  | "Supplier"
-  | "Production Planner"
-  | "Goods Receiving"
-  | "Production"
-  | "Test Engineer"
-  | "Quality Engineer"
-  | "Warehouse"
-  | "Logistics"
-  | "Customer"
-  | "Automation";
-
-const ALL_ROLES: ReadonlyArray<Role> = [
-  "Product Manager", "Designer", "Configuration Manager", "Planner",
-  "Supply Planner", "Buyer", "Supplier", "Production Planner",
-  "Goods Receiving", "Production", "Test Engineer", "Quality Engineer",
-  "Warehouse", "Logistics", "Customer", "Automation",
-];
+// Roles are model-derived: the valid set is whatever the live ontology declares
+// (getOntology().roles), so swapping the model swaps the roles with zero code
+// change. The type is therefore an open `string` rather than a hardcoded union;
+// the runtime guard below — and the conformance test — enforce that every role
+// in play actually exists in the model.
+export type Role = string;
 
 export function roleFromRequest(req: FastifyRequest): Role {
   const headerRole = (req.headers["x-role"] || "").toString();
   const envRole = process.env.AUTH_ROLE || "";
   const candidate = headerRole || envRole;
   if (!candidate) throw new AuthError("missing x-role header");
-  if (!ALL_ROLES.includes(candidate as Role)) {
+  if (!getOntology().roles.includes(candidate)) {
     throw new AuthError(`unknown role: ${candidate}`);
   }
   return candidate as Role;

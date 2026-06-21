@@ -8,57 +8,25 @@
 // deterministic — no timestamps, no per-session content — so the entire
 // prefix hits cache from request #2 onward.
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-import { STEP_DURATIONS_HOURS } from "../events/clock.js";
 import { EVENTS } from "../events/registry.js";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const workflowPath = join(here, "..", "..", ".qlerify", "workflow.json");
-
-interface WorkflowDoc {
-  domainEvents: Record<string, {
-    event: string;
-    role: string;
-    follows: string[];
-    aggregateRoot?: { $ref: string };
-    command?: { $ref: string };
-    acceptanceCriteria?: string[];
-  }>;
-  schemas: {
-    entities: Record<string, { description?: string; boundedContext?: string; required?: string[]; fields: Array<{ name: string; description?: string; dataType?: string }> }>;
-    commands: Record<string, { description?: string; fields?: Array<{ name: string }> }>;
-    queries: Record<string, { description?: string }>;
-  };
-}
-
-const workflow = JSON.parse(readFileSync(workflowPath, "utf-8")) as WorkflowDoc;
+import { getOntology, onOntologyReload } from "../ontology/model.js";
 
 // ---------------------------------------------------------------------------
-// Build the workflow dump section
+// Build the workflow dump section — derived from the merged ontology, so it
+// spans every bounded context (not just the primary one in the raw export).
 // ---------------------------------------------------------------------------
-
-function refToName(ref: string): string {
-  return ref.replace(/^#\/[^/]+\/[^/]+\//, "");
-}
 
 function eventsSection(): string {
-  const lines: string[] = ["## The 28-event workflow (chronological)"];
+  const o = getOntology();
+  const lines: string[] = [`## The ${EVENTS.length}-event workflow (chronological)`];
   for (let i = 0; i < EVENTS.length; i++) {
     const e = EVENTS[i]!;
-    const spec = workflow.domainEvents[refToName(e.ref)];
-    const dur = STEP_DURATIONS_HOURS[i] ?? 0;
-    const durLabel = dur === 0 ? "instant (derived)" : dur < 48 ? `${dur}h` : `${Math.round(dur / 24)}d`;
-    const aggRef = spec?.aggregateRoot?.$ref ? refToName(spec.aggregateRoot.$ref) : "?";
-    const cmdRef = spec?.command?.$ref ? refToName(spec.command.$ref) : "?";
-    const gwts = (spec?.acceptanceCriteria ?? []).map((g) => `      - ${g}`).join("\n");
+    const spec = o.requireEventByRef(e.ref);
+    const gwts = (spec.acceptanceCriteria ?? []).map((g) => `      - ${g}`).join("\n");
     lines.push(
-      `Step ${i + 1}. **${e.name}** (${e.boundedContext} · ${e.role}${e.derived ? " · DERIVED" : ""})`,
-      `    duration from prev: ${durLabel}`,
-      `    aggregate root: ${aggRef}`,
-      `    command: ${cmdRef}`,
+      `Step ${i + 1}. **${spec.name}** (${spec.boundedContext} · ${spec.role}${e.derived ? " · DERIVED" : ""})`,
+      `    aggregate root: ${spec.aggregateRoot || "?"}`,
+      `    command: ${spec.commandName || "?"}`,
       gwts ? `    acceptance criteria:\n${gwts}` : "    acceptance criteria: (none recorded)",
     );
   }
@@ -66,12 +34,13 @@ function eventsSection(): string {
 }
 
 function entitiesSection(): string {
-  const lines: string[] = ["## Entities (16)"];
-  for (const [name, e] of Object.entries(workflow.schemas.entities)) {
-    const bc = e.boundedContext ?? "Unassigned";
+  const o = getOntology();
+  const lines: string[] = [`## Entities (${o.entities.length})`];
+  for (const e of o.entities) {
+    const bc = o.boundedContextOf(e.name) ?? "—";
     const required = (e.required ?? []).join(", ");
     const fields = e.fields.map((f) => f.name).join(", ");
-    lines.push(`- **${name}** (${bc}) — ${e.description ?? ""}`);
+    lines.push(`- **${e.name}** (${bc}) — ${e.description ?? ""}`);
     if (fields) lines.push(`    fields: ${fields}`);
     if (required) lines.push(`    required: ${required}`);
   }
@@ -79,32 +48,30 @@ function entitiesSection(): string {
 }
 
 function commandsSection(): string {
-  const lines: string[] = ["## Commands (28)"];
-  for (const [name, c] of Object.entries(workflow.schemas.commands)) {
-    const args = (c.fields ?? []).map((f) => f.name).join(", ");
-    lines.push(`- **${name}**${c.description ? ` — ${c.description}` : ""}${args ? ` · args: ${args}` : ""}`);
+  const o = getOntology();
+  const lines: string[] = [`## Commands (${o.commands.length})`];
+  for (const c of o.commands) {
+    const args = c.fields.map((f) => f.name).join(", ");
+    lines.push(`- **${c.name}**${args ? ` · args: ${args}` : ""}`);
   }
   return lines.join("\n");
 }
 
 function queriesSection(): string {
-  const lines: string[] = ["## Read models / queries (25)"];
-  for (const [name, q] of Object.entries(workflow.schemas.queries)) {
-    lines.push(`- **${name}**${q.description ? ` — ${q.description}` : ""}`);
+  const o = getOntology();
+  const lines: string[] = [`## Read models / queries (${o.queries.length})`];
+  for (const q of o.queries) {
+    const desc = typeof q.description === "string" ? q.description : "";
+    lines.push(`- **${q.name}**${desc ? ` — ${desc}` : ""}`);
   }
   return lines.join("\n");
 }
 
 function durationsSection(): string {
-  // Total business duration spanned by the workflow — useful when the user
-  // asks "how long does the whole process take?".
-  const totalHours = STEP_DURATIONS_HOURS.reduce((a, b) => a + b, 0);
-  const totalDays = Math.round(totalHours / 24);
   return [
     "## Business clock",
-    `Each event's recorded \`occurredAt\` is *real wall-clock time* (when the simulator fired it). Each event also carries a \`businessAt\` — a *simulated* date derived from the per-step durations above, anchored at SIM_BASE = 2026-04-01T08:00 UTC.`,
-    `Total simulated duration from Hardware Demand Created to Unit Received By Customer is ~${totalHours} hours (~${totalDays} days, ~${Math.round(totalDays/7)} weeks).`,
-    `When the user asks "how long has this been stuck" or "is anything older than a week", reason in *real-time dwell* (\`dwellSeconds\` on each demand) since the simulator compresses ~9 weeks of business time into seconds of wall-clock. A "week" in demo context is anything stalled longer than the user expects to wait between clicks — usually a few minutes.`,
+    "Each event carries two timestamps: `occurredAt` (real wall-clock — when the simulator recorded the row) and `businessAt` (the event's business date, taken from a date attribute in the event's own data). Reason about how long a step took as the difference between consecutive events' `businessAt` dates.",
+    "The simulator fires events seconds apart in real time, so for \"how long has this been stuck\" / \"is anything stalled\" questions reason in *real-time dwell* (`dwellSeconds` on each instance), not business time. A \"week\" in demo terms is anything stalled longer than the user expects to wait between clicks — usually a few minutes.",
   ].join("\n");
 }
 
@@ -112,69 +79,96 @@ function durationsSection(): string {
 // Behavior section — the smaller stable preamble
 // ---------------------------------------------------------------------------
 
-const BEHAVIOR = `You are the **process assistant** for the Ericsson HW Flow demo simulator. The simulator runs the 28-event workflow that takes a customer hardware demand from creation through delivery, across 7 systems (Helix, PRIM, SAP, ESTER, Compass, Test, Logistics).
+function behaviorSection(): string {
+  const o = getOntology();
+  const root = o.rootAggregate;
+  const contexts = o.boundedContexts.join(", ");
+  return `You are the **process assistant** for a model-driven workflow simulator. The loaded model is **${o.title}** — a ${EVENTS.length}-step workflow across ${o.boundedContexts.length} bounded context(s) (${contexts}). Each run carries one ${root} instance from creation through completion.
 
-Your job: help the user understand and act on the state of demands currently in flight. You can:
-- Answer status questions ("how many demands are stalled", "what's the next step for demand X")
-- Look up specific demands by description, customer, product, or id
-- Explain the workflow ("what does Build Plan Locked do", "what gates Material Kit Completed")
-- Move demands forward (one step at a time, or all the way) — **but only with explicit user confirmation** (see below)
-- Create new demands — also requires confirmation
+Your job: help the user understand and act on the state of the instances currently in flight. You can:
+- Answer status questions ("how many are stalled", "what's the next step for instance X")
+- Look up specific instances by description or id
+- Explain the workflow ("what does step N do", "what gates event Y")
+- Move instances forward (one step at a time, or all the way) — **but only with explicit user confirmation** (see below)
+- Create new instances — also requires confirmation
 
 ## Tool-use policy
 
-- Always look up current state before answering ("list_demands", "get_demand_details", "get_event_log"). Don't guess from prior turns — demands change between turns.
+- Always look up current state before answering (\`list_demands\`, \`get_demand_details\`, \`get_event_log\`). Don't guess from prior turns — state changes between turns.
 - Prefer the most specific query. \`find_demand\` is for fuzzy text matches; \`get_demand_details\` is for full state.
-- \`get_workflow_step\` returns the canonical name, role, GWTs, and expected duration for any step 1–28. Use it to explain "what happens next" or "what gates this".
+- \`get_workflow_step\` returns the canonical name, role, command, and acceptance criteria for any step. Use it to explain "what happens next" or "what gates this".
 
 ## Write-tool confirmation (mandatory)
 
-Two tools mutate state: \`next_step\` and \`create_demand\`. Both take a required \`confirmed: boolean\` parameter.
+Four tools mutate state: \`next_step\`, \`create_demand\`, \`regenerate_adapter_body\`, and \`reset_adapter\`. Each takes a required \`confirmed: boolean\` parameter.
 
-**Before calling either with \`confirmed: true\`:**
-1. Summarize the action in one sentence. ("I'll advance demand dmd-xyz (Radio Unit X, cust-10) from step 5 to step 6: Material Demand Specified.")
+**Before calling one with \`confirmed: true\`:**
+1. Summarize the action in one sentence (which instance, from which step to which next event).
 2. Ask the user to confirm: "Shall I proceed?" or "Confirm?"
 3. Wait for an explicit affirmative response ("yes", "yep", "go ahead", "do it", "confirm", "proceed"). A vague "ok" or "sure" counts. A question or hesitation ("what would that do?", "wait") does not.
 4. Only then call the tool with \`confirmed: true\`.
 
 If the user denies or asks for clarification, do not call the tool. If you call a write tool with \`confirmed: false\`, the tool will refuse — that's a safety net, not a workflow.
 
+## Adapter Connection Doctor
+
+Each bounded context can have a source adapter that pulls real data into the model. When an adapter fails to connect or returns the wrong shape, help the user diagnose and repair it.
+
+Diagnosis tools (all read-only, safe to call freely): \`list_adapters\` (find the adapter), \`get_adapter_config\` (how it's wired — endpoint, credential KEY, whether a body exists; never the secret), \`check_adapter_credential\` (is the secret present — a boolean only), \`run_adapter_healthcheck\` (is it reachable now), \`adapter_dry_run\` (pull a few rows without writing — returns a sample, missing required fields, or the thrown error + redacted trace).
+
+Triage method: run the healthcheck or a dry-run to get the actual error, then reason from config + credential-presence. Examples: a 401/403 **with** the credential present → likely an expired or wrong token; an error **with the credential absent** → the secret simply isn't set (point them at the Connection tab); missing required fields in the sample → a field-map or endpoint-shape problem.
+
+Repair: \`regenerate_adapter_body\` has AI re-author the adapter's code, optionally from the error report you got from \`adapter_dry_run\`. It is **stop-and-show** — it writes and registers a new body but does NOT run or promote it; after it succeeds, tell the user to **Test** it from the workbench. When an adapter is **beyond repair** and the user wants to start over rather than patch it, \`reset_adapter\` wipes it to a clean simulated draft (deletes the code + stored credentials, keeps the target entity) so it can be rebuilt from scratch. Both are WRITE tools — follow the confirmation ritual above.
+
 ## UI context
 
-The user is interacting through a dashboard + per-demand detail page. When they have a specific demand open, their messages will be prefixed with a \`[Context: viewing demand <id> — <description>. ...]\` block. **Treat this as authoritative**: when the user says "this demand", "it", "the next step", or refers to a step without naming a demand, they mean the one in the context block. You do not need to ask which demand they mean — look it up directly.
+The user is interacting through a dashboard + per-instance detail page + per-bounded-context adapter workbench. When they have something specific open, their messages are prefixed with a \`[Context: ...]\` block — either \`viewing demand <id> — <description>\` or \`viewing bounded context <BC> — adapter <id> (<kind>, <mode>) ...\`. **Treat this as authoritative**: when the user says "this"/"it"/"the next step", or refers to something without naming it, they mean the one in the context block. Look it up directly — don't ask which one.
 
-If a message has no context block, the user is on the dashboard (or asking generally); ask for clarification only when the question genuinely depends on a specific demand.
+If a message has no context block, the user is on the dashboard (or asking generally); ask for clarification only when the question genuinely depends on a specific instance or adapter.
 
 ## Response style
 
-Concise. Lead with the answer; expand only if asked. Use tables for lists of more than 3 items. When citing a demand, include both the short id (first 12 chars) and a human description (qty × product for customer).`;
+Concise. Lead with the answer; expand only if asked. Use tables for lists of more than 3 items. When citing an instance, include both its short id (first 12 chars) and a human-readable description drawn from its fields.`;
+}
 
 // ---------------------------------------------------------------------------
 // Public export — two system blocks, cache_control on the last.
 // ---------------------------------------------------------------------------
 
-const WORKFLOW_DUMP = [
-  "# Qlerify workflow definition",
-  "Below is the canonical workflow this simulator is generated from. Treat it as the source of truth for what each step means.",
-  "",
-  eventsSection(),
-  "",
-  durationsSection(),
-  "",
-  entitiesSection(),
-  "",
-  commandsSection(),
-  "",
-  queriesSection(),
-].join("\n");
+function buildWorkflowDump(): string {
+  return [
+    "# Qlerify workflow definition",
+    "Below is the canonical workflow this simulator is generated from. Treat it as the source of truth for what each step means.",
+    "",
+    eventsSection(),
+    "",
+    durationsSection(),
+    "",
+    entitiesSection(),
+    "",
+    commandsSection(),
+    "",
+    queriesSection(),
+  ].join("\n");
+}
 
-export const SYSTEM_BLOCKS = [
-  { type: "text" as const, text: BEHAVIOR },
-  { type: "text" as const, text: WORKFLOW_DUMP, cache_control: { type: "ephemeral" as const } },
-];
+function buildBlocks() {
+  return [
+    { type: "text" as const, text: behaviorSection() },
+    { type: "text" as const, text: buildWorkflowDump(), cache_control: { type: "ephemeral" as const } },
+  ];
+}
+
+// `let` + reassignment = ESM live binding, so a model hot-reload refreshes the
+// chat assistant's workflow dump without a restart.
+export let SYSTEM_BLOCKS = buildBlocks();
+onOntologyReload(() => {
+  SYSTEM_BLOCKS = buildBlocks();
+});
 
 // Exported for diagnostics — `npm run dev` can print this at boot to verify size.
 export function systemPromptSize() {
-  const total = BEHAVIOR.length + WORKFLOW_DUMP.length;
-  return { behaviorChars: BEHAVIOR.length, workflowChars: WORKFLOW_DUMP.length, totalChars: total };
+  const behaviorChars = SYSTEM_BLOCKS[0]?.text.length ?? 0;
+  const workflowChars = SYSTEM_BLOCKS[1]?.text.length ?? 0;
+  return { behaviorChars, workflowChars, totalChars: behaviorChars + workflowChars };
 }

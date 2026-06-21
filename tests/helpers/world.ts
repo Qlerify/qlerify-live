@@ -212,7 +212,7 @@ export async function givenUpTo(target: Stage): Promise<World> {
   await setBuildPriority({ id: w.buildId, priority: 1 }, "Planner");
   if (!shouldContinue(target, "after_priority")) return w;
 
-  await lockBuildPlan({ id: plan.id }, "Configuration Manager");
+  await lockBuildPlan({ id: plan.id }, "Planner");
   if (!shouldContinue(target, "after_lock")) return w;
 
   await releaseBuildToSite({ id: w.buildId, siteId: "site-stockholm" }, "Planner");

@@ -15,6 +15,8 @@
 
 import { prisma } from "../db.js";
 import type { Ontology, EntitySchema } from "../ontology/model.js";
+import { currentOrgId, currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { SYSTEM_ORG_ID } from "../platform/ids.js";
 
 // Physical table prefix that isolates raw-SQL projections from Prisma tables.
 const TABLE_PREFIX = "gen_";
@@ -28,9 +30,55 @@ function ident(name: string): string {
   return `"${name}"`;
 }
 
-/** Quoted PHYSICAL table identifier for a logical entity name. */
+// Per-PROJECT namespacing. The SYSTEM default project uses the un-prefixed
+// `gen_<Entity>` tables (the demo's data, untouched). Every OTHER project gets
+// its own namespace `gen__p<projectHex>_<Entity>` (double underscore) so two
+// projects' models/data never collide. The active project comes from ALS.
+const PROJECT_MARK = "gen__p";
+
+/** Hex project key for the active project, or null for the system project. */
+function projKey(): string | null {
+  return isSystemProject() ? null : currentProjectId().replace(/-/g, "");
+}
+
+/** Physical table prefix for the ACTIVE project's scope. */
+function physPrefix(): string {
+  const pk = projKey();
+  return pk ? `${PROJECT_MARK}${pk}_` : TABLE_PREFIX;
+}
+
+/** Quoted PHYSICAL table identifier for a logical entity name, in the active
+ * project's namespace. */
 function phys(logical: string): string {
-  return ident(TABLE_PREFIX + logical);
+  return ident(physPrefix() + logical);
+}
+
+// --- Multi-tenant row scoping ------------------------------------------------
+// Each projection row carries the organization that owns it, stamped from the
+// resolved tenant context on insert and filtered on read. This is the data-plane
+// half of the isolation spine. It is column-presence-guarded so a legacy gen_
+// table created before this column existed keeps working (treated as the system
+// org) until the next applyModelTables rebuild adds the column.
+const orgColCache = new Map<string, boolean>();
+
+async function hasOrgColumn(table: string): Promise<boolean> {
+  const physName = physPrefix() + table; // cache per PHYSICAL table — one logical name maps to a different table per project
+  const cached = orgColCache.get(physName);
+  if (cached !== undefined) return cached;
+  const has = (await tableColumns(table)).has("organization_id");
+  orgColCache.set(physName, has);
+  return has;
+}
+
+/** SQL fragment + params scoping a query to the current org. Empty for a legacy
+ * table without the column. The system org also sees null-org (legacy) rows. */
+async function orgFilterSql(table: string): Promise<{ clause: string; params: unknown[] }> {
+  if (!(await hasOrgColumn(table))) return { clause: "", params: [] };
+  const org = currentOrgId();
+  if (org === SYSTEM_ORG_ID) {
+    return { clause: `(${ident("organization_id")} = ? OR ${ident("organization_id")} IS NULL)`, params: [SYSTEM_ORG_ID] };
+  }
+  return { clause: `${ident("organization_id")} = ?`, params: [org] };
 }
 
 function sqliteType(dataType?: string): string {
@@ -54,6 +102,11 @@ export function tableFor(entity: EntitySchema): string {
 }
 
 function createTableSql(entity: EntitySchema): string {
+  // Guard the project namespace: a model entity named "_p…" could otherwise
+  // collide with another project's gen__p<hex>_… tables.
+  if (entity.name.startsWith("_")) {
+    throw new Error(`reserved entity name "${entity.name}": model entity names may not start with "_"`);
+  }
   const cols: string[] = [];
   const declared = new Set(entity.fields.map((f) => f.name));
   for (const f of entity.fields) {
@@ -72,15 +125,24 @@ function createTableSql(entity: EntitySchema): string {
   // falls back to the bounded context's mode at read time. Written by adapters
   // when they pull real data; synthesized rows leave it null (= simulated).
   if (!declared.has("_provenance")) cols.push(`${ident("_provenance")} TEXT`);
+  // Multi-tenant owner. Snake-cased so it never collides with a model field
+  // named `organizationId`; stamped on insert, filtered on read.
+  if (!declared.has("organization_id")) cols.push(`${ident("organization_id")} TEXT`);
   return `CREATE TABLE ${phys(entity.name)} (${cols.join(", ")})`;
 }
 
-/** Logical names of the `gen_`-prefixed projection tables that currently exist. */
+/** Logical names of the projection tables in the ACTIVE project's namespace. */
 export async function listProjectionTables(): Promise<string[]> {
+  const prefix = physPrefix();
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '${TABLE_PREFIX}%'`,
+    `SELECT name FROM sqlite_master WHERE type='table'`,
   );
-  return rows.map((r) => r.name.slice(TABLE_PREFIX.length));
+  return rows
+    .map((r) => r.name)
+    // The SYSTEM scope must EXCLUDE the project namespace: a prefix match alone
+    // would catch gen__p… because they also start with "gen_".
+    .filter((n) => n.startsWith(prefix) && (prefix !== TABLE_PREFIX || !n.startsWith(PROJECT_MARK)))
+    .map((n) => n.slice(prefix.length));
 }
 
 export interface ApplyResult {
@@ -92,6 +154,7 @@ export interface ApplyResult {
  * tables. Prisma-managed tables (Ericsson schema, EventLog) are NEVER touched.
  * In-process, synchronous, no restart — the destructive "drop tables on swap". */
 export async function applyModelTables(ontology: Ontology): Promise<ApplyResult> {
+  orgColCache.clear(); // tables are being rebuilt — drop the column-presence cache
   const existing = await listProjectionTables();
   const dropped: string[] = [];
   for (const t of existing) {
@@ -112,13 +175,14 @@ export async function applyModelTables(ontology: Ontology): Promise<ApplyResult>
 export async function ensureTable(entity: EntitySchema): Promise<void> {
   if (await tableExists(entity.name)) return;
   await prisma.$executeRawUnsafe(createTableSql(entity));
+  orgColCache.set(physPrefix() + entity.name, true); // freshly created → has the org column
 }
 
-/** Does a projection table exist for this logical entity name? */
+/** Does a projection table exist for this logical entity name (active project)? */
 export async function tableExists(logical: string): Promise<boolean> {
   const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
     `SELECT count(*) as n FROM sqlite_master WHERE type='table' AND name = ?`,
-    TABLE_PREFIX + logical,
+    physPrefix() + logical,
   );
   return Number(rows[0]?.n ?? 0) > 0;
 }
@@ -145,16 +209,22 @@ function normalizeRow<T extends Record<string, unknown>>(row: T | undefined): T 
 }
 
 export async function findById(table: string, id: string): Promise<Record<string, unknown> | null> {
+  const f = await orgFilterSql(table);
+  const where = f.clause ? `WHERE ${ident("id")} = ? AND ${f.clause}` : `WHERE ${ident("id")} = ?`;
   const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-    `SELECT * FROM ${phys(table)} WHERE ${ident("id")} = ? LIMIT 1`,
+    `SELECT * FROM ${phys(table)} ${where} LIMIT 1`,
     id,
+    ...f.params,
   );
   return normalizeRow(rows[0]);
 }
 
 export async function findMany(table: string, limit = 200): Promise<Array<Record<string, unknown>>> {
+  const f = await orgFilterSql(table);
+  const where = f.clause ? `WHERE ${f.clause} ` : "";
   const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-    `SELECT * FROM ${phys(table)} LIMIT ?`,
+    `SELECT * FROM ${phys(table)} ${where}LIMIT ?`,
+    ...f.params,
     limit,
   );
   return rows.map((r) => normalizeRow(r)!) as Array<Record<string, unknown>>;
@@ -163,6 +233,9 @@ export async function findMany(table: string, limit = 200): Promise<Array<Record
 export async function insert(table: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
   const now = new Date().toISOString();
   const full: Record<string, unknown> = { version: 0, createdAt: now, updatedAt: now, ...data };
+  if ((await hasOrgColumn(table)) && full.organization_id === undefined) {
+    full.organization_id = currentOrgId(); // stamp the owner from the resolved context
+  }
   const cols = Object.keys(full);
   const placeholders = cols.map(() => "?").join(", ");
   const values = cols.map((c) => sqlValue(full[c]));
@@ -184,9 +257,11 @@ export async function update(
   const sets = cols.map((c) => `${ident(c)} = ?`);
   sets.push(`${ident("version")} = ${ident("version")} + 1`);
   sets.push(`${ident("updatedAt")} = ?`);
-  const values = [...cols.map((c) => sqlValue(changes[c])), new Date().toISOString(), id, expectedVersion];
+  const f = await orgFilterSql(table);
+  const extra = f.clause ? ` AND ${f.clause}` : "";
+  const values = [...cols.map((c) => sqlValue(changes[c])), new Date().toISOString(), id, expectedVersion, ...f.params];
   const affected = await prisma.$executeRawUnsafe(
-    `UPDATE ${phys(table)} SET ${sets.join(", ")} WHERE ${ident("id")} = ? AND ${ident("version")} = ?`,
+    `UPDATE ${phys(table)} SET ${sets.join(", ")} WHERE ${ident("id")} = ? AND ${ident("version")} = ?${extra}`,
     ...values,
   );
   if (Number(affected) === 0) throw new Error(`stale write on ${table} ${id}`);
@@ -194,7 +269,9 @@ export async function update(
 }
 
 export async function deleteById(table: string, id: string): Promise<void> {
-  await prisma.$executeRawUnsafe(`DELETE FROM ${phys(table)} WHERE ${ident("id")} = ?`, id);
+  const f = await orgFilterSql(table);
+  const extra = f.clause ? ` AND ${f.clause}` : "";
+  await prisma.$executeRawUnsafe(`DELETE FROM ${phys(table)} WHERE ${ident("id")} = ?${extra}`, id, ...f.params);
 }
 
 /** Delete all rows from every projection table (keeps the tables). */

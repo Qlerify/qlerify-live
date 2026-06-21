@@ -139,10 +139,38 @@ const state = {
   modelSourceEditing: false, // click-to-edit toggle for the source URL
 };
 
+// --- Tenant auth/session (localStorage-backed) ------------------------------
+// No token ⇒ requests go out header-less ⇒ the server resolves the system tenant
+// (the demo keeps working until someone logs in). A token (from /v1/auth/login)
+// is sent as a bearer; the chosen org is sent as X-Org-Id (which only SELECTS
+// among the identity's orgs — the server derives the canonical org_id).
+const AUTH = {
+  token: () => localStorage.getItem("ql.token") || "",
+  org: () => localStorage.getItem("ql.org") || "",
+  project: () => localStorage.getItem("ql.project") || "",
+  setSession: (token) => localStorage.setItem("ql.token", token || ""),
+  // Switching org invalidates the selected project — clear it so the new org's
+  // Default project is used until the user picks one.
+  setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
+  setProject: (id) => { if (id) localStorage.setItem("ql.project", id); else localStorage.removeItem("ql.project"); },
+  clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
+};
+
 async function api(path, opts = {}) {
   const headers = { "x-role": role, ...(opts.headers || {}) };
   if (opts.body != null) headers["Content-Type"] = "application/json";
+  const token = AUTH.token();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const org = AUTH.org();
+  if (org) headers["X-Org-Id"] = org;
+  const project = AUTH.project();
+  if (project) headers["X-Project-Id"] = project;
   const res = await fetch(API + path, { cache: "no-store", ...opts, headers });
+  if (res.status === 401 && !path.startsWith("/v1/auth/")) {
+    AUTH.clear();
+    if (location.hash !== "#login") navigate("#login");
+    throw new Error(`401 ${path}: session expired — please sign in`);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${path}: ${text}`);
@@ -806,6 +834,11 @@ function flashModelMsg() {
 // Single dashboard-header entry point. Fetch / version rolling / source editing
 // all now live inside the Inspect model dialog (see modelFileDialog).
 function modelControls() {
+  // The model lifecycle (Inspect → Fetch / Roll / Restore / Rebuild from the
+  // Qlerify modeller + version history) operates on the SYSTEM default project's
+  // demo model. Other projects carry their own copy of the model, so hide these
+  // controls there (per-project model management is a separate, later feature).
+  if (state.me && !state.me.isSystemProject) return "";
   const m = state.model;
   const label = m && m.total > 0
     ? `model v${m.current + 1}/${m.total}${m.currentVersion ? ` · ${m.currentVersion.summary.events} events` : ""}`
@@ -816,6 +849,71 @@ function modelControls() {
       <button id="lbl-model-view" class="text-[10px] text-stone-500 hover:text-stone-800 underline decoration-dotted tabular-nums ml-0.5 hidden lg:inline" title="Inspect the Qlerify model">${escapeHtml(label)}</button>
     </div>
   `;
+}
+
+// Set-a-project's-own-model controls — shown ONLY on a non-system project (the
+// system/demo project uses modelControls() above). Replaces this project's model
+// from an uploaded/pasted Qlerify workflow.json and rebuilds this project's data.
+function projectModelControls() {
+  if (!state.me || state.me.isSystemProject) return "";
+  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Replace this project's model with a Qlerify workflow.json">⚙ Set model</button>`;
+}
+
+function projectModelDialog() {
+  if (!state.projModelOpen) return "";
+  const err = state.projModelErr ? `<div class="text-sm text-rose-600 mb-2">${escapeHtml(state.projModelErr)}</div>` : "";
+  return `
+    <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
+        <div class="px-5 py-4 border-b border-stone-200">
+          <div class="text-lg font-semibold">Set this project's model</div>
+          <div class="text-sm text-stone-500 mt-0.5">Paste or upload a Qlerify <span class="mono">workflow.json</span> export. It replaces <b>this project's</b> model and rebuilds <b>this project's</b> data — the demo and other projects are untouched.</div>
+        </div>
+        <div class="p-5 overflow-auto flex-1">
+          ${err}
+          <div class="mb-3 flex items-center gap-2">
+            <input id="proj-model-file" type="file" accept=".json,application/json" class="text-sm" />
+            <span class="text-xs text-stone-400">— or paste below —</span>
+          </div>
+          <textarea id="proj-model-text" class="w-full h-64 rounded-md border border-stone-300 p-2 text-xs mono" placeholder='{ "boundedContext": "...", "domainEvents": { ... }, "schemas": { ... } }'>${escapeHtml(state.projModelText || "")}</textarea>
+        </div>
+        <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
+          <button id="proj-model-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
+          <button id="proj-model-apply" ${state.projModelBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.projModelBusy ? "Applying…" : "Apply to project"}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindProjectModel() {
+  document.getElementById("btn-proj-model")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
+  document.getElementById("proj-model-cancel")?.addEventListener("click", () => { state.projModelOpen = false; render(); });
+  document.getElementById("proj-model-file")?.addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { state.projModelText = String(r.result || ""); render(); };
+    r.readAsText(f);
+  });
+  document.getElementById("proj-model-text")?.addEventListener("input", (e) => { state.projModelText = e.target.value; });
+  document.getElementById("proj-model-apply")?.addEventListener("click", async () => {
+    const text = ((document.getElementById("proj-model-text") || {}).value || state.projModelText || "").trim();
+    if (!text) { state.projModelErr = "Paste or upload a workflow.json first."; render(); return; }
+    try { JSON.parse(text); } catch (_e) { state.projModelErr = "That isn't valid JSON."; render(); return; }
+    state.projModelBusy = true; state.projModelErr = null; render();
+    try {
+      await api("/v1/project/model", { method: "PUT", body: JSON.stringify({ workflow: text }) });
+      state.projModelOpen = false; state.projModelBusy = false; state.projModelText = "";
+      state.modelMsg = { ok: true, text: "Project model updated — rebuilding this project." };
+      await ensureMe();
+      onHashChange();
+      setTimeout(() => { state.modelMsg = null; render(); }, 2500);
+    } catch (e) {
+      state.projModelBusy = false;
+      state.projModelErr = (e && e.message) ? e.message : "Failed to set the model.";
+      render();
+    }
+  });
 }
 
 // Persistent banner shown when the loaded Qlerify model doesn't match the
@@ -891,6 +989,8 @@ function bindModelControls() {
 function parseHash() {
   const h = location.hash || "";
   let m;
+  if (h.startsWith("#login")) return { view: "login" };
+  if (h.startsWith("#admin")) return { view: "admin" };
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#bcs")) return { view: "bcs" };
   if ((m = h.match(/^#demand\/([\w-]+)/))) return { view: "detail", demandId: m[1] };
@@ -919,8 +1019,16 @@ async function onHashChange() {
 
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
 
+  if (r.view === "login") { render(); return; }
+  await ensureMe(); // load the tenant context for the top bar (best-effort)
+  // If a 401 during ensureMe() cleared the session and redirected us, render the
+  // login screen now instead of flashing a frame of header-less content.
+  if (location.hash === "#login") { state.view = "login"; render(); return; }
+
   if (r.view === "detail") {
     await loadDetail();
+  } else if (r.view === "admin") {
+    await loadAdmin();
   } else if (r.view === "bcs") {
     await loadBcList();
   } else if (r.view === "bc") {
@@ -1091,6 +1199,7 @@ function dashboardView() {
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         ${modelControls()}
+        ${projectModelControls()}
         <button data-go="#bcs" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Bounded contexts / adapters">🔌 Systems</button>
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
@@ -1132,6 +1241,7 @@ function dashboardView() {
 
 function bindDashboard() {
   bindModelControls();
+  bindProjectModel();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
@@ -2227,9 +2337,19 @@ function render() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
   const prevDialogScroll = document.getElementById("model-file-scroll")?.scrollTop ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
+  // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
+  // user) so the whole app reads as a multi-tenant console.
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${projectModelDialog()}${rebuildOverlay()}`;
+
+  if (state.view === "login") {
+    root.innerHTML = loginView();
+    bindLogin();
+    return;
+  }
 
   if (state.view === "detail") {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${detailView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    root.innerHTML = wrap(detailView());
+    bindTenantBar();
     bindDetail();
     bindChat();
     bindRebuildOverlay();
@@ -2249,18 +2369,27 @@ function render() {
         }
       }
     }
+  } else if (state.view === "admin") {
+    root.innerHTML = wrap(adminView());
+    bindTenantBar();
+    bindAdmin();
+    bindChat();
+    bindRebuildOverlay();
   } else if (state.view === "bcs") {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${bcListView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    root.innerHTML = wrap(bcListView());
+    bindTenantBar();
     bindBcList();
     bindChat();
     bindRebuildOverlay();
   } else if (state.view === "bc") {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${bcWorkbenchView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    root.innerHTML = wrap(bcWorkbenchView());
+    bindTenantBar();
     bindBcWorkbench();
     bindChat();
     bindRebuildOverlay();
   } else {
-    root.innerHTML = `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${registryBanner()}${dashboardView()}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${rebuildOverlay()}`;
+    root.innerHTML = wrap(dashboardView());
+    bindTenantBar();
     bindDashboard();
     bindChat();
     bindRebuildOverlay();
@@ -2272,6 +2401,338 @@ function render() {
     const dlg = document.getElementById("model-file-scroll");
     if (dlg) dlg.scrollTop = prevDialogScroll;
   }
+}
+
+// ===========================================================================
+// Tenant shell — login, who-am-I, org switcher, breadcrumb, Org Admin page
+// ===========================================================================
+
+/** Best-effort load of the current tenant context for the top bar. Never throws:
+ * the demo runs header-less as the system tenant before anyone signs in. */
+async function ensureMe() {
+  try {
+    state.me = await api("/v1/whoami");
+    state.orgs = state.me.organizations || [];
+  } catch (_e) {
+    state.me = null;
+    state.orgs = [];
+  }
+}
+
+function currentOrgName() {
+  const id = state.me?.organizationId;
+  const o = (state.orgs || []).find((x) => x.id === id);
+  return o ? (o.name || o.slug) : (id ? id.slice(0, 8) : "—");
+}
+
+function tenantBar() {
+  const me = state.me;
+  const subject = me?.subject || "system";
+  const isAdmin = !!me?.isPlatformAdmin;
+  const orgs = state.orgs || [];
+  const curId = me?.organizationId || "";
+  const options = orgs.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === curId ? "selected" : ""}>${escapeHtml(o.name || o.slug)}</option>`).join("");
+  const switcher = orgs.length > 1
+    ? `<select id="org-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${options}</select>`
+    : `<span class="text-sm font-medium text-stone-100">${escapeHtml(currentOrgName())}</span>`;
+  const projects = me?.projects || [];
+  const curProj = me?.projectId || "";
+  const projName = (projects.find((p) => p.id === curProj) || {}).name || "Default";
+  const projControl = projects.length > 1
+    ? `<select id="proj-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${projects.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === curProj ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>`
+    : `<a href="#" class="text-sm text-stone-100 hover:text-white">${escapeHtml(projName)}</a>`;
+  return `
+    <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
+      <div class="px-6 py-1.5 flex items-center gap-3">
+        <span class="font-semibold tracking-tight text-stone-100">Qlerify<span class="text-amber-400">·</span>Platform</span>
+        <span class="text-stone-600">›</span>
+        <span class="text-stone-500 text-xs uppercase tracking-wide">Org</span>
+        ${switcher}
+        ${isAdmin ? `<span class="text-[10px] uppercase font-bold px-1.5 py-px rounded bg-amber-500 text-stone-900" title="Platform superadmin — can switch into any organization (every cross-tenant act is audited)">SUPERUSER</span>` : ""}
+        <span class="text-stone-600">›</span>
+        <span class="text-stone-500 text-xs uppercase tracking-wide">Project</span>
+        ${projControl}
+        <div class="flex-1"></div>
+        <a href="#admin" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "admin" ? "bg-stone-800 text-white" : ""}" title="Organization admin">⚙ Admin</a>
+        <span class="text-stone-600">·</span>
+        <span class="text-stone-400" title="Signed in as">${escapeHtml(subject)}</span>
+        <button id="btn-logout" class="px-2 py-0.5 rounded hover:bg-stone-800 text-stone-500 hover:text-stone-200" title="Sign out">Sign out</button>
+      </div>
+    </div>`;
+}
+
+function bindTenantBar() {
+  document.getElementById("org-switch")?.addEventListener("change", async (e) => {
+    AUTH.setOrg(e.target.value); // also clears the selected project
+    await ensureMe();
+    onHashChange();
+  });
+  document.getElementById("proj-switch")?.addEventListener("change", async (e) => {
+    AUTH.setProject(e.target.value);
+    await ensureMe();
+    onHashChange();
+  });
+  document.getElementById("btn-logout")?.addEventListener("click", async () => {
+    try { await api("/v1/auth/logout", { method: "POST", body: "{}" }); } catch (_e) { /* ignore */ }
+    AUTH.clear();
+    state.me = null; state.orgs = [];
+    navigate("#login");
+  });
+}
+
+function loginView() {
+  const err = state.loginError ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.loginError)}</div>` : "";
+  return `
+    <div class="min-h-screen flex items-center justify-center bg-gradient-to-b from-stone-50 to-stone-100">
+      <form id="login-form" class="w-80 rounded-xl border border-stone-200 bg-white p-6 shadow-sm">
+        <div class="text-lg font-semibold mb-1">Qlerify<span class="text-amber-500">·</span>Platform</div>
+        <div class="text-sm text-stone-500 mb-4">Sign in to the multi-tenant console</div>
+        ${err}
+        <label class="block text-xs font-medium text-stone-600 mb-1">Username</label>
+        <input id="login-subject" autocomplete="username" class="w-full mb-3 rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="superadmin" />
+        <label class="block text-xs font-medium text-stone-600 mb-1">Password</label>
+        <input id="login-password" type="password" autocomplete="current-password" class="w-full mb-4 rounded-md border border-stone-300 px-3 py-2 text-sm" />
+        <button class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Sign in</button>
+        <div class="text-[11px] text-stone-400 mt-3">The demo runs as the <b>system</b> tenant without signing in — <a href="#" id="login-skip" class="underline">continue as system</a>.</div>
+      </form>
+    </div>`;
+}
+
+function bindLogin() {
+  document.getElementById("login-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const subject = document.getElementById("login-subject").value.trim();
+    const password = document.getElementById("login-password").value;
+    state.loginError = null;
+    AUTH.clear(); // never attach a stale token to the login request
+    try {
+      const r = await api("/v1/auth/login", { method: "POST", body: JSON.stringify({ subject, password }) });
+      AUTH.setSession(r.token);
+      AUTH.setOrg((r.organizations || [])[0]?.id || "");
+      state.me = null;
+      navigate("#");
+    } catch (_err) {
+      state.loginError = "Invalid username or password.";
+      render();
+    }
+  });
+  document.getElementById("login-skip")?.addEventListener("click", (e) => {
+    e.preventDefault(); AUTH.clear(); state.me = null; navigate("#");
+  });
+}
+
+// --- Org Admin page --------------------------------------------------------
+
+async function loadAdmin() {
+  const tab = state.admin?.tab || "members";
+  const [members, roles, markings, environments, workspaces, projects, audit] = await Promise.all([
+    api("/v1/members").catch(() => []),
+    api("/v1/role-assignments").catch(() => []),
+    api("/v1/markings").catch(() => []),
+    api("/v1/environments").catch(() => []),
+    api("/v1/workspaces").catch(() => []),
+    api("/v1/projects").catch(() => []),
+    api("/v1/audit?limit=60").catch(() => []),
+  ]);
+  state.admin = { tab, members, roles, markings, environments, workspaces, projects, audit };
+  render();
+}
+
+const ADMIN_TABS = [["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["projects", "Projects"], ["audit", "Audit log"]];
+
+function adminView() {
+  const a = state.admin || { tab: "members" };
+  const tab = a.tab || "members";
+  const tabBtns = ADMIN_TABS.map(([k, label]) =>
+    `<button data-admin-tab="${k}" class="px-3 py-1.5 text-sm rounded-md ${tab === k ? "bg-stone-900 text-white" : "border border-stone-300 bg-white hover:bg-stone-50"}">${label}</button>`).join("");
+  return `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 pt-4 pb-2 flex items-center gap-4">
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Organization admin</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(currentOrgName())}</div>
+        </div>
+      </div>
+      <div class="px-6 pb-3 flex items-center gap-2">${tabBtns}</div>
+    </header>
+    <main class="flex-1 overflow-auto p-6">${adminTabContent(tab, a)}</main>`;
+}
+
+function tbl(headers, rowsHtml, empty) {
+  return `<div class="rounded-lg border border-stone-200 bg-white overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-stone-50 border-b border-stone-200"><tr class="text-left text-[11px] uppercase tracking-wide text-stone-500">${headers.map((h) => `<th class="px-4 py-2 font-medium">${h}</th>`).join("")}</tr></thead>
+      <tbody class="divide-y divide-stone-100">${rowsHtml || `<tr><td class="px-4 py-6 text-stone-400" colspan="${headers.length}">${empty || "Nothing here yet."}</td></tr>`}</tbody>
+    </table></div>`;
+}
+
+function roleChip(k) {
+  const tone = { owner: "bg-purple-100 text-purple-800", org_admin: "bg-purple-100 text-purple-800", editor: "bg-sky-100 text-sky-800", viewer: "bg-stone-200 text-stone-700", deployer: "bg-amber-100 text-amber-800" }[k] || "bg-stone-200 text-stone-700";
+  return `<span class="text-[11px] px-1.5 py-px rounded ${tone}">${escapeHtml(k)}</span>`;
+}
+
+function adminTabContent(tab, a) {
+  if (tab === "members") {
+    const rows = (a.members || []).map((m) => `<tr>
+      <td class="px-4 py-2 mono text-xs">${escapeHtml(m.subject)}</td>
+      <td class="px-4 py-2 text-stone-600">${escapeHtml(m.primaryEmail || "—")}</td>
+      <td class="px-4 py-2">${(m.roles || []).map(roleChip).join(" ") || '<span class="text-stone-400">—</span>'}</td>
+      <td class="px-4 py-2 text-stone-500">${escapeHtml(m.status || "active")}</td>
+    </tr>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2">
+        <div><label class="block text-xs text-stone-500 mb-1">Username (IdP subject)</label><input id="m-subject" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="jane@corp" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Email</label><input id="m-email" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="optional" /></div>
+        <button id="m-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add member</button>
+      </div>
+      ${tbl(["Username", "Email", "Roles", "Status"], rows, "No members.")}`;
+  }
+  if (tab === "roles") {
+    const rows = (a.roles || []).map((r) => `<tr>
+      <td class="px-4 py-2 mono text-xs">${escapeHtml(r.principalId)}</td>
+      <td class="px-4 py-2 text-stone-500">${escapeHtml(r.principalType)}</td>
+      <td class="px-4 py-2">${roleChip(r.roleKey)}</td>
+      <td class="px-4 py-2 text-stone-600">${escapeHtml(r.scopeType)}: <span class="mono text-xs">${escapeHtml(String(r.scopeId).slice(0, 12))}</span></td>
+    </tr>`).join("");
+    const roleOpts = ["owner", "editor", "viewer", "deployer", "org_admin"].map((k) => `<option>${k}</option>`).join("");
+    const scopeOpts = ["organization", "environment", "workspace", "project", "resource"].map((k) => `<option>${k}</option>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2 flex-wrap">
+        <div><label class="block text-xs text-stone-500 mb-1">Principal id</label><input id="r-principal" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm mono" placeholder="identity id" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Role</label><select id="r-role" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${roleOpts}</select></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Scope</label><select id="r-scope" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${scopeOpts}</select></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Scope id</label><input id="r-scopeid" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm mono" placeholder="(org id for org scope)" /></div>
+        <button id="r-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Assign role</button>
+      </div>
+      ${tbl(["Principal", "Type", "Role", "Scope"], rows, "No role assignments.")}`;
+  }
+  if (tab === "markings") {
+    const rows = (a.markings || []).map((m) => `<tr>
+      <td class="px-4 py-2"><span class="text-[11px] px-1.5 py-px rounded bg-rose-100 text-rose-800">${escapeHtml(m.name)}</span></td>
+      <td class="px-4 py-2 text-stone-600">${escapeHtml(m.description || "—")}</td>
+    </tr>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2">
+        <div><label class="block text-xs text-stone-500 mb-1">Marking</label><input id="mk-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="PII" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Description</label><input id="mk-desc" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="optional" /></div>
+        <button id="mk-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add marking</button>
+      </div>
+      <div class="text-xs text-stone-500 mb-3">Markings are a mandatory access gate (MAC): a caller must hold every marking on a resource to access it, regardless of role.</div>
+      ${tbl(["Marking", "Description"], rows, "No markings.")}`;
+  }
+  if (tab === "environments") {
+    const rows = (a.environments || []).map((e) => `<tr>
+      <td class="px-4 py-2 font-medium">${escapeHtml(e.name)}</td>
+      <td class="px-4 py-2 text-stone-600">${escapeHtml(e.region || "local")}</td>
+      <td class="px-4 py-2 text-stone-500">${escapeHtml(e.lifecycleState || "active")}</td>
+    </tr>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2">
+        <div><label class="block text-xs text-stone-500 mb-1">Environment</label><input id="e-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="staging" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Region</label><input id="e-region" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="local" /></div>
+        <button id="e-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add environment</button>
+      </div>
+      ${tbl(["Environment", "Region", "Lifecycle"], rows, "No environments.")}`;
+  }
+  if (tab === "workspaces") {
+    const rows = (a.workspaces || []).map((w) => `<tr>
+      <td class="px-4 py-2 font-medium">${escapeHtml(w.name)}</td>
+      <td class="px-4 py-2 mono text-xs text-stone-500">${escapeHtml(String(w.environmentId).slice(0, 12))}</td>
+      <td class="px-4 py-2 text-stone-500">${escapeHtml(w.lifecycleState || "active")}</td>
+    </tr>`).join("");
+    const envOpts = (a.environments || []).map((e) => `<option value="${escapeHtml(e.id)}">${escapeHtml(e.name)}</option>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2">
+        <div><label class="block text-xs text-stone-500 mb-1">Workspace</label><input id="ws-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="Finance" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Environment</label><select id="ws-env" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${envOpts}</select></div>
+        <button id="ws-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add workspace</button>
+      </div>
+      ${tbl(["Workspace", "Environment", "Lifecycle"], rows, "No workspaces.")}`;
+  }
+  if (tab === "projects") {
+    const rows = (a.projects || []).map((pr) => `<tr>
+      <td class="px-4 py-2 font-medium">${escapeHtml(pr.name)}</td>
+      <td class="px-4 py-2 mono text-xs text-stone-500">${escapeHtml(String(pr.workspaceId).slice(0, 12))}</td>
+      <td class="px-4 py-2 text-stone-500">${escapeHtml(pr.lifecycleState || "active")}</td>
+    </tr>`).join("");
+    const wsOpts = (a.workspaces || []).map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+    return `
+      <div class="mb-4 flex items-end gap-2">
+        <div><label class="block text-xs text-stone-500 mb-1">Project</label><input id="proj-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="Q3 Forecast" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Workspace</label><select id="proj-ws" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${wsOpts}</select></div>
+        <button id="proj-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add project</button>
+      </div>
+      <div class="text-xs text-stone-500 mb-3">A new project starts as a copy of the org's current model and gets its own data — switch to it from the breadcrumb at the top.</div>
+      ${tbl(["Project", "Workspace", "Lifecycle"], rows, "No projects.")}`;
+  }
+  // audit
+  const rows = (a.audit || []).map((ev) => `<tr>
+    <td class="px-4 py-2 mono text-xs text-stone-500">${ev.seq}</td>
+    <td class="px-4 py-2 font-medium">${escapeHtml(ev.action)}</td>
+    <td class="px-4 py-2">${ev.decision ? `<span class="text-[11px] px-1.5 py-px rounded ${ev.decision === "allow" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}">${escapeHtml(ev.decision)}</span>` : "—"}</td>
+    <td class="px-4 py-2 text-stone-600">${escapeHtml(ev.targetRef || "—")}</td>
+    <td class="px-4 py-2 text-stone-500 text-xs">${escapeHtml(ev.reason || "")}</td>
+    <td class="px-4 py-2 text-stone-400 text-xs mono">${escapeHtml((ev.occurredAt || "").toString().slice(0, 19).replace("T", " "))}</td>
+  </tr>`).join("");
+  return `
+    <div class="mb-3 flex items-center gap-2">
+      <button id="audit-verify" class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Verify chain integrity</button>
+      <span id="audit-verify-result" class="text-sm text-stone-500"></span>
+    </div>
+    ${tbl(["#", "Action", "Decision", "Target", "Reason", "When"], rows, "No audit events.")}`;
+}
+
+function bindAdmin() {
+  document.querySelectorAll("[data-admin-tab]").forEach((el) => el.addEventListener("click", () => {
+    state.admin = { ...(state.admin || {}), tab: el.dataset.adminTab };
+    render();
+  }));
+  const reload = () => loadAdmin();
+  const act = async (fn) => { try { await fn(); await reload(); } catch (e) { alert(e.message); } };
+
+  document.getElementById("m-add")?.addEventListener("click", () => act(async () => {
+    const subject = document.getElementById("m-subject").value.trim();
+    if (!subject) throw new Error("Username is required");
+    await api("/v1/memberships", { method: "POST", body: JSON.stringify({ subject, email: document.getElementById("m-email").value.trim() || undefined }) });
+  }));
+  document.getElementById("r-add")?.addEventListener("click", () => act(async () => {
+    const principalId = document.getElementById("r-principal").value.trim();
+    const scopeId = document.getElementById("r-scopeid").value.trim() || state.me?.organizationId;
+    if (!principalId) throw new Error("Principal id is required");
+    await api("/v1/role-assignments", { method: "POST", body: JSON.stringify({ principalId, roleKey: document.getElementById("r-role").value, scopeType: document.getElementById("r-scope").value, scopeId }) });
+  }));
+  document.getElementById("mk-add")?.addEventListener("click", () => act(async () => {
+    const name = document.getElementById("mk-name").value.trim();
+    if (!name) throw new Error("Marking name is required");
+    await api("/v1/markings", { method: "POST", body: JSON.stringify({ name, description: document.getElementById("mk-desc").value.trim() || undefined }) });
+  }));
+  document.getElementById("e-add")?.addEventListener("click", () => act(async () => {
+    const name = document.getElementById("e-name").value.trim();
+    if (!name) throw new Error("Environment name is required");
+    await api("/v1/environments", { method: "POST", body: JSON.stringify({ name, region: document.getElementById("e-region").value.trim() || "local" }) });
+  }));
+  document.getElementById("ws-add")?.addEventListener("click", () => act(async () => {
+    const name = document.getElementById("ws-name").value.trim();
+    const environmentId = document.getElementById("ws-env").value;
+    if (!name) throw new Error("Workspace name is required");
+    if (!environmentId) throw new Error("Pick an environment");
+    await api("/v1/workspaces", { method: "POST", body: JSON.stringify({ name, environmentId }) });
+  }));
+  document.getElementById("proj-add")?.addEventListener("click", () => act(async () => {
+    const name = document.getElementById("proj-name").value.trim();
+    const workspaceId = document.getElementById("proj-ws").value;
+    if (!name) throw new Error("Project name is required");
+    if (!workspaceId) throw new Error("Pick a workspace");
+    await api("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+  }));
+  document.getElementById("audit-verify")?.addEventListener("click", async () => {
+    const el = document.getElementById("audit-verify-result");
+    el.textContent = "verifying…";
+    try {
+      const r = await api("/v1/audit/verify");
+      el.innerHTML = r.ok ? `<span class="text-emerald-700">✓ intact — ${r.length} events, hash chain verified</span>` : `<span class="text-rose-700">✗ tampering detected at seq ${r.brokenAtSeq}</span>`;
+    } catch (e) { el.textContent = e.message; }
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ import * as testQ from "../test/queries.js";
 import * as logisticsQ from "../logistics/queries.js";
 
 import { prisma } from "../db.js";
-import { EVENTS, registryError } from "../events/registry.js";
+import { EVENTS, events, registryError } from "../events/registry.js";
 import { ontologyView, getOntology } from "../ontology/model.js";
 import { fetchLatestModel, modelStatus, rollModel, restoreModel, modelFile, getModelSource, writeSourceOverride } from "../ontology/sync.js";
 import { runAgentTurn } from "../chat/agent.js";
@@ -51,6 +51,8 @@ import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
 import { swapPreview } from "../kernel/codegen/swap.js";
+import { guardModelAction } from "../platform/authz.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
 export function registerRoutes(app: FastifyInstance) {
@@ -259,8 +261,10 @@ export function registerRoutes(app: FastifyInstance) {
   });
   app.post("/api/model/fetch", async (_req, reply) => {
     try {
+      await guardModelAction("model.fetch");
       return await fetchLatestModel();
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return reply.code(502).send({ error: "FETCH_FAILED", message: err?.message ?? String(err) });
     }
   });
@@ -272,9 +276,11 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/api/model/apply", async (req, reply) => {
     const resetOverlay = (req.body as any)?.resetOverlay;
     try {
+      await guardModelAction("model.apply");
       const result = await applyModel({ resetOverlay });
       return { ok: true, ...result, status: applyStatus() };
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return reply.code(500).send({ error: "APPLY_FAILED", message: err?.message ?? String(err), status: applyStatus() });
     }
   });
@@ -285,8 +291,10 @@ export function registerRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "BAD_REQUEST", message: 'direction must be "back" or "forward"' });
     }
     try {
+      await guardModelAction("model.roll");
       return rollModel(dir);
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return reply.code(409).send({ error: "ROLL_FAILED", message: err?.message ?? String(err) });
     }
   });
@@ -297,8 +305,10 @@ export function registerRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "BAD_REQUEST", message: "index must be a non-negative integer" });
     }
     try {
+      await guardModelAction("model.restore");
       return restoreModel(index);
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return reply.code(409).send({ error: "RESTORE_FAILED", message: err?.message ?? String(err) });
     }
   });
@@ -312,17 +322,17 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/registry-status", async () => ({
     ok: registryError == null,
     error: registryError,
-    eventCount: EVENTS.length,
+    eventCount: events().length,
     // Non-fatal: overlay entries left over from a previous model (regenerate the
     // overlay via the swap to restore curated ordering/phases for those events).
     staleOverlayKeys: getOntology().staleOverlayKeys,
   }));
-  app.get("/sim/events", async () => EVENTS);
+  app.get("/sim/events", async () => events());
   app.get("/sim/event-log", async (req) => {
     const limit = Number((req.query as any)?.limit ?? 200);
     const demandId = (req.query as any)?.demandId as string | undefined;
     return prisma.eventLog.findMany({
-      where: demandId ? { demandId } : undefined,
+      where: demandId ? { demandId, ...eventLogOrgWhere() } : eventLogOrgWhere(),
       orderBy: { occurredAt: "desc" },
       take: limit,
     });
@@ -367,7 +377,7 @@ export function registerRoutes(app: FastifyInstance) {
     const o = getOntology();
     const singular = o.rootAggregate;
     // Per-BC event counts feed the provenance rollup ("X of N steps real").
-    const counts = await prisma.eventLog.groupBy({ by: ["boundedContext"], _count: { _all: true } });
+    const counts = await prisma.eventLog.groupBy({ by: ["boundedContext"], where: eventLogOrgWhere(), _count: { _all: true } });
     const eventCountByContext: Record<string, number> = {};
     for (const c of counts) eventCountByContext[c.boundedContext] = c._count._all;
     return {
@@ -377,7 +387,7 @@ export function registerRoutes(app: FastifyInstance) {
       rootAggregatePlural: pluralize(singular),
       boundedContextCount: o.boundedContexts.length,
       aggregateCount: new Set(o.events.map((e) => e.aggregateRoot).filter(Boolean)).size,
-      eventCount: EVENTS.length,
+      eventCount: events().length,
       // True when the projection tables don't match the model yet — the UI
       // auto-rebuilds (with the loader) so no manual "Rebuild" button is needed.
       rebuildNeeded: await rebuildNeeded(),

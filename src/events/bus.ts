@@ -7,6 +7,7 @@ import { findEvent, type EventDef } from "./registry.js";
 import { getBusinessClock } from "./clock.js";
 import { getOntology } from "../ontology/model.js";
 import { provenanceFor, type ProvMode } from "../twin/provenance.js";
+import { currentOrgId, currentProjectId } from "../platform/tenancy/context.js";
 import type { Role } from "../auth.js";
 
 export interface EmittedEvent {
@@ -206,6 +207,11 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       payload: JSON.stringify(ev.payload),
       businessAt: getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date(),
       provenance,
+      // Multi-tenant spine: stamp the resolved org + project at the single
+      // EventLog write chokepoint (system org/project for the demo + non-request
+      // contexts). projectId scopes the simulator's per-project data plane.
+      organizationId: currentOrgId(),
+      projectId: currentProjectId(),
     },
   });
 

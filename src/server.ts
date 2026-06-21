@@ -13,6 +13,9 @@ import { loadPacks } from "./packs/loadPacks.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
+import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
+import { registerControlRoutes } from "./platform/http/control-routes.js";
+import { seedSystemOrg } from "./platform/provisioning/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(here, "..", "web");
@@ -25,7 +28,18 @@ export async function buildServer() {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
   }
 
+  // Multi-tenant control plane: seed the system tenant BEFORE serving so the
+  // demo's header-less requests can resolve to it, then bind a tenant context to
+  // every request (org_id derived from identity, never from client input).
+  try {
+    await seedSystemOrg();
+  } catch (err) {
+    app.log.error({ err }, "system-org seed failed — tenant resolution will reject requests until fixed");
+  }
+  registerTenantPlugin(app);
+
   registerRoutes(app);
+  registerControlRoutes(app);
   wireDerivedEvents();
   startOntologyWatch(app.log);
 

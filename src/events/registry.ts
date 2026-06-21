@@ -10,7 +10,7 @@
 // A conformance test locks the linkage: tests/ontology/conformance.test.ts.
 
 import type { Role } from "../auth.js";
-import { getOntology, onOntologyReload } from "../ontology/model.js";
+import { getOntology, onOntologyReload, ontologyCacheKey } from "../ontology/model.js";
 
 export interface EventDef {
   name: string;
@@ -75,8 +75,34 @@ function rebuildEvents(): void {
 rebuildEvents();
 onOntologyReload(rebuildEvents);
 
+// Per-PROJECT events. EVENTS (above) stays the SYSTEM/current-model live binding
+// for system-context consumers (chat, the legacy stepper, conformance); events()
+// resolves the ACTIVE project's events, keyed by the same content-hash cache key
+// getOntology() uses. This is what makes emit()/findEvent resolve the RIGHT model
+// when a non-system project is active.
+const eventsByKey = new Map<string, ReadonlyArray<EventDef>>();
+
+export function events(): ReadonlyArray<EventDef> {
+  const key = ontologyCacheKey();
+  const cached = eventsByKey.get(key);
+  if (cached) return cached;
+  try {
+    const evs = buildEvents();
+    eventsByKey.set(key, evs);
+    return evs;
+  } catch {
+    // Do NOT cache a failure (so a corrected model retries). The system path
+    // keeps its last-good EVENTS array; a non-system project with a bad model
+    // yields [] for this call only.
+    return key === "system" ? EVENTS : [];
+  }
+}
+
+// A system-model reload changes what the "system" key resolves to → drop the cache.
+onOntologyReload(() => eventsByKey.clear());
+
 export function findEvent(ref: string): EventDef {
-  const ev = EVENTS.find((e) => e.ref === ref);
+  const ev = events().find((e) => e.ref === ref);
   if (!ev) throw new Error(`unknown event ref: ${ref}`);
   return ev;
 }

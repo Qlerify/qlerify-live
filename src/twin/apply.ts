@@ -10,7 +10,12 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { QLERIFY_DIR, reloadOntology, getOntology } from "../ontology/model.js";
+import { prisma } from "../db.js";
+import { DomainError } from "../errors.js";
+import { isSystemProject, requireTenant } from "../platform/tenancy/context.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { createVersion, ensureOntologyResource } from "../platform/ontology-store/ontology-store.js";
+import { QLERIFY_DIR, reloadOntology, getOntology, loadOntologyFromStrings, setProjectModel } from "../ontology/model.js";
 import { applyModelTables, setMeta, type ApplyResult } from "./projection-store.js";
 import { dataModelSignature } from "./sim.js";
 import { resetTransactionalState } from "../simulator/runner.js";
@@ -63,6 +68,13 @@ function writeFreshOverlay(): void {
 /** Run the full in-process rebuild. Updates `status` as it goes (for the loader).
  * `resetOverlay` defaults true; pass false to keep a hand-curated overlay. */
 export async function applyModel(opts: { resetOverlay?: boolean } = {}): Promise<ApplyResult> {
+  // The rebuild reloads the on-disk model + calls resetTransactionalState (which
+  // clears the SHARED EventLog + Prisma tables). It is therefore system-project
+  // only — a project must never trip the global reset. Project tables are created
+  // lazily and the project's model is its own CAS version.
+  if (!isSystemProject()) {
+    throw new DomainError("Model rebuild is only supported on the system default project.");
+  }
   status = { phase: "loading-model", message: "Loading model…", startedAt: Date.now(), finishedAt: null, dropped: [], created: [], error: null };
   try {
     // 1) Make sure the latest workflow.json is the live ontology.
@@ -100,4 +112,47 @@ export async function applyModel(opts: { resetOverlay?: boolean } = {}): Promise
     status = { ...status, phase: "error", message: "Apply failed.", finishedAt: Date.now(), error: err?.message ?? String(err) };
     throw err;
   }
+}
+
+/**
+ * Set the ACTIVE (non-system) project's own model from a provided Qlerify export.
+ * Stores it as a new version of the project's ontology (CAS) and rebuilds ONLY
+ * this project's data plane — its own gen__p<project>_ tables + its own EventLog.
+ * The system demo and every OTHER project are untouched (everything here is
+ * project-scoped via the ALS context). Never reaches the system disk model or the
+ * global resetTransactionalState.
+ */
+export async function setActiveProjectModel(workflow: string, overlay: string | null): Promise<{ versionId: string; seq: number; changed: boolean }> {
+  const ctx = requireTenant();
+  if (isSystemProject() || !ctx.projectId) {
+    throw new DomainError("Setting a project model applies to a non-system project; the system project uses the demo model controls.");
+  }
+  // Validate it's a loadable Qlerify model BEFORE we touch anything.
+  try {
+    loadOntologyFromStrings(workflow, overlay);
+  } catch (e: any) {
+    throw new DomainError(`Invalid Qlerify model: ${e?.message ?? String(e)}`);
+  }
+
+  // Resolve (or self-heal-create) the project's "workflow" ontology, then store
+  // the new content as its current version.
+  let ont = await prisma.platOntology.findFirst({
+    where: { organizationId: ctx.organizationId, projectId: ctx.projectId, name: "workflow" },
+    select: { id: true },
+  });
+  if (!ont) {
+    const proj = await prisma.platProject.findFirst({ where: { id: ctx.projectId, organizationId: ctx.organizationId }, select: { workspaceId: true } });
+    const r = await ensureOntologyResource({ organizationId: ctx.organizationId, projectId: ctx.projectId, workspaceId: proj?.workspaceId ?? null, environmentId: null, name: "workflow", ownerId: ctx.principal.id });
+    ont = { id: r.ontologyId };
+  }
+  const v = await createVersion(ctx.organizationId, ont.id, workflow, overlay, { source: "set", createdBy: ctx.principal.id });
+
+  // Make the new model live for THIS request, then rebuild the project's data
+  // plane for it: drop the project's old projection tables, create the new
+  // model's, and clear the project's run history. All project-scoped.
+  setProjectModel(ctx.projectId, workflow, overlay, v.manifestHash);
+  await applyModelTables(getOntology());
+  await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() });
+
+  return { versionId: v.versionId, seq: v.seq, changed: v.changed };
 }

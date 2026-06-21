@@ -280,8 +280,426 @@ model EventLog {
   occurredAt    DateTime @default(now())  // real wall-clock time the simulator recorded the event
   businessAt    DateTime?  // simulated business time — the date the event would have occurred in the real world
   provenance    String?  // simulated | recorded | live — where this fact came from (null = legacy → simulated)
+  // Multi-tenant spine: the organization this fact belongs to. Stamped at the
+  // single emit() chokepoint from the resolved tenant context (null = legacy
+  // pre-tenancy rows, read as the system org). See src/platform/*.
+  organizationId String?
+  // The project (within the org) this fact belongs to (null = the system default
+  // project / legacy). Enables per-project data scoping in the simulator.
+  projectId      String?
 
   @@index([occurredAt])
   @@index([eventRef])
   @@index([demandId, occurredAt])
+  @@index([organizationId, occurredAt])
+  @@index([projectId, occurredAt])
+}
+
+// ===========================================================================
+// MULTI-TENANT CONTROL PLANE  (spec: multi-tenant-platform-spec.md §4–§18)
+// ---------------------------------------------------------------------------
+// All control-plane / tenancy tables are physically namespaced with `plat_`
+// (via @@map) so they never collide with the legacy demo's typed tables or the
+// raw-SQL `gen_` projection store. Model names are `Plat*`-prefixed for the
+// same reason (the spec's `Project`/`Resource` would otherwise clash with the
+// Ericsson PRIM `Project`).
+//
+// SQLite caveat (DISCLOSED, not faked): SQLite has no ROW LEVEL SECURITY. The
+// composite foreign keys below give the spec's §8.1 "a child cannot reference a
+// parent in another organization" as DEFENSE-IN-DEPTH, but the load-bearing
+// isolation invariant is enforced by the application's single fail-closed
+// tenant-scoped data path (src/platform/tenancy/scoped-store.ts), with Postgres
+// + RLS reserved as the first task of increment 2 behind the TenantDataSource
+// seam. See ARCHITECTURE acceptance checklist.
+// ===========================================================================
+
+// --- Commercial / containment hierarchy (§4, §8.1) -------------------------
+
+model PlatCustomerAccount {
+  id            String   @id @default(uuid())
+  name          String
+  planId        String?
+  createdAt     DateTime @default(now())
+  organizations PlatOrganization[]
+
+  @@map("plat_customer_accounts")
+}
+
+model PlatOrganization {
+  id                String   @id @default(uuid())
+  customerAccountId String
+  name              String
+  slug              String   @unique   // stable handle for routing/lookup; org_id stays canonical
+  homeRegion        String   @default("local")
+  status            String   @default("active")   // active | suspended
+  // BYOK/CMK config slot (§13) — key REFERENCES only, never key material. Off in inc 1.
+  kekReference      String?
+  byokEnabled       Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  customerAccount   PlatCustomerAccount @relation(fields: [customerAccountId], references: [id])
+  environments      PlatEnvironment[]
+
+  @@map("plat_organizations")
+}
+
+model PlatEnvironment {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String                  // development | test | production
+  lifecycleState String   @default("active")
+  region         String   @default("local")
+  createdAt      DateTime @default(now())
+
+  organization   PlatOrganization @relation(fields: [organizationId], references: [id])
+  workspaces     PlatWorkspace[]
+
+  // Composite-FK target: children prove same-org membership by referencing
+  // (id, organizationId) together (§8.1).
+  @@unique([id, organizationId])
+  @@unique([organizationId, name])
+  @@map("plat_environments")
+}
+
+model PlatWorkspace {
+  id             String   @id @default(uuid())
+  organizationId String
+  environmentId  String
+  name           String
+  lifecycleState String   @default("active")
+  createdAt      DateTime @default(now())
+
+  // Composite FK: the workspace's environment MUST belong to the same org.
+  environment    PlatEnvironment @relation(fields: [environmentId, organizationId], references: [id, organizationId])
+  projects       PlatProject[]
+
+  @@unique([id, organizationId])
+  @@unique([organizationId, environmentId, name])
+  @@map("plat_workspaces")
+}
+
+model PlatProject {
+  id             String   @id @default(uuid())
+  organizationId String
+  workspaceId    String
+  name           String
+  lifecycleState String   @default("active")
+  createdAt      DateTime @default(now())
+
+  // Composite FK: the project's workspace MUST belong to the same org.
+  workspace      PlatWorkspace @relation(fields: [workspaceId, organizationId], references: [id, organizationId])
+
+  @@unique([id, organizationId])
+  @@unique([organizationId, workspaceId, name])
+  @@map("plat_projects")
+}
+
+// --- Resource base model (§8.2) --------------------------------------------
+// The authorization unit. Org/env/workspace/project-scoped (any of the parents
+// may be null per §8.2). Typed assets (Ontology, Dataset, …) extend it 1:1.
+// scopeKey collapses the nullable scope columns into a single comparable text
+// so name-uniqueness works without Postgres `NULLS NOT DISTINCT` (§8.2 note).
+model PlatResource {
+  id             String   @id @default(uuid())
+  organizationId String
+  environmentId  String?
+  workspaceId    String?
+  projectId      String?
+  resourceType   String                  // Ontology | Dataset | Pipeline | …
+  name           String
+  ownerId        String                  // principal id
+  classification String?
+  lifecycleState String   @default("active")   // active | archived | deleted
+  scopeKey       String                  // app-computed: env/-/ws/-/proj key for uniqueness
+  version        Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  ontology       PlatOntology?
+
+  @@unique([organizationId, scopeKey, name, lifecycleState])
+  @@index([organizationId, resourceType])
+  @@map("plat_resources")
+}
+
+// --- Identity (§5) — GLOBAL, never org-stamped -----------------------------
+model PlatIdentity {
+  id           String   @id @default(uuid())
+  subject      String   @unique          // stable IdP subject / credential id
+  primaryEmail String?
+  status       String   @default("active")
+  // Password login (scrypt$<saltHex>$<hashHex>). Null ⇒ this identity cannot
+  // password-login (e.g. the `system` identity stays header-shim only). An
+  // identity WITH a password can no longer be impersonated via the raw-subject
+  // dev shim — it must present a real session token.
+  passwordHash String?
+  createdAt    DateTime @default(now())
+
+  memberships  PlatOrgMembership[]
+
+  @@map("plat_identities")
+}
+
+// Opaque session tokens issued by /v1/auth/login (real logout + expiry). Only
+// sha256(token) is stored — a leaked row is not a usable credential, and a
+// logged-out / expired token stops resolving. The raw token is the bearer value.
+model PlatSession {
+  id         String    @id @default(uuid())
+  tokenHash  String    @unique
+  identityId String
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([identityId])
+  @@map("plat_sessions")
+}
+
+// Platform-admin (superuser / break-glass, §10). A GLOBAL grant, set only by the
+// seed — deliberately NOT a null-org role_assignment (that would be invisible to
+// the per-org ReBAC walk). No write endpoint exposes it.
+model PlatPlatformAdmin {
+  identityId String   @id
+  grantedAt  DateTime @default(now())
+
+  @@map("plat_platform_admins")
+}
+
+model PlatOrgMembership {
+  id             String   @id @default(uuid())
+  identityId     String
+  organizationId String
+  status         String   @default("active")
+  createdAt      DateTime @default(now())
+
+  identity       PlatIdentity @relation(fields: [identityId], references: [id])
+
+  @@unique([identityId, organizationId])
+  @@index([organizationId])
+  @@map("plat_org_memberships")
+}
+
+model PlatGroup {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+
+  @@unique([organizationId, name])
+  @@map("plat_groups")
+}
+
+model PlatGroupMembership {
+  id               String  @id @default(uuid())
+  organizationId   String
+  groupId          String
+  memberIdentityId String?   // a member is either an identity …
+  memberGroupId    String?   // … or a nested group (§5 groups may nest)
+
+  @@index([groupId])
+  @@index([organizationId])
+  @@map("plat_group_memberships")
+}
+
+model PlatServiceAccount {
+  id             String   @id @default(uuid())
+  organizationId String                  // machine identities ARE org-scoped (§5)
+  name           String
+  status         String   @default("active")
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, name])
+  @@map("plat_service_accounts")
+}
+
+// --- Authorization: roles + assignments (§6.3, §8.3) -----------------------
+model PlatRole {
+  id          String  @id @default(uuid())
+  // Built-in roles use a null organizationId; custom roles (Phase 2) are org-scoped.
+  organizationId String?
+  key         String                      // owner | editor | viewer | deployer | org_admin | <custom>
+  name        String
+  builtin     Boolean @default(false)
+
+  @@unique([organizationId, key])
+  @@map("plat_roles")
+}
+
+// The source of record that projects into ReBAC tuples (§6.3). principal +
+// role + scope. scopeType ∈ organization|environment|workspace|project|resource.
+model PlatRoleAssignment {
+  id             String   @id @default(uuid())
+  organizationId String
+  principalId    String
+  principalType  String                  // identity | group | service_account
+  roleKey        String                  // owner | editor | viewer | deployer | org_admin
+  scopeType      String                  // organization | environment | workspace | project | resource
+  scopeId        String
+  grantedBy      String?
+  grantedAt      DateTime @default(now())
+
+  @@unique([organizationId, principalId, principalType, roleKey, scopeType, scopeId])
+  @@index([organizationId, scopeType, scopeId])
+  @@index([organizationId, principalId])
+  @@map("plat_role_assignments")
+}
+
+// --- Markings / MAC (§7) ----------------------------------------------------
+model PlatMarking {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String                  // PII | ITAR | Project-Falcon | …
+  description    String?
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, name])
+  @@map("plat_markings")
+}
+
+model PlatMarkingGrant {
+  id             String   @id @default(uuid())
+  organizationId String
+  markingId      String
+  principalId    String                  // identity | group | service_account
+  principalType  String
+  grantedBy      String?
+  grantedAt      DateTime @default(now())
+
+  @@unique([organizationId, markingId, principalId, principalType])
+  @@index([organizationId, principalId])
+  @@map("plat_marking_grants")
+}
+
+model PlatResourceMarking {
+  id             String   @id @default(uuid())
+  organizationId String
+  resourceId     String
+  markingId      String
+  source         String   @default("direct")   // direct | inherited (§7 lineage propagation)
+
+  @@unique([organizationId, resourceId, markingId])
+  @@index([organizationId, resourceId])
+  @@map("plat_resource_markings")
+}
+
+// Audited explicit cross-scope share (§6.4 — requires `administer`).
+model PlatSharingGrant {
+  id             String   @id @default(uuid())
+  organizationId String
+  resourceId     String
+  principalId    String
+  principalType  String
+  permission     String                  // view | edit | administer
+  grantedBy      String?
+  grantedAt      DateTime @default(now())
+
+  @@index([organizationId, resourceId])
+  @@index([organizationId, principalId])
+  @@map("plat_sharing_grants")
+}
+
+// --- Audit (§17) — append-only, per-org hash-chained ------------------------
+model PlatAuditEvent {
+  id               String   @id @default(uuid())
+  organizationId   String
+  streamId         String                // per-org stream (org id today)
+  seq              Int                   // monotonic within (org, stream)
+  actorPrincipalId String?
+  action           String
+  targetRef        String?
+  decision         String?               // allow | deny
+  reason           String?
+  prevHash         String?
+  thisHash         String
+  occurredAt       DateTime @default(now())
+
+  @@unique([organizationId, streamId, seq])
+  @@index([organizationId, occurredAt])
+  @@map("plat_audit_events")
+}
+
+// --- Ontology as a tenant-scoped resource (§16) -----------------------------
+// The model (workflow.json) IS a Resource. Metadata + the version timeline live
+// here; the ~100KB bodies live content-addressed in the blob store
+// (src/platform/ontology-store/content-store.ts). A VERSION is the
+// (workflow.json + overlay.json) PAIR addressed via a per-version manifest blob.
+model PlatOntology {
+  id               String   @id @default(uuid())
+  organizationId   String
+  resourceId       String   @unique      // 1:1 with its PlatResource (authz unit)
+  environmentId    String?
+  workspaceId      String?
+  projectId        String?               // the project this model belongs to (null = org-level/legacy)
+  name             String
+  currentVersionId String?               // pointer → PlatOntologyVersion.id (manifest.current)
+  headBranchId     String?               // default "main" branch
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  resource         PlatResource @relation(fields: [resourceId], references: [id])
+  versions         PlatOntologyVersion[]
+  branches         PlatOntologyBranch[]
+
+  @@index([organizationId])
+  @@map("plat_ontologies")
+}
+
+model PlatOntologyVersion {
+  id             String   @id @default(uuid())
+  organizationId String
+  ontologyId     String
+  seq            Int                     // 0,1,2… within (org, ontology)
+  manifestHash   String                  // sha256 of the per-version manifest blob (the pair)
+  contentSize    Int      @default(0)    // bytes of the workflow body (for listing/quotas)
+  source         String   @default("edit")  // initial | fetch | edit | restore
+  summaryJson    String?                 // {events, roles, boundedContexts, …}
+  createdBy      String?
+  createdAt      DateTime @default(now())
+
+  ontology       PlatOntology @relation(fields: [ontologyId], references: [id])
+
+  @@unique([organizationId, ontologyId, seq])
+  @@index([organizationId, ontologyId])
+  @@map("plat_ontology_versions")
+}
+
+// Git-like branch ref (§15). "main" behaves like today's manifest `current`.
+model PlatOntologyBranch {
+  id             String   @id @default(uuid())
+  organizationId String
+  ontologyId     String
+  name           String                  // main | feature/x
+  headVersionId  String?
+  parentBranchId String?
+  status         String   @default("open")  // open | merged | abandoned
+  createdAt      DateTime @default(now())
+
+  ontology       PlatOntology @relation(fields: [ontologyId], references: [id])
+
+  @@unique([organizationId, ontologyId, name])
+  @@map("plat_ontology_branches")
+}
+
+// --- Control-plane tenant registry / router (§10) — NOT org-scoped ----------
+model PlatTenantRegistry {
+  organizationId    String   @id
+  customerAccountId String
+  tenancyMode       String   @default("pooled")   // pooled | bridged | siloed (only pooled in inc 1)
+  homeRegion        String   @default("local")
+  stackId           String   @default("local")
+  shardId           String?
+  status            String   @default("active")   // provisioning | active | suspended | deprovisioning
+  planId            String?
+  createdAt         DateTime @default(now())
+
+  @@map("plat_tenant_registry")
+}
+
+model PlatStack {
+  stackId   String @id
+  region    String @default("local")
+  mode      String @default("pooled")
+  endpoints String @default("{}")   // JSON: data-plane service URLs
+  status    String @default("active")
+
+  @@map("plat_stacks")
 }

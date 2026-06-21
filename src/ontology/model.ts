@@ -24,6 +24,7 @@
 import { readFileSync, existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Absolute path to the .qlerify directory holding workflow.json (and the
@@ -257,6 +258,19 @@ function readOverlay(qlerifyDir: string): RawOverlay {
 export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
   const wf = readJson<RawWorkflow>(join(qlerifyDir, "workflow.json"));
   const overlay = readOverlay(qlerifyDir);
+  return buildOntology(wf, overlay);
+}
+
+/** Build an Ontology from parsed workflow + overlay STRINGS (no fs). The disk
+ * loader above and the per-project content loader (a project's model lives in the
+ * content-addressed store, not on disk) both funnel through buildOntology. */
+export function loadOntologyFromStrings(workflowJson: string, overlayJson: string | null): Ontology {
+  const wf = JSON.parse(workflowJson) as RawWorkflow;
+  const overlay = (overlayJson ? JSON.parse(overlayJson) : {}) as RawOverlay;
+  return buildOntology(wf, overlay);
+}
+
+function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
   const overlayEvents = overlay.events ?? {};
 
   // Every bounded context as an equal (name, contribution) pair: the primary
@@ -473,10 +487,76 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
 
 let cached: Ontology | undefined;
 
-/** Memoized accessor — loads the model once per process. */
-export function getOntology(): Ontology {
+// --- Per-project model resolution -------------------------------------------
+// The live model is scoped to the ACTIVE project (currentProjectId from ALS).
+// The SYSTEM default project reads the on-disk workflow.json — the demo's
+// byte-identical path — while every other project's model content is bound via
+// setProjectModel() by the request pipeline (the onRequest hook loads it from the
+// content-addressed store BEFORE the handler runs, so the sync getOntology()
+// never has to do I/O and never falls back to the wrong model).
+
+/** The system project's model: today's memoized on-disk singleton, unchanged. */
+function getSystemOntology(): Ontology {
   if (!cached) cached = loadOntology();
   return cached;
+}
+
+// projectId → bound content; parsed Ontology cache keyed by `${projectId}::${hash}`
+// (the hash is immutable, so a cache entry is never stale).
+const projectContent = new Map<string, { workflow: string; overlay: string | null; hash: string }>();
+const parsedByKey = new Map<string, Ontology>();
+const PARSED_CACHE_MAX = 32;
+
+const PROJECT_CONTENT_MAX = 64;
+
+/** Bind a project's current model content (called before the handler runs).
+ * Bounded LRU-ish so a long-lived process serving many projects doesn't grow the
+ * content map without limit. */
+export function setProjectModel(projectId: string, workflow: string, overlay: string | null, hash: string): void {
+  if (projectContent.has(projectId)) projectContent.delete(projectId); // move to most-recent
+  projectContent.set(projectId, { workflow, overlay, hash });
+  while (projectContent.size > PROJECT_CONTENT_MAX) {
+    const oldest = projectContent.keys().next().value;
+    if (oldest === undefined) break;
+    projectContent.delete(oldest);
+  }
+}
+
+/** Cache key for the ACTIVE project's model — also used by registry.events() so
+ * events resolve per project. System uses a stable "system" key (its derived
+ * caches are cleared on reload). */
+export function ontologyCacheKey(): string {
+  if (isSystemProject()) return "system";
+  const pid = currentProjectId();
+  const c = projectContent.get(pid);
+  return c ? `${pid}::${c.hash}` : `${pid}::unloaded`;
+}
+
+function evictParsed(): void {
+  if (parsedByKey.size <= PARSED_CACHE_MAX) return;
+  for (const k of parsedByKey.keys()) {
+    if (k === "system") continue; // never evict the demo
+    parsedByKey.delete(k);
+    if (parsedByKey.size <= PARSED_CACHE_MAX) break;
+  }
+}
+
+/** The live model for the active project. System → disk; other projects → their
+ * bound CAS content. A non-system project whose content is not loaded throws
+ * (never silently serves the demo model — the onRequest hook must bind it). */
+export function getOntology(): Ontology {
+  if (isSystemProject()) return getSystemOntology();
+  const pid = currentProjectId();
+  const c = projectContent.get(pid);
+  if (!c) throw new Error(`model for project ${pid} is not loaded`);
+  const key = `${pid}::${c.hash}`;
+  let o = parsedByKey.get(key);
+  if (!o) {
+    o = loadOntologyFromStrings(c.workflow, c.overlay);
+    parsedByKey.set(key, o);
+    evictParsed();
+  }
+  return o;
 }
 
 /** Plain-data projection of the ontology, safe to serialize over HTTP. */

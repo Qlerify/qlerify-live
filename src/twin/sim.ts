@@ -14,6 +14,8 @@ import { prisma } from "../db.js";
 import { newId } from "../util/ids.js";
 import { withScope } from "../events/bus.js";
 import { provenanceFor } from "./provenance.js";
+import { currentOrgId, currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { genericApply } from "../commands/base.js";
@@ -32,6 +34,11 @@ export function dataModelSignature(): string {
  * slate), or when the loaded model's projection tables are missing / drifted.
  * The UI uses this to auto-rebuild on a model change instead of a manual button. */
 export async function rebuildNeeded(): Promise<boolean> {
+  // Non-system projects use their own lazily-created, per-project gen_ tables and
+  // a fixed CAS model version — they never need the system's global drop/recreate
+  // rebuild (which also resets shared state). The dashboard creates a project's
+  // tables on first "+ New".
+  if (!isSystemProject()) return false;
   // Model switch: the data in the tables is from a previously-loaded model, so a
   // clean-slate rebuild is needed. Null marker = data unclaimed yet.
   const dataModel = await store.getMeta("dataModel");
@@ -140,7 +147,7 @@ function objectFieldValue(ef: EntitySchema["fields"][number], ont: Ontology): un
 /** Map aggregateRoot → its instance id already created in this run (from the log). */
 async function runInstances(scopeId: string): Promise<Map<string, string>> {
   const rows = await prisma.eventLog.findMany({
-    where: { demandId: scopeId },
+    where: { demandId: scopeId, ...eventLogOrgWhere() },
     select: { aggregateRoot: true, aggregateId: true },
     orderBy: { occurredAt: "asc" },
   });
@@ -217,7 +224,7 @@ export async function genericCurrentStep(instanceId: string): Promise<{ index: n
   const ont = getOntology();
   const order = ont.linearOrder();
   const fired = new Set(
-    (await prisma.eventLog.findMany({ where: { demandId: instanceId }, distinct: ["eventRef"], select: { eventRef: true } })).map((r) => r.eventRef),
+    (await prisma.eventLog.findMany({ where: { demandId: instanceId, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } })).map((r) => r.eventRef),
   );
   for (let i = 0; i < order.length; i++) {
     const ev = ont.eventByKey(order[i]!)!;
@@ -252,6 +259,8 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
         aggregateRoot: event.aggregateRoot, aggregateId: "", demandId: instanceId,
         role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
         provenance: await provenanceFor(event.boundedContext),
+        organizationId: currentOrgId(),
+        projectId: currentProjectId(),
       },
     });
   }
@@ -271,7 +280,7 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
   }
   // Also delete child rows created in this run (from the log's aggregateIds).
   const rows = await prisma.eventLog.findMany({
-    where: { demandId: instanceId },
+    where: { demandId: instanceId, ...eventLogOrgWhere() },
     select: { aggregateRoot: true, aggregateId: true },
   });
   const seen = new Set<string>();
@@ -284,13 +293,13 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
       if (await store.tableExists(r.aggregateRoot)) await store.deleteById(r.aggregateRoot, r.aggregateId);
     } catch { /* one bad row must not abort the whole delete */ }
   }
-  await prisma.eventLog.deleteMany({ where: { demandId: instanceId } });
+  await prisma.eventLog.deleteMany({ where: { demandId: instanceId, ...eventLogOrgWhere() } });
 }
 
 /** Clear all runs: every projection row + the whole event log. */
 export async function genericDeleteAll(): Promise<void> {
-  await prisma.eventLog.deleteMany({});
-  await store.clearAll();
+  await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() }); // scoped to the active project
+  await store.clearAll(); // listProjectionTables is project-scoped → clears only this project's tables
 }
 
 /** List runs: one row per root-aggregate instance, with progress. */
@@ -303,8 +312,8 @@ export async function genericListInstances(): Promise<any[]> {
   const out: any[] = [];
   for (const row of rows) {
     const id = String(row.id);
-    const progressRows = await prisma.eventLog.findMany({ where: { demandId: id }, distinct: ["eventRef"], select: { eventRef: true } });
-    const last = await prisma.eventLog.findFirst({ where: { demandId: id }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
+    const progressRows = await prisma.eventLog.findMany({ where: { demandId: id, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } });
+    const last = await prisma.eventLog.findFirst({ where: { demandId: id, ...eventLogOrgWhere() }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
     out.push({ ...row, progress: progressRows.length, total, lastEvent: last });
   }
   return out;
@@ -314,7 +323,7 @@ export async function genericListInstances(): Promise<any[]> {
 export async function genericInstanceDetail(instanceId: string): Promise<any> {
   const ont = getOntology();
   const rootRow = (await store.tableExists(ont.rootAggregate)) ? await store.findById(ont.rootAggregate, instanceId) : null;
-  const events = await prisma.eventLog.findMany({ where: { demandId: instanceId }, orderBy: { occurredAt: "asc" } });
+  const events = await prisma.eventLog.findMany({ where: { demandId: instanceId, ...eventLogOrgWhere() }, orderBy: { occurredAt: "asc" } });
   // Rows created in this run, grouped by aggregate (from the log's aggregateIds).
   const byAgg: Record<string, any[]> = {};
   const seen = new Map<string, Set<string>>();

@@ -10,7 +10,6 @@ import { roleFromRequest, assertRole } from "../auth.js";
 import { isHandledError, DomainError } from "../errors.js";
 import { genericApply } from "../commands/base.js";
 import { kebabCase } from "../kernel/codegen/introspect.js";
-import { applyModel, applyStatus } from "../twin/apply.js";
 import {
   genericNewInstance, genericStep, genericCurrentStep,
   genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
@@ -44,14 +43,11 @@ import * as logisticsQ from "../logistics/queries.js";
 import { prisma } from "../db.js";
 import { EVENTS, events, registryError } from "../events/registry.js";
 import { ontologyView, getOntology } from "../ontology/model.js";
-import { fetchLatestModel, modelStatus, rollModel, restoreModel, modelFile, getModelSource, writeSourceOverride } from "../ontology/sync.js";
 import { runAgentTurn } from "../chat/agent.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
 import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
-import { swapPreview } from "../kernel/codegen/swap.js";
-import { guardModelAction } from "../platform/authz.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
@@ -198,10 +194,6 @@ export function registerRoutes(app: FastifyInstance) {
   // Codegen drift: which generated commands are current vs. need regeneration
   // after a model hot-reload (gwt-drift / schema-drift / missing-in-model).
   app.get("/api/commands/status", async () => codegenStatus());
-  // Swap preview: read-only diff of what applying the current model to the DB
-  // would DROP (data permanently lost), create, and keep. The UI shows this as
-  // the irreversible-swap warning before anyone runs `npm run swap --yes`.
-  app.get("/api/model/swap-preview", async () => swapPreview());
   // Human-readable description of what a command does and how detection works.
   app.get("/commands/:bc/:name/describe", async (req, reply) => {
     const { name } = req.params as { bc: string; name: string };
@@ -224,94 +216,6 @@ export function registerRoutes(app: FastifyInstance) {
   // The live Qlerify model: domain-event DAG, roles, commands, entities,
   // queries. Drives the front-end process graph and any model-aware tooling.
   app.get("/api/ontology", async () => ontologyView());
-
-  // -- MODEL SYNC & VERSION HISTORY --
-  // Pull the latest workflow.json from the Qlerify modeller, snapshot it, and
-  // hot-reload. Version history supports rolling back and forward.
-  app.get("/api/model/status", async () => modelStatus());
-  // Metadata + content for the in-app viewer dialog.
-  app.get("/api/model/file", async (_req, reply) => {
-    try {
-      return modelFile();
-    } catch (err: any) {
-      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
-    }
-  });
-  // Source URL the fetch pulls from (editable override, or the default MCP endpoint).
-  app.get("/api/model/source", async () => getModelSource());
-  app.put("/api/model/source", async (req, reply) => {
-    const url = (req.body as any)?.url;
-    if (url != null && typeof url !== "string") {
-      return reply.code(400).send({ error: "BAD_REQUEST", message: "url must be a string or null" });
-    }
-    try {
-      writeSourceOverride(url ?? null);
-      return getModelSource();
-    } catch (err: any) {
-      return reply.code(400).send({ error: "BAD_URL", message: err?.message ?? String(err) });
-    }
-  });
-  // Raw workflow.json, openable directly in a browser tab (the "link to it").
-  app.get("/api/model/file/raw", async (_req, reply) => {
-    try {
-      return reply.type("application/json").send(modelFile().content);
-    } catch (err: any) {
-      return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
-    }
-  });
-  app.post("/api/model/fetch", async (_req, reply) => {
-    try {
-      await guardModelAction("model.fetch");
-      return await fetchLatestModel();
-    } catch (err: any) {
-      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
-      return reply.code(502).send({ error: "FETCH_FAILED", message: err?.message ?? String(err) });
-    }
-  });
-
-  // Apply the loaded model: rebuild the overlay + DROP/CREATE the projection
-  // tables to match it (in-process, no restart). Destructive by design — the
-  // projection tables are disposable. The UI shows a loader and polls
-  // /api/model/apply-status while this runs.
-  app.post("/api/model/apply", async (req, reply) => {
-    const resetOverlay = (req.body as any)?.resetOverlay;
-    try {
-      await guardModelAction("model.apply");
-      const result = await applyModel({ resetOverlay });
-      return { ok: true, ...result, status: applyStatus() };
-    } catch (err: any) {
-      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
-      return reply.code(500).send({ error: "APPLY_FAILED", message: err?.message ?? String(err), status: applyStatus() });
-    }
-  });
-  app.get("/api/model/apply-status", async () => applyStatus());
-  app.post("/api/model/roll", async (req, reply) => {
-    const dir = (req.body as any)?.direction;
-    if (dir !== "back" && dir !== "forward") {
-      return reply.code(400).send({ error: "BAD_REQUEST", message: 'direction must be "back" or "forward"' });
-    }
-    try {
-      await guardModelAction("model.roll");
-      return rollModel(dir);
-    } catch (err: any) {
-      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
-      return reply.code(409).send({ error: "ROLL_FAILED", message: err?.message ?? String(err) });
-    }
-  });
-  // Jump straight to any stored version (the inspect dialog's version sidebar).
-  app.post("/api/model/restore", async (req, reply) => {
-    const index = (req.body as any)?.index;
-    if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
-      return reply.code(400).send({ error: "BAD_REQUEST", message: "index must be a non-negative integer" });
-    }
-    try {
-      await guardModelAction("model.restore");
-      return restoreModel(index);
-    } catch (err: any) {
-      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
-      return reply.code(409).send({ error: "RESTORE_FAILED", message: err?.message ?? String(err) });
-    }
-  });
 
   // -- SIMULATOR SUPPORT --
   // Health of the event registry vs. the loaded model. When the synced

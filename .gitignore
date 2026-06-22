@@ -17,6 +17,9 @@ web/node_modules/
 src/packs/*/generated/
 # Adapter sidecars (credentials KEYs + config; per-machine)
 .qlerify/adapters/
+# AI-built connectors (Part 2.4) — generated module + plaintext POC creds + per-
+# workspace node_modules; throwaway, never source-controlled.
+.qlerify/connectors/
 # Per-organization content-addressed blob store (ontology version bodies).
 # Generated/regenerable; the relational metadata is the system of record.
 .qlerify/orgs/

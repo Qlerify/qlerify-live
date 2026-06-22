@@ -16,11 +16,9 @@
 // context), so a client can never choose the org. Internal provisioning passes
 // the org it is operating on directly.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { prisma } from "../../db.js";
-import { QLERIFY_DIR, setProjectModel } from "../../ontology/model.js";
-import { newId, SYSTEM_IDENTITY_ID } from "../ids.js";
+import { setProjectModel } from "../../ontology/model.js";
+import { newId } from "../ids.js";
 import { canonicalize } from "./canonical.js";
 import { fsContentStore as cas } from "./content-store.js";
 
@@ -230,48 +228,20 @@ export async function getOntologyById(organizationId: string, id: string) {
 
 /** Bind a project's current model content into the live loader cache, so a
  * subsequent getOntology() (sync, in the handler) returns THIS project's model.
- * Called by the onRequest hook before the handler runs. Returns false if the
- * project has no model (then getOntology throws rather than serving the demo). */
+ * Called by the onRequest hook before the handler runs. Returns false when the
+ * project has no model yet — getOntology() then throws ModelNotLoadedError and
+ * the UI shows the "set this project's model" prompt. There is NO on-disk
+ * self-heal anymore: a model arrives only via PUT /v1/project/model. */
 export async function ensureProjectModelLoaded(organizationId: string, projectId: string): Promise<boolean> {
-  let ont = await prisma.platOntology.findFirst({
+  const ont = await prisma.platOntology.findFirst({
     where: { organizationId, projectId, name: "workflow" },
     select: { id: true, currentVersionId: true },
   });
-  // Self-heal: a project with no model (e.g. created before clone-on-create, or a
-  // clone that didn't run) gets the on-disk default model as its v0 — so it never
-  // 500s with "model not loaded".
-  if (!ont?.currentVersionId) {
-    await bootstrapProjectModel(organizationId, projectId);
-    ont = await prisma.platOntology.findFirst({
-      where: { organizationId, projectId, name: "workflow" },
-      select: { id: true, currentVersionId: true },
-    });
-  }
   if (!ont?.currentVersionId) return false;
   const content = await getVersionContent(organizationId, ont.currentVersionId);
   if (!content) return false;
   setProjectModel(projectId, content.workflow, content.overlay, content.manifestHash);
   return true;
-}
-
-/** Bootstrap a project's model from the on-disk default model (its v0). Used by
- * the self-heal path for any project that lacks a model. */
-async function bootstrapProjectModel(organizationId: string, projectId: string): Promise<void> {
-  const workflowPath = join(QLERIFY_DIR, "workflow.json");
-  if (!existsSync(workflowPath)) return;
-  const proj = await prisma.platProject.findFirst({ where: { id: projectId, organizationId }, select: { workspaceId: true } });
-  const workflowBytes = readFileSync(workflowPath, "utf8");
-  const overlayPath = join(QLERIFY_DIR, "overlay.json");
-  const overlayBytes = existsSync(overlayPath) ? readFileSync(overlayPath, "utf8") : null;
-  const { ontologyId } = await ensureOntologyResource({
-    organizationId,
-    projectId,
-    workspaceId: proj?.workspaceId ?? null,
-    environmentId: null,
-    name: "workflow",
-    ownerId: SYSTEM_IDENTITY_ID,
-  });
-  await createVersion(organizationId, ontologyId, workflowBytes, overlayBytes, { source: "initial", createdBy: SYSTEM_IDENTITY_ID });
 }
 
 export async function listVersions(organizationId: string, ontologyId: string) {

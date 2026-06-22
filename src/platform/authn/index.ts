@@ -22,7 +22,7 @@
 
 import { prisma } from "../../db.js";
 import { AuthError, UnauthenticatedError } from "../../errors.js";
-import { SYSTEM_ORG_ID, SYSTEM_PROJECT_ID, SYSTEM_SUBJECT } from "../ids.js";
+import { SYSTEM_ORG_ID, SYSTEM_SUBJECT } from "../ids.js";
 import type { TenantContext } from "../types.js";
 import { resolveSession } from "./sessions.js";
 
@@ -118,12 +118,16 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
       organizationId = any.id;
       actingAsPlatformAdmin = true;
     } else {
+      // Fail CLOSED: the canonical org is never taken from a non-member selector.
+      // A stale/invalid X-Org-Id (e.g. a deleted org left in the client's
+      // localStorage) is recovered CLIENT-side — the UI drops it and retries
+      // header-less (see ensureMe()) — so this explicit denial can't lock anyone out.
       throw new AuthError(`identity "${subject}" is not a member of organization "${selector}"`);
     }
   } else if (memberships.length === 1) {
     organizationId = memberships[0].organizationId;
   } else if (memberships.some((m) => m.organizationId === SYSTEM_ORG_ID)) {
-    organizationId = SYSTEM_ORG_ID; // home-org default keeps the demo identity stable
+    organizationId = SYSTEM_ORG_ID; // home-org default keeps the system identity stable
   } else if (memberships.length === 0) {
     if (platformAdmin) organizationId = SYSTEM_ORG_ID; // superuser with no memberships → system home
     else throw new AuthError(`identity "${subject}" has no active organization membership`);
@@ -139,6 +143,7 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
   // id). An invalid / cross-org / stale selector falls back to the org's "Default"
   // project rather than failing the request — the client never gets a project it
   // didn't legitimately select, but a stale picker value can't lock anyone out.
+  // The system org is treated like any other org here (no special demo project).
   const projectSelector = header(headers, "x-project-id");
   let projectId: string | undefined;
   if (projectSelector) {
@@ -146,17 +151,15 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
     projectId = proj?.id;
   }
   if (!projectId) {
-    if (org.id === SYSTEM_ORG_ID) {
-      projectId = SYSTEM_PROJECT_ID; // the demo's byte-identical default project
-    } else {
-      // A non-system org NEVER falls back to SYSTEM_PROJECT_ID (that would fail
-      // OPEN into the shared system/demo data plane). Resolve its own Default
-      // (deterministically); if it somehow has none (mid-provisioning, or a
-      // minimal test fixture), fall back to an ORG-SCOPED sentinel — the org id —
-      // which is non-system and namespace-safe.
-      const def = await prisma.platProject.findFirst({ where: { organizationId: org.id, name: "Default" }, orderBy: { createdAt: "asc" }, select: { id: true } });
-      projectId = def?.id ?? org.id;
-    }
+    // Land on the org's "Default" project when present, else its oldest. If the org
+    // has NO projects (a fresh org, or its last was deleted), leave projectId UNSET
+    // — the empty-org state: the control plane (whoami / create-project) still
+    // works, but the data plane fails closed (NoActiveProjectError → 409) until the
+    // user creates a project and points it at a model.
+    const def =
+      (await prisma.platProject.findFirst({ where: { organizationId: org.id, name: "Default" }, orderBy: { createdAt: "asc" }, select: { id: true } })) ??
+      (await prisma.platProject.findFirst({ where: { organizationId: org.id }, orderBy: { createdAt: "asc" }, select: { id: true } }));
+    projectId = def?.id; // undefined ⇒ empty org
   }
 
   return {

@@ -16,6 +16,7 @@ import { prisma } from "./db.js";
 import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
 import { registerControlRoutes } from "./platform/http/control-routes.js";
 import { seedSystemOrg } from "./platform/provisioning/index.js";
+import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(here, "..", "web");
@@ -37,6 +38,18 @@ export async function buildServer() {
     app.log.error({ err }, "system-org seed failed — tenant resolution will reject requests until fixed");
   }
   registerTenantPlugin(app);
+
+  // Uniform error mapping — a safety net for routes that let a handled error
+  // bubble (e.g. GET query routes with no local try/catch). Keeps NoActiveProject
+  // and friends as clean 4xx instead of a default 500. Real infra errors → 500.
+  app.setErrorHandler((err, req, reply) => {
+    if (isHandledError(err)) {
+      return reply.code(err.status).send({ error: err.code, message: err.message, violations: (err as any).violations });
+    }
+    const status = (err as any)?.statusCode ?? 500;
+    if (status >= 500) req.log.error({ err }, "unhandled error"); // keep Fastify's default observability
+    return reply.code(status).send({ error: (err as any)?.code ?? "INTERNAL", message: err.message });
+  });
 
   registerRoutes(app);
   registerControlRoutes(app);

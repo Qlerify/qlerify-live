@@ -30,6 +30,12 @@ const orgAId = newId();
 const orgBId = newId();
 const aliceSub = `alice-${SFX}`;
 const bobSub = `bob-${SFX}`;
+// A shared synthetic project namespace so the two org contexts land on the SAME
+// physical projection table — that is what lets this suite exercise the WITHIN-
+// table organization_id filter (defense-in-depth). A non-system org with no
+// project now fails closed (see empty-org.test.ts), so an org context must carry
+// a project to touch the data plane.
+const projSharedId = newId();
 
 let aliceId: string;
 let bobId: string;
@@ -54,12 +60,12 @@ beforeAll(async () => {
   ontA = await ensureOntologyResource({ organizationId: orgAId, name: "workflow", ownerId: aliceId });
   await createVersion(orgAId, ontA.ontologyId, JSON.stringify({ boundedContext: "X", domainEvents: {}, roles: [] }), null, { source: "initial" });
 
-  ctxAlice = { organizationId: orgAId, principal: { id: aliceId, type: "identity" }, identityId: aliceId, subject: aliceSub };
-  ctxBob = { organizationId: orgBId, principal: { id: bobId, type: "identity" }, identityId: bobId, subject: bobSub };
+  ctxAlice = { organizationId: orgAId, principal: { id: aliceId, type: "identity" }, identityId: aliceId, subject: aliceSub, projectId: projSharedId };
+  ctxBob = { organizationId: orgBId, principal: { id: bobId, type: "identity" }, identityId: bobId, subject: bobSub, projectId: projSharedId };
 });
 
 afterAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "gen_${genEntity.name}"`).catch(() => {});
+  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "gen__p${projSharedId.replace(/-/g, "")}_${genEntity.name}"`).catch(() => {});
   await prisma.platMarkingGrant.deleteMany({ where: { organizationId: orgAId } });
   await prisma.platResourceMarking.deleteMany({ where: { organizationId: orgAId } });
   await prisma.platMarking.deleteMany({ where: { organizationId: orgAId } });
@@ -135,7 +141,7 @@ describe("multi-tenant isolation", () => {
   });
 
   it("gen_ data plane scopes rows by organization", async () => {
-    await store.ensureTable(genEntity);
+    await runWithTenant(ctxAlice, () => store.ensureTable(genEntity)); // table in the shared project namespace
     const rowId = newId();
     await runWithTenant(ctxAlice, () => store.insert(genEntity.name, { id: rowId, label: "secret-A" }));
 

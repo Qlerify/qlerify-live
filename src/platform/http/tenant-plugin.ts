@@ -20,7 +20,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { isHandledError } from "../../errors.js";
 import { resolveTenantContext, type AuthnHeaders } from "../authn/index.js";
-import { SYSTEM_PROJECT_ID } from "../ids.js";
 import { ensureProjectModelLoaded } from "../ontology-store/ontology-store.js";
 import { enterTenant } from "../tenancy/context.js";
 import type { TenantContext } from "../types.js";
@@ -50,9 +49,10 @@ export function registerTenantPlugin(app: FastifyInstance) {
       if (!hasCredentials(headers)) cachedSystemCtx = ctx;
       (req as any).tenant = ctx;
       // Bind the active project's model BEFORE the handler so the synchronous
-      // getOntology() resolves the right model. The system default project reads
-      // from disk, so there is nothing to load for it.
-      if (ctx.projectId && ctx.projectId !== SYSTEM_PROJECT_ID) {
+      // getOntology() resolves the right model. A project with no model yet loads
+      // nothing → getOntology() throws ModelNotLoadedError and the UI prompts to
+      // set one. With no active project (empty org) there is nothing to load.
+      if (ctx.projectId) {
         await ensureProjectModelLoaded(ctx.organizationId, ctx.projectId);
       }
     } catch (err) {

@@ -169,6 +169,26 @@ export async function applyModelTables(ontology: Ontology): Promise<ApplyResult>
   return { dropped, created };
 }
 
+/** Drop every projection table in a SPECIFIC project's namespace
+ * (gen__p<projectHex>_*), independent of the active ALS context. This is the
+ * control-plane teardown used by project deletion: it tears down a project's
+ * whole data plane from outside that project's request scope. Returns the
+ * physical table names dropped. The system default project's un-prefixed `gen_`
+ * tables can NEVER match this `gen__p…` prefix, so the demo is structurally safe
+ * even if this is somehow called with the system project id. */
+export async function dropProjectionTablesForProject(projectId: string): Promise<string[]> {
+  const prefix = `${PROJECT_MARK}${projectId.replace(/-/g, "")}_`;
+  const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT name FROM sqlite_master WHERE type='table'`,
+  );
+  const tables = rows.map((r) => r.name).filter((n) => n.startsWith(prefix));
+  for (const t of tables) {
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS ${ident(t)}`);
+    orgColCache.delete(t); // physical name — evict the column-presence cache entry
+  }
+  return tables;
+}
+
 /** Create the projection table for ONE entity if it doesn't exist yet (additive;
  * never drops). Used by adapters that ingest into an entity's gen_ table without
  * a full model apply. */

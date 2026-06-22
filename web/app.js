@@ -96,10 +96,6 @@ const state = {
   // model-derived UI labels (filled from /sim/meta); defaults keep the UI sane
   // before the first fetch / if the endpoint is unavailable.
   meta: { title: "Workflow", rootAggregate: "Item", rootAggregatePlural: "Items", boundedContextCount: 0, aggregateCount: 0, eventCount: 0 },
-  // model rebuild overlay (drop/recreate projection tables on swap)
-  rebuilding: false,
-  rebuildPhase: "",
-  rebuildError: null,
   // detail view
   demandId: null,
   instance: null,   // per-run detail from /sim/instance
@@ -124,19 +120,11 @@ const state = {
   chatBusy: false,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
-  // registry health — non-null message means the loaded model doesn't match
-  // the simulator's event registry; surfaced as a top banner.
+  // registry health — non-null message means the active project's model couldn't
+  // be built into the event registry; surfaced as a top banner.
   registryError: null,
-  // model sync / version history
-  model: null,           // ModelStatus from /api/model/status
-  modelBusy: false,
-  modelMsg: null,        // last fetch/roll message to flash in the UI
-  modelFileOpen: false,  // model viewer dialog visibility
-  modelFile: null,       // { path, content } of workflow.json
-  modelSource: null,     // { url, defaultUrl, effective } source config
-  modelSourceInput: "",  // editable source URL field value
-  modelSourceBusy: false,
-  modelSourceEditing: false, // click-to-edit toggle for the source URL
+  // toast message (e.g. after setting a project's model)
+  modelMsg: null,
 };
 
 // --- Tenant auth/session (localStorage-backed) ------------------------------
@@ -149,8 +137,8 @@ const AUTH = {
   org: () => localStorage.getItem("ql.org") || "",
   project: () => localStorage.getItem("ql.project") || "",
   setSession: (token) => localStorage.setItem("ql.token", token || ""),
-  // Switching org invalidates the selected project — clear it so the new org's
-  // Default project is used until the user picks one.
+  // Switching org invalidates the selected project — clear it so the new org
+  // resolves its own default project (or the empty-org state) until one is picked.
   setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
   setProject: (id) => { if (id) localStorage.setItem("ql.project", id); else localStorage.removeItem("ql.project"); },
   clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
@@ -225,6 +213,12 @@ async function sendChat() {
     }
     ctx += `. When the user says "this adapter", "it", or refers to the connection, they mean this one.]`;
     content = [{ type: "text", text: ctx }, { type: "text", text }];
+  } else if (state.view === "bcs" && state.exp && state.exp.system) {
+    const e = state.exp;
+    const kind = expKindOf(e, e.entity) === "valueObject" ? "value object" : "entity";
+    const conns = (e.adapters || []).map((a) => `${a.id} (${a.kind}/${a.mode}→${a.targetEntity})`).join(", ") || "none";
+    const ctx = `[Context: in the Systems explorer. System (bounded context): ${e.system}. Selected table: ${e.entity || "(none)"} — a model ${kind}. Existing connectors/adapters on this system: ${conns}. When the user says "this table", "this", "it", or "fill this", they mean the selected table — build or repair a connector that populates it, following the Connector Builder loop. Confirm before create/build/ingest.]`;
+    content = [{ type: "text", text: ctx }, { type: "text", text }];
   } else {
     content = text;
   }
@@ -244,6 +238,7 @@ async function sendChat() {
     // After an assistant turn the dashboard / current view may be stale (write tools).
     if (state.view === "dashboard") await loadDashboard();
     else if (state.view === "detail") await loadDetail();
+    else if (state.view === "bcs") await refreshExplorerAfterChat();
   } catch (e) {
     state.chatError = e.message;
   } finally {
@@ -404,7 +399,8 @@ function chatMessageHtml(m) {
     if (b.type === "tool_use") {
       const args = JSON.stringify(b.input, null, 2);
       const argsPreview = args.length > 120 ? args.slice(0, 120) + "…" : args;
-      const writeTone = (b.name === "next_step" || b.name === "create_demand") ? "border-amber-300 bg-amber-50" : "border-stone-200 bg-stone-50";
+      const WRITE_TOOLS = ["next_step", "create_demand", "regenerate_adapter_body", "reset_adapter", "create_connector", "build_connector", "ingest_connector", "remove_connector"];
+      const writeTone = WRITE_TOOLS.includes(b.name) ? "border-amber-300 bg-amber-50" : "border-stone-200 bg-stone-50";
       return `
         <details class="text-[11px] ${writeTone} border rounded px-2 py-1 my-1">
           <summary class="cursor-pointer select-none text-stone-700">🔧 <b>${escapeHtml(b.name)}</b> <span class="text-stone-400 mono">${escapeHtml(argsPreview)}</span></summary>
@@ -441,11 +437,17 @@ function chatPanel() {
   const messagesHtml = state.chatMessages.map(chatMessageHtml).join("");
   const empty = state.chatMessages.length === 0;
 
+  const builder = state.view === "bcs";
   const examples = state.view === "detail" ? [
     "Explain the next step in this workflow!",
     "Explain the last thing that was completed on this workflow.",
     "Why hasn't this demand moved forward yet?",
     "Move this demand forward one step.",
+  ] : builder ? [
+    "Fill this table from our DynamoDB users table",
+    "Connect this to a REST API and pull the records",
+    "Populate this from a Postgres query",
+    "Show me the connector code",
   ] : [
     "How many demands haven't moved in 24h?",
     "Which demand is closest to being delivered?",
@@ -458,7 +460,7 @@ function chatPanel() {
       <div class="px-4 py-3 border-b border-stone-200 flex items-center gap-2">
         <div class="flex-1">
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Assistant</div>
-          <div class="text-sm text-stone-800 font-medium">Process advisor</div>
+          <div class="text-sm text-stone-800 font-medium">${builder ? "Connector builder" : "Process advisor"}</div>
         </div>
         ${apiBadge}
         <button id="chat-clear" title="Clear conversation" class="text-stone-400 hover:text-stone-700 text-sm">↺</button>
@@ -474,7 +476,9 @@ function chatPanel() {
       <div id="chat-scroll" class="flex-1 overflow-y-auto px-4 py-3 space-y-3 text-sm">
         ${empty ? `
           <div class="text-stone-500 text-sm">
-            Ask about demands, the workflow, or have me advance a step. I'll always confirm before changing anything.
+            ${builder
+              ? `Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and I'll write a connector to fill <b>${escapeHtml(state.exp?.entity || "this table")}</b>, test it, fix any errors, and populate it. I'll confirm before each change.`
+              : "Ask about demands, the workflow, or have me advance a step. I'll always confirm before changing anything."}
             <div class="mt-3 flex flex-col gap-1.5">
               ${examples.map((q) => `<button class="text-left text-[12px] text-stone-700 hover:bg-stone-100 rounded px-2 py-1 border border-stone-200" data-example="${escapeHtml(q)}">${escapeHtml(q)}</button>`).join("")}
             </div>
@@ -533,330 +537,11 @@ async function loadRegistryStatus() {
   }
 }
 
-async function loadModelStatus() {
-  try {
-    state.model = await api("/api/model/status");
-  } catch (e) {
-    state.model = null;
-  }
-}
-
-// Refresh everything that is rendered from the Qlerify model after it changes.
-async function reloadFromModel() {
-  await loadModelStatus();
-  // Fetch/roll now happen inside the inspect dialog — keep the shown JSON current.
-  if (state.modelFileOpen) {
-    try { state.modelFile = await api("/api/model/file"); } catch { /* keep previous content */ }
-  }
-  if (state.view === "detail") await loadDetail();
-  else await loadDashboard();
-}
-
-// Fetch a new model AND rebuild everything (drop/recreate the projection tables
-// to match it), behind a loader. `fetch:false` just rebuilds the already-loaded
-// model — used after a manual workflow.json swap.
-async function rebuildModel({ fetch = true } = {}) {
-  if (state.rebuilding) return;
-  state.rebuilding = true;
-  state.rebuildError = null;
-  state.rebuildPhase = fetch ? "Fetching the latest model…" : "Loading model…";
-  render();
-  let poll = null;
-  try {
-    if (fetch) await api("/api/model/fetch", { method: "POST", body: "{}" });
-    state.rebuildPhase = "Rebuilding — dropping & recreating projection tables…";
-    render();
-    // Poll the server's apply phase so the loader shows real progress.
-    poll = setInterval(async () => {
-      try {
-        const s = await api("/api/model/apply-status");
-        if (s && s.message && state.rebuilding) { state.rebuildPhase = s.message; render(); }
-      } catch { /* ignore */ }
-    }, 300);
-    const res = await api("/api/model/apply", { method: "POST", body: "{}" });
-    clearInterval(poll); poll = null;
-    state.rebuildPhase = (res.status && res.status.message) || "Done.";
-    render();
-    await reloadFromModel();
-    state.rebuilding = false;
-    state.modelMsg = { ok: true, text: `Model applied — dropped ${(res.dropped || []).length}, created ${(res.created || []).length} table(s).` };
-    render();
-    flashModelMsg();
-  } catch (e) {
-    if (poll) clearInterval(poll);
-    state.rebuildError = e.message;
-    render();
-  }
-}
-
-function dismissRebuild() {
-  state.rebuilding = false;
-  state.rebuildError = null;
-  render();
-}
-
-async function fetchModel() {
-  return rebuildModel({ fetch: true });
-}
-
-async function rollModel(direction) {
-  if (state.modelBusy) return;
-  state.modelBusy = true; state.modelMsg = null; render();
-  try {
-    const res = await api("/api/model/roll", { method: "POST", body: JSON.stringify({ direction }) });
-    state.modelMsg = { ok: true, text: res.message };
-    await reloadFromModel();
-  } catch (e) {
-    state.modelMsg = { ok: false, text: e.message };
-  } finally {
-    state.modelBusy = false; render();
-    flashModelMsg();
-  }
-}
-
-// Jump straight to a stored version from the version sidebar.
-async function restoreModelVersion(index) {
-  if (state.modelBusy) return;
-  state.modelBusy = true; state.modelMsg = null; render();
-  try {
-    const res = await api("/api/model/restore", { method: "POST", body: JSON.stringify({ index }) });
-    state.modelMsg = { ok: true, text: res.message };
-    await reloadFromModel();
-  } catch (e) {
-    state.modelMsg = { ok: false, text: e.message };
-  } finally {
-    state.modelBusy = false; render();
-    flashModelMsg();
-  }
-}
-
-async function openModelFile() {
-  state.modelFileOpen = true;
-  state.modelFile = null;
-  state.modelSourceEditing = false;
-  render();
-  // Refresh the version list too, so the sidebar reflects the latest history.
-  const [file, source, status] = await Promise.allSettled([api("/api/model/file"), api("/api/model/source"), api("/api/model/status")]);
-  state.modelFile = file.status === "fulfilled" ? file.value : { path: "", content: "", error: file.reason?.message };
-  state.modelSource = source.status === "fulfilled" ? source.value : null;
-  state.modelSourceInput = state.modelSource ? (state.modelSource.workflowUrl || "") : "";
-  if (status.status === "fulfilled") state.model = status.value;
-  render();
-}
-
-function closeModelFile() {
-  state.modelFileOpen = false;
-  render();
-}
-
-async function saveModelSource() {
-  if (state.modelSourceBusy || state.modelBusy) return;
-  const url = state.modelSourceInput.trim();
-  // A value equal to the default link means "use default" → clear the override.
-  const payloadUrl = url && url !== (state.modelSource?.defaultWorkflowUrl ?? "") ? url : null;
-  state.modelSourceBusy = true; render();
-  try {
-    state.modelSource = await api("/api/model/source", { method: "PUT", body: JSON.stringify({ url: payloadUrl }) });
-    state.modelSourceInput = state.modelSource.workflowUrl || "";
-    state.modelSourceEditing = false;
-  } catch (e) {
-    state.modelMsg = { ok: false, text: e.message };
-    state.modelSourceBusy = false; render(); flashModelMsg();
-    return;
-  }
-  state.modelSourceBusy = false;
-  // Pull the model from the new source so it lands as a fresh version with its
-  // source URL recorded — that per-version record replaces the old "override" badge.
-  await fetchModel();
-}
-
-// Compact display form of a workflow URL — keep the tail recognizable (so two
-// workflows are still distinguishable) while hiding the long opaque ids.
-function shortWorkflowUrl(url) {
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean);
-    const last = parts[parts.length - 1] || "";
-    const shortId = last.length > 12 ? `${last.slice(0, 8)}…${last.slice(-4)}` : last;
-    return `${u.host}/…/${shortId}`;
-  } catch {
-    return url.length > 36 ? `${url.slice(0, 18)}…${url.slice(-12)}` : url;
-  }
-}
-
-// Short, human-readable form of a version's ISO timestamp, e.g. "Jun 14, 13:45".
-function formatVersionDate(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso.slice(0, 16).replace("T", " ");
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-// Sidebar listing every stored version (newest first), each with a Restore
-// action; the materialized version is highlighted instead.
-function modelVersionSidebar() {
-  const m = state.model;
-  const versions = (m && m.versions) || [];
-  if (versions.length === 0) {
-    return `<aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto p-3 text-[11px] text-stone-400 leading-relaxed">No saved versions yet. Fetch the model to start the history.</aside>`;
-  }
-  // For versions whose source wasn't recorded, fall back to the project's
-  // workflow (name + link) so the row is still actionable rather than a dead end.
-  const fallbackUrl = (state.modelSource && (state.modelSource.defaultWorkflowUrl || state.modelSource.workflowUrl)) || "";
-  const fallbackName = (m && m.workflowName) || "Open workflow";
-  const rows = versions
-    .map((v, i) => {
-      const isCurrent = i === m.current;
-      const sourceCls = v.source === "initial" ? "bg-stone-100 text-stone-500" : "bg-sky-100 text-sky-700";
-      const events = v.summary ? v.summary.events : 0;
-      let srcLine;
-      if (v.sourceUrl) {
-        // Prefer the workflow's name; fall back to the shortened URL if unnamed.
-        const label = v.sourceName || shortWorkflowUrl(v.sourceUrl);
-        const monoCls = v.sourceName ? "" : "mono ";
-        const tip = v.sourceName ? `${v.sourceName} — ${v.sourceUrl}` : v.sourceUrl;
-        srcLine = `<a href="${escapeHtml(v.sourceUrl)}" target="_blank" rel="noopener" class="block text-[10px] ${monoCls}text-sky-700 hover:text-sky-900 truncate mt-0.5" title="Fetched from ${escapeHtml(tip)}">${escapeHtml(label)} ↗</a>`;
-      } else if (fallbackUrl) {
-        srcLine = `<a href="${escapeHtml(fallbackUrl)}" target="_blank" rel="noopener" class="block text-[10px] text-sky-700 hover:text-sky-900 truncate mt-0.5" title="Source not recorded — opens ${escapeHtml(fallbackName)}">${escapeHtml(fallbackName)} ↗</a>`;
-      } else {
-        srcLine = `<div class="text-[10px] text-stone-300 italic mt-0.5">source unknown</div>`;
-      }
-      return `
-        <li class="px-2.5 py-2 rounded-md border ${isCurrent ? "border-amber-300 bg-amber-50" : "border-transparent hover:bg-stone-50"} flex items-start gap-2">
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-1.5">
-              <span class="text-[12px] font-semibold tabular-nums">v${i + 1}</span>
-              <span class="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded ${sourceCls}">${escapeHtml(v.source)}</span>
-            </div>
-            <div class="text-[10px] text-stone-500 tabular-nums mt-0.5">${escapeHtml(formatVersionDate(v.savedAt))}</div>
-            <div class="text-[10px] text-stone-400 tabular-nums">${events} events</div>
-            ${srcLine}
-          </div>
-          ${isCurrent
-            ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-200 text-amber-900 shrink-0 mt-0.5">current</span>`
-            : `<button data-restore="${i}" ${state.modelBusy ? "disabled" : ""} class="model-restore-btn text-[10px] px-2 py-1 rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 shrink-0 mt-0.5" title="Restore this version">Restore</button>`}
-        </li>
-      `;
-    })
-    .reverse()
-    .join("");
-  return `
-    <aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto">
-      <div class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-widest text-stone-500 font-semibold sticky top-0 bg-white">Versions</div>
-      <ul class="px-2 pb-3 flex flex-col gap-1">${rows}</ul>
-    </aside>
-  `;
-}
-
-// Inspect-model dialog: fetch / roll versions / browse the raw workflow.json and
-// the configured source URL, all in one place.
-function modelFileDialog() {
-  if (!state.modelFileOpen) return "";
-  const f = state.modelFile;
-  const m = state.model;
-  const body = !f
-    ? `<div class="text-stone-500 text-sm p-6">Loading model…</div>`
-    : f.error
-      ? `<div class="text-rose-700 text-sm p-6">⚠ ${escapeHtml(f.error)}</div>`
-      : `<pre class="mono text-[12px] leading-relaxed whitespace-pre p-4 overflow-auto">${escapeHtml(f.content)}</pre>`;
-  const sizeKb = f && f.content ? Math.round(f.content.length / 1024) : 0;
-  const src = state.modelSource;
-  const effective = src ? src.workflowUrl : "";
-  const versionLabel = m && m.total > 0
-    ? `v${m.current + 1}/${m.total}${m.currentVersion ? ` · ${m.currentVersion.summary.events} events` : ""}`
-    : "not yet versioned";
-  const disBack = state.modelBusy || !m || !m.canBack;
-  const disFwd  = state.modelBusy || !m || !m.canForward;
-  return `
-    <div id="model-file-backdrop" class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6">
-      <div class="bg-white rounded-lg shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col" role="dialog" aria-modal="true">
-        <div class="px-5 py-3 border-b border-stone-200 flex flex-col gap-2.5">
-          <div class="flex items-center gap-3">
-            <div class="flex-1 min-w-0">
-              <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify model</div>
-              <div class="text-[12px] text-stone-600 tabular-nums truncate">${escapeHtml(versionLabel)}${m && m.workflowName ? ` · ${escapeHtml(m.workflowName)}` : ""}</div>
-            </div>
-            ${f && f.content ? `<span class="text-[11px] text-stone-400 tabular-nums shrink-0">${sizeKb} KB</span>` : ""}
-            <button id="model-file-close" class="text-stone-400 hover:text-stone-700 text-lg leading-none shrink-0" title="Close">×</button>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <button id="btn-model-back" ${disBack ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll back to previous model version">↩</button>
-            <button id="btn-model-fetch" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 font-medium" title="Fetch the latest model from the Qlerify modeller, then rebuild (drop & recreate projection tables)">${state.modelBusy ? "⏳ Syncing…" : "⤓ Fetch model"}</button>
-            <button id="btn-model-fwd" ${disFwd ? "disabled" : ""} class="px-2 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40" title="Roll forward to next model version">↪</button>
-            <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
-            ${effective
-              ? `<a href="${escapeHtml(effective)}" target="_blank" rel="noopener" class="min-w-0 max-w-xs text-[12px] mono text-sky-700 hover:text-sky-900 underline decoration-dotted truncate" title="${escapeHtml(effective)}">${escapeHtml(shortWorkflowUrl(effective))} ↗</a>`
-              : `<span class="text-[12px] text-stone-400 italic">no source configured</span>`}
-            <button id="model-source-edit" class="px-2.5 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium shrink-0" title="Edit the source workflow URL — saving pulls it in as a new version">✎ Edit</button>
-          </div>
-        </div>
-        <div class="flex-1 flex min-h-0">
-          ${modelVersionSidebar()}
-          <div id="model-file-scroll" class="flex-1 overflow-auto bg-stone-50">${body}</div>
-        </div>
-      </div>
-    </div>
-    ${modelSourceEditDialog()}
-  `;
-}
-
-// Secondary modal, layered on top of the inspect dialog, for editing the source URL.
-function modelSourceEditDialog() {
-  if (!state.modelSourceEditing) return "";
-  const src = state.modelSource;
-  const placeholder = src ? (src.defaultWorkflowUrl || "https://app.qlerify.com/workflow/<project>/<workflow>") : "https://app.qlerify.com/workflow/<project>/<workflow>";
-  return `
-    <div id="model-source-backdrop" class="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-6">
-      <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg flex flex-col" role="dialog" aria-modal="true">
-        <div class="px-5 py-3 border-b border-stone-200 flex items-center gap-3">
-          <div class="flex-1 text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Edit model source URL</div>
-          <button id="model-source-cancel-x" class="text-stone-400 hover:text-stone-700 text-lg leading-none" title="Cancel">×</button>
-        </div>
-        <div class="px-5 py-4 flex flex-col gap-3">
-          <input id="model-source-input" type="text" value="${escapeHtml(state.modelSourceInput)}" placeholder="${escapeHtml(placeholder)}" class="w-full text-[12px] mono border border-stone-300 rounded-md px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400" />
-          <div class="text-[11px] text-stone-400 leading-relaxed">Paste a Qlerify workflow URL. Leave blank — or matching the default — to reset to the workflow in codegen.json.</div>
-          <div class="flex items-center justify-end gap-2">
-            <button id="model-source-cancel" ${state.modelSourceBusy ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Cancel</button>
-            <button id="model-source-save" ${state.modelSourceBusy ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.modelSourceBusy ? "Saving…" : "Save"}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-let modelMsgTimer = null;
-function flashModelMsg() {
-  if (modelMsgTimer) clearTimeout(modelMsgTimer);
-  modelMsgTimer = setTimeout(() => { state.modelMsg = null; render(); }, 6000);
-}
-
-// Single dashboard-header entry point. Fetch / version rolling / source editing
-// all now live inside the Inspect model dialog (see modelFileDialog).
-function modelControls() {
-  // The model lifecycle (Inspect → Fetch / Roll / Restore / Rebuild from the
-  // Qlerify modeller + version history) operates on the SYSTEM default project's
-  // demo model. Other projects carry their own copy of the model, so hide these
-  // controls there (per-project model management is a separate, later feature).
-  if (state.me && !state.me.isSystemProject) return "";
-  const m = state.model;
-  const label = m && m.total > 0
-    ? `model v${m.current + 1}/${m.total}${m.currentVersion ? ` · ${m.currentVersion.summary.events} events` : ""}`
-    : "model — not yet versioned";
-  return `
-    <div class="flex items-center gap-1.5 mr-1" title="Qlerify model${m && m.workflowName ? " · " + escapeHtml(m.workflowName) : ""}">
-      <button id="btn-model-view" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Inspect the Qlerify model — fetch, roll versions, view workflow.json">👁 Inspect model</button>
-      <button id="lbl-model-view" class="text-[10px] text-stone-500 hover:text-stone-800 underline decoration-dotted tabular-nums ml-0.5 hidden lg:inline" title="Inspect the Qlerify model">${escapeHtml(label)}</button>
-    </div>
-  `;
-}
-
-// Set-a-project's-own-model controls — shown ONLY on a non-system project (the
-// system/demo project uses modelControls() above). Replaces this project's model
-// from an uploaded/pasted Qlerify workflow.json and rebuilds this project's data.
+// Set-this-project's-model control. Points the active project at a Qlerify model
+// (link, or uploaded/pasted workflow.json) and rebuilds this project's data.
 function projectModelControls() {
-  if (!state.me || state.me.isSystemProject) return "";
-  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Replace this project's model with a Qlerify workflow.json">⚙ Set model</button>`;
+  if (!state.me) return "";
+  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this project's model with a Qlerify model">⚙ Set model</button>`;
 }
 
 function projectModelDialog() {
@@ -945,9 +630,9 @@ function registryBanner() {
   if (!state.registryError) return "";
   return `
     <div class="bg-rose-600 text-white px-6 py-3 text-sm shadow">
-      <div class="font-semibold">⚠ Loaded Qlerify model doesn't match the simulator</div>
+      <div class="font-semibold">⚠ This project's model couldn't be loaded</div>
       <div class="mt-0.5 opacity-90">${escapeHtml(state.registryError)}</div>
-      <div class="mt-1 text-xs opacity-80">The simulator's 28-step event registry couldn't be built from the current <span class="mono">.qlerify/workflow.json</span>. Restore a matching model version, then it will hot-reload and this banner clears.</div>
+      <div class="mt-1 text-xs opacity-80">The event registry couldn't be built from the current model. Set a valid Qlerify model (⚙ Set model) and this banner clears.</div>
     </div>
   `;
 }
@@ -960,48 +645,6 @@ function modelToast() {
       ${escapeHtml(state.modelMsg.text)}
     </div>
   `;
-}
-
-function bindModelControls() {
-  document.getElementById("btn-model-fetch")?.addEventListener("click", fetchModel);
-  document.getElementById("btn-model-back")?.addEventListener("click", () => rollModel("back"));
-  document.getElementById("btn-model-fwd")?.addEventListener("click", () => rollModel("forward"));
-  document.getElementById("btn-model-view")?.addEventListener("click", openModelFile);
-  document.querySelectorAll(".model-restore-btn").forEach((btn) => {
-    btn.addEventListener("click", () => restoreModelVersion(Number(btn.getAttribute("data-restore"))));
-  });
-  document.getElementById("lbl-model-view")?.addEventListener("click", openModelFile);
-  document.getElementById("model-file-close")?.addEventListener("click", closeModelFile);
-  document.getElementById("model-file-backdrop")?.addEventListener("click", (e) => {
-    if (e.target.id === "model-file-backdrop") closeModelFile();
-  });
-  const openEdit = () => {
-    state.modelSourceEditing = true;
-    state.modelSourceInput = state.modelSource?.workflowUrl || "";
-    render();
-    const el = document.getElementById("model-source-input");
-    if (el) { el.focus(); el.select(); }
-  };
-  const closeEdit = () => {
-    state.modelSourceEditing = false;
-    state.modelSourceInput = state.modelSource?.workflowUrl || "";
-    render();
-  };
-  document.getElementById("model-source-edit")?.addEventListener("click", openEdit);
-  document.getElementById("model-source-cancel")?.addEventListener("click", closeEdit);
-  document.getElementById("model-source-cancel-x")?.addEventListener("click", closeEdit);
-  document.getElementById("model-source-backdrop")?.addEventListener("click", (e) => {
-    if (e.target.id === "model-source-backdrop") closeEdit();
-  });
-  const srcInput = document.getElementById("model-source-input");
-  if (srcInput) {
-    srcInput.addEventListener("input", (e) => { state.modelSourceInput = e.target.value; });
-    srcInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); saveModelSource(); }
-      else if (e.key === "Escape") { closeEdit(); }
-    });
-  }
-  document.getElementById("model-source-save")?.addEventListener("click", saveModelSource);
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,21 +690,46 @@ async function onHashChange() {
   // login screen now instead of flashing a frame of header-less content.
   if (location.hash === "#login") { state.view = "login"; render(); return; }
 
-  if (r.view === "detail") {
-    await loadDetail();
-  } else if (r.view === "admin") {
-    await loadAdmin();
-  } else if (r.view === "bcs") {
-    await loadExplorer();
-  } else if (r.view === "bc") {
-    await loadBc(r.bc);
-  } else {
-    await loadDashboard();
-    // Poll every 5s so "last activity" pills age in front of the audience.
-    dashboardTimer = setInterval(() => {
-      if (state.view === "dashboard" && !state.busy && !state.modelFileOpen) loadDashboard().catch(() => {});
-    }, 5000);
+  // Empty org (a fresh org, or its last project was deleted): the data plane fails
+  // closed, so don't fetch it — show the "create your first project" state. Admin
+  // stays reachable so the user can manage the org and create a project there too.
+  const emptyOrg = state.me && (state.me.projects || []).length === 0;
+  if (emptyOrg && r.view !== "admin") {
+    state.view = "empty-org";
+    render();
+    return;
   }
+
+  // A project that exists but has no model yet → the data plane throws
+  // MODEL_NOT_LOADED. Catch it and show the "set this project's model" prompt
+  // instead of a broken view.
+  try {
+    if (r.view === "detail") {
+      await loadDetail();
+    } else if (r.view === "admin") {
+      await loadAdmin();
+    } else if (r.view === "bcs") {
+      await loadExplorer();
+    } else if (r.view === "bc") {
+      await loadBc(r.bc);
+    } else {
+      await loadDashboard();
+      // Poll every 5s so "last activity" pills age in front of the audience.
+      dashboardTimer = setInterval(() => {
+        if (state.view === "dashboard" && !state.busy) loadDashboard().catch(() => {});
+      }, 5000);
+    }
+  } catch (e) {
+    if (isNoModelErr(e)) { state.view = "no-model"; render(); return; }
+    throw e;
+  }
+}
+
+// The API helper throws Error(`<status> <path>: <body>`); the body carries the
+// server's error code. Detect the "project has no model yet" state so the UI can
+// prompt for one rather than surfacing a raw error.
+function isNoModelErr(e) {
+  return !!e && typeof e.message === "string" && /MODEL_NOT_LOADED/.test(e.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,7 +740,6 @@ async function loadDashboard() {
   const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events"), loadRegistryStatus(), loadMeta()]);
   state.demands = demands;
   state.events = events;
-  if (!state.model) await loadModelStatus();
   render();
 }
 
@@ -1082,17 +749,7 @@ async function loadMeta() {
     const meta = await api("/sim/meta");
     state.meta = meta;
     document.title = `${meta.title} — Live`;
-    maybeAutoRebuild();
   } catch { /* keep defaults */ }
-}
-
-// Auto-rebuild: when the model changed and its projection tables are out of sync
-// (rebuildNeeded), apply it with the loader — no manual "Rebuild" button needed.
-// Guarded so it never re-enters mid-rebuild or loops after a failure.
-function maybeAutoRebuild() {
-  if (state.meta.rebuildNeeded && !state.rebuilding && !state.rebuildError) {
-    rebuildModel({ fetch: false });
-  }
 }
 
 async function createDemand() {
@@ -1220,7 +877,6 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
-        ${modelControls()}
         ${projectModelControls()}
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
@@ -1261,7 +917,6 @@ function dashboardView() {
 }
 
 function bindDashboard() {
-  bindModelControls();
   bindProjectModel();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
@@ -1327,7 +982,7 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, sidebarOpen: false, sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, sidebarOpen: false, sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
   return state.exp;
 }
 
@@ -1345,10 +1000,11 @@ async function selectExpSystem(name) {
   try {
     const d = await api(`/api/bc/${encodeURIComponent(name)}`);
     e.entities = d.entities || [];
+    e.valueObjects = d.valueObjects || [];
     e.adapters = d.adapters || [];
-    const def = d.defaultEntity || (e.entities[0] && e.entities[0].name);
+    const def = d.defaultEntity || (e.entities[0] && e.entities[0].name) || (e.valueObjects[0] && e.valueObjects[0].name);
     if (def) { await selectExpEntity(def); return; }
-  } catch (_err) { e.entities = []; e.adapters = []; }
+  } catch (_err) { e.entities = []; e.valueObjects = []; e.adapters = []; }
   render();
 }
 
@@ -1361,6 +1017,47 @@ async function selectExpEntity(name) {
     e.tableMissing = !!d.tableMissing;
   } catch (_err) { e.items = []; e.tableMissing = true; }
   e.busy = false; render();
+}
+
+// Is the selected table an entity or a value object? (drives the chat context +
+// the sidebar label).
+function expKindOf(e, name) {
+  if (!name) return null;
+  if ((e.entities || []).some((t) => t.name === name)) return "entity";
+  if ((e.valueObjects || []).some((t) => t.name === name)) return "valueObject";
+  return null;
+}
+
+// Open the assistant docked on the right as the connector builder, scoped (via
+// sendChat's context injection) to the selected system + table. Closes the
+// Configure-Adapter sidebar first so the two right panels don't stack.
+function openConnectorChat() {
+  const e = expState();
+  e.sidebarOpen = false;
+  state.chatOpen = true;
+  if (!state.chatInfo) loadChatInfo().then(render);
+  render();
+  setTimeout(() => document.getElementById("chat-input")?.focus(), 30);
+}
+
+// After a connector-builder turn, re-pull the system's adapters + the selected
+// table's rows so a create/build/ingest shows immediately in the explorer.
+async function refreshExplorerAfterChat() {
+  const e = expState();
+  if (!e.system) return;
+  try {
+    const d = await api(`/api/bc/${encodeURIComponent(e.system)}`);
+    e.adapters = d.adapters || [];
+    e.entities = d.entities || e.entities;
+    e.valueObjects = d.valueObjects || e.valueObjects;
+  } catch (_e) { /* keep prior */ }
+  if (e.entity) {
+    try {
+      const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(e.entity)}&limit=300`);
+      e.items = d.rows || [];
+      e.tableMissing = !!d.tableMissing;
+    } catch (_e) { /* keep prior */ }
+  }
 }
 
 function applyExpFilters(items, filters) {
@@ -1412,18 +1109,28 @@ function expTablesCol(e) {
   if (e.tablesCollapsed) {
     return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-tables-expand" class="text-stone-400 hover:text-stone-700" title="Show tables">›</button></div>`;
   }
-  const all = e.entities || [];
+  const entities = e.entities || [];
+  const vos = e.valueObjects || [];
+  const total = entities.length + vos.length;
   const q = (e.tableSearch || "").toLowerCase();
-  const filtered = q ? all.filter((t) => t.name.toLowerCase().includes(q)) : all;
-  const items = filtered.map((t) =>
+  const match = (t) => !q || t.name.toLowerCase().includes(q);
+  const row = (t) =>
     `<button data-exp-entity="${escapeHtml(t.name)}" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-stone-100 ${t.name === e.entity ? "bg-sky-50" : ""}">
       <span class="w-3 h-3 rounded-full border ${t.name === e.entity ? "border-sky-500 bg-sky-500" : "border-stone-300"}"></span>
       <span class="flex-1 ${t.name === e.entity ? "text-sky-700 font-medium" : "text-stone-700"}">${escapeHtml(t.name)}</span>
-    </button>`).join("");
+    </button>`;
+  const ents = entities.filter(match);
+  const vobs = vos.filter(match);
+  const group = (label, list) => list.length
+    ? `<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-widest text-stone-400">${label}</div>${list.map(row).join("")}`
+    : "";
+  const body = (ents.length || vobs.length)
+    ? `${group("Entities", ents)}${group("Value objects", vobs)}`
+    : `<div class="px-4 py-3 text-sm text-stone-400">${total ? "No match" : "No tables"}</div>`;
   return `
     <div class="w-80 shrink-0 border-r border-stone-200 bg-white flex flex-col">
       <div class="px-4 py-3 border-b border-stone-100 flex items-center justify-between">
-        <span class="font-semibold text-stone-900">Tables <span class="text-stone-400 font-normal">(${all.length})</span></span>
+        <span class="font-semibold text-stone-900">Tables <span class="text-stone-400 font-normal">(${total})</span></span>
         <button id="exp-tables-collapse" class="text-stone-400 hover:text-stone-700" title="Collapse">‹</button>
       </div>
       <div class="px-3 py-2 border-b border-stone-100">
@@ -1432,14 +1139,14 @@ function expTablesCol(e) {
           <span class="absolute left-2 top-1.5 text-stone-400 text-sm">🔍</span>
         </div>
       </div>
-      <div class="overflow-y-auto py-1 flex-1">${items || `<div class="px-4 py-3 text-sm text-stone-400">${all.length ? "No match" : "No tables"}</div>`}</div>
+      <div class="overflow-y-auto py-1 flex-1">${body}</div>
     </div>`;
 }
 
 function expMain(e) {
   if (!e.system) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Loading systems…</div>`;
   if (!e.entity) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Select a table to explore its items.</div>`;
-  const entity = (e.entities || []).find((t) => t.name === e.entity);
+  const entity = (e.entities || []).find((t) => t.name === e.entity) || (e.valueObjects || []).find((t) => t.name === e.entity);
   const cols = entity && entity.fields && entity.fields.length
     ? entity.fields.map((f) => f.name)
     : (e.items[0] ? Object.keys(e.items[0]).filter((k) => k !== "_provenance") : ["id"]);
@@ -1528,13 +1235,13 @@ function expAdapterSidebar(e) {
         <button id="exp-sidebar-close" class="text-stone-400 hover:text-stone-700">✕</button>
       </div>
       <div class="p-4 overflow-y-auto flex-1 space-y-3">
-        <div class="text-xs text-stone-500">System <b>${escapeHtml(e.system || "")}</b> → table <b>${escapeHtml(e.entity || "")}</b></div>
+        <div class="text-xs text-stone-500">System <b>${escapeHtml(e.system || "")}</b> → ${expKindOf(e, e.entity) === "valueObject" ? "value object" : "table"} <b>${escapeHtml(e.entity || "")}</b></div>
         ${list}
-        <div class="rounded-lg border border-dashed border-stone-300 p-4 text-center">
-          <div class="text-2xl mb-1">💬</div>
-          <div class="text-sm font-medium text-stone-700">Build an adapter with AI</div>
-          <div class="text-xs text-stone-500 mt-1">Describe the source system and we'll generate the connector — chat-based builder coming soon.</div>
-          <textarea disabled placeholder="e.g. Connect to our Postgres orders table…" class="w-full mt-3 text-sm border border-stone-200 rounded-md p-2 bg-stone-50 text-stone-400" rows="2"></textarea>
+        <div class="rounded-lg border border-sky-200 bg-sky-50/60 p-4 text-center">
+          <div class="text-2xl mb-1">✨</div>
+          <div class="text-sm font-medium text-stone-800">Build a connector with AI</div>
+          <div class="text-xs text-stone-500 mt-1">Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and the assistant writes, tests, and runs a connector to fill this table.</div>
+          <button id="exp-build-ai" class="w-full mt-3 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 font-medium">Build connector with AI →</button>
         </div>
         <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full adapter workbench →</a>
       </div>
@@ -1568,6 +1275,7 @@ function bindExplorer() {
   document.getElementById("exp-next")?.addEventListener("click", () => { expState().page++; render(); });
   document.getElementById("exp-config-adapter")?.addEventListener("click", () => { const e = expState(); e.sidebarOpen = !e.sidebarOpen; render(); });
   document.getElementById("exp-sidebar-close")?.addEventListener("click", () => { expState().sidebarOpen = false; render(); });
+  document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
 }
 
 function bcListView() {
@@ -2029,7 +1737,6 @@ function detailHeader() {
           <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
           <button id="btn-next"  ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
           <button id="btn-all"   ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>
-          ${modelControls()}
           <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
         </div>
       </div>
@@ -2564,7 +2271,6 @@ function genericDetailView() {
 
 
 function bindDetail() {
-  bindModelControls();
   document.getElementById("btn-back")?.addEventListener("click", () => navigate("#"));
   document.getElementById("btn-next")?.addEventListener("click", doNext);
   document.getElementById("btn-all")?.addEventListener("click", doRunAll);
@@ -2575,43 +2281,12 @@ function bindDetail() {
 // Render dispatcher
 // ---------------------------------------------------------------------------
 
-// Full-screen loader shown while a model is being applied (tables dropped &
-// recreated). Also surfaces an error with a dismiss button.
-function rebuildOverlay() {
-  if (!state.rebuilding && !state.rebuildError) return "";
-  if (state.rebuildError) {
-    return `
-      <div class="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm">
-        <div class="bg-white rounded-xl shadow-2xl border border-stone-200 px-8 py-7 w-[440px] text-center">
-          <div class="text-rose-500 text-4xl mb-3">⚠️</div>
-          <div class="text-stone-900 font-semibold mb-1">Rebuild failed</div>
-          <div class="text-sm text-stone-600 mb-4 break-words">${escapeHtml(state.rebuildError)}</div>
-          <button id="btn-rebuild-dismiss" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Dismiss</button>
-        </div>
-      </div>`;
-  }
-  return `
-    <div class="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 backdrop-blur-sm">
-      <div class="bg-white rounded-xl shadow-2xl border border-stone-200 px-8 py-7 w-[440px] text-center">
-        <div class="mx-auto mb-4 h-10 w-10 rounded-full border-[3px] border-stone-200 border-t-amber-500 animate-spin"></div>
-        <div class="text-stone-900 font-semibold mb-1">Rebuilding from the model</div>
-        <div class="text-sm text-stone-600 min-h-[20px]">${escapeHtml(state.rebuildPhase || "Working…")}</div>
-        <div class="text-[11px] text-stone-400 mt-3">Dropping &amp; recreating projection tables · in-process, no restart</div>
-      </div>
-    </div>`;
-}
-
-function bindRebuildOverlay() {
-  document.getElementById("btn-rebuild-dismiss")?.addEventListener("click", dismissRebuild);
-}
-
 function render() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
-  const prevDialogScroll = document.getElementById("model-file-scroll")?.scrollTop ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
   // user) so the whole app reads as a multi-tenant console.
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${modelFileDialog()}${projectModelDialog()}${rebuildOverlay()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${projectModelDialog()}${newOrgDialog()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -2624,8 +2299,6 @@ function render() {
     bindTenantBar();
     bindDetail();
     bindChat();
-    bindRebuildOverlay();
-
     const scroller = document.getElementById("timeline-scroll");
     if (scroller) scroller.scrollLeft = prevScroll;
     const activeIdx = state.currentIndex - 1;
@@ -2645,34 +2318,31 @@ function render() {
     root.innerHTML = wrap(adminView());
     bindTenantBar();
     bindAdmin();
+    bindChat();  } else if (state.view === "empty-org") {
+    root.innerHTML = wrap(emptyOrgView());
+    bindTenantBar();
+    bindEmptyOrg();
     bindChat();
-    bindRebuildOverlay();
+  } else if (state.view === "no-model") {
+    root.innerHTML = wrap(noModelView());
+    bindTenantBar();
+    bindNoModel();
+    bindProjectModel();
+    bindChat();
   } else if (state.view === "bcs") {
     root.innerHTML = wrap(explorerView());
     bindTenantBar();
     bindExplorer();
-    bindChat();
-    bindRebuildOverlay();
-  } else if (state.view === "bc") {
+    bindChat();  } else if (state.view === "bc") {
     root.innerHTML = wrap(bcWorkbenchView());
     bindTenantBar();
     bindBcWorkbench();
-    bindChat();
-    bindRebuildOverlay();
-  } else {
+    bindChat();  } else {
     root.innerHTML = wrap(dashboardView());
     bindTenantBar();
     bindDashboard();
-    bindChat();
-    bindRebuildOverlay();
-  }
+    bindChat();  }
 
-  // Preserve the model viewer's scroll position across re-renders so polling /
-  // toasts don't yank the user back to the top while they're reading.
-  if (prevDialogScroll) {
-    const dlg = document.getElementById("model-file-scroll");
-    if (dlg) dlg.scrollTop = prevDialogScroll;
-  }
 }
 
 // ===========================================================================
@@ -2685,10 +2355,31 @@ async function ensureMe() {
   try {
     state.me = await api("/v1/whoami");
     state.orgs = state.me.organizations || [];
-  } catch (_e) {
+    return;
+  } catch (e) {
+    // A stale/invalid org selector (e.g. an org that was deleted, left behind in
+    // localStorage) makes whoami fail with a membership AUTH_ERROR — which would
+    // otherwise 403 every request and lock the user out. Drop the selector and
+    // retry once header-less so they land on their default org. The backend stays
+    // strict (a non-member selector is always denied); recovery is client-side.
+    if (AUTH.org() && isOrgSelectorErr(e)) {
+      AUTH.setOrg(null); // also clears the selected project
+      try {
+        state.me = await api("/v1/whoami");
+        state.orgs = state.me.organizations || [];
+        return;
+      } catch (_e2) { /* fall through to the cleared state */ }
+    }
     state.me = null;
     state.orgs = [];
   }
+}
+
+// True when an error is a stale/invalid X-Org-Id rejection (not a member, or the
+// org no longer exists) — the recoverable case ensureMe() retries past.
+function isOrgSelectorErr(e) {
+  return !!e && typeof e.message === "string" &&
+    /not a member of organization|organization "[^"]*" not found/i.test(e.message);
 }
 
 function currentOrgName() {
@@ -2709,8 +2400,11 @@ function tenantBar() {
     : `<span class="text-sm font-medium text-stone-100">${escapeHtml(currentOrgName())}</span>`;
   const projects = me?.projects || [];
   const curProj = me?.projectId || "";
-  const projName = (projects.find((p) => p.id === curProj) || {}).name || "Default";
-  const projControl = projects.length > 1
+  const emptyOrg = projects.length === 0;
+  const projName = (projects.find((p) => p.id === curProj) || {}).name || (emptyOrg ? "No project" : "Default");
+  const projControl = emptyOrg
+    ? `<a href="#" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no projects yet">+ Create project</a>`
+    : projects.length > 1
     ? `<select id="proj-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${projects.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === curProj ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>`
     : `<a href="#" class="text-sm text-stone-100 hover:text-white">${escapeHtml(projName)}</a>`;
   return `
@@ -2720,6 +2414,7 @@ function tenantBar() {
         <span class="text-stone-600">›</span>
         <span class="text-stone-500 text-xs uppercase tracking-wide">Org</span>
         ${switcher}
+        <button id="btn-new-org" class="text-xs px-1.5 py-0.5 rounded border border-stone-700 text-stone-400 hover:text-amber-300 hover:border-amber-400" title="Create a new organization (you become its owner)">+ New org</button>
         ${isAdmin ? `<span class="text-[10px] uppercase font-bold px-1.5 py-px rounded bg-amber-500 text-stone-900" title="Platform superadmin — can switch into any organization (every cross-tenant act is audited)">SUPERUSER</span>` : ""}
         <span class="text-stone-600">›</span>
         <span class="text-stone-500 text-xs uppercase tracking-wide">Project</span>
@@ -2752,6 +2447,123 @@ function bindTenantBar() {
     state.me = null; state.orgs = [];
     navigate("#login");
   });
+
+  // Create-organization dialog (self-service: POST /v1/organizations makes the
+  // caller the owner). The new org provisions a default workspace but no project,
+  // so switching into it lands on the empty-org "create your first project" view.
+  const createOrg = async () => {
+    if (state.newOrgBusy) return;
+    const name = (document.getElementById("new-org-name")?.value || state.newOrgName || "").trim();
+    if (!name) { state.newOrgErr = "Organization name is required"; render(); return; }
+    state.newOrgBusy = true; state.newOrgErr = null; render();
+    try {
+      const org = await api("/v1/organizations", { method: "POST", body: JSON.stringify({ name }) });
+      AUTH.setOrg(org.id); // switch into the brand-new org (also clears the selected project)
+      state.newOrgOpen = false; state.newOrgBusy = false; state.newOrgName = "";
+      state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new org
+      state.modelMsg = { ok: true, text: `Organization "${name}" created — you're its owner. Create your first project to get started.` };
+      navigate("#"); // empty new org → the create-first-project screen
+      setTimeout(() => { state.modelMsg = null; render(); }, 3000);
+    } catch (e) {
+      state.newOrgBusy = false;
+      state.newOrgErr = (e && e.message) ? e.message : "Failed to create the organization.";
+      render();
+    }
+  };
+  document.getElementById("btn-new-org")?.addEventListener("click", () => {
+    state.newOrgOpen = true; state.newOrgErr = null; state.newOrgName = "";
+    render();
+    setTimeout(() => document.getElementById("new-org-name")?.focus(), 30);
+  });
+  document.getElementById("new-org-cancel")?.addEventListener("click", () => { state.newOrgOpen = false; render(); });
+  document.getElementById("new-org-name")?.addEventListener("input", (e) => { state.newOrgName = e.target.value; });
+  document.getElementById("new-org-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") createOrg(); });
+  document.getElementById("new-org-create")?.addEventListener("click", createOrg);
+}
+
+// Self-service create-organization modal, opened from the tenant bar's "+ New org"
+// button. Mirrors projectModelDialog()'s open/busy/err state pattern.
+function newOrgDialog() {
+  if (!state.newOrgOpen) return "";
+  const err = state.newOrgErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.newOrgErr)}</div>` : "";
+  return `
+    <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col">
+        <div class="px-5 py-4 border-b border-stone-200">
+          <div class="text-lg font-semibold">Create organization</div>
+          <div class="text-sm text-stone-500 mt-0.5">A new tenant with its own members, projects, and data. You become its owner — it starts empty, ready for your first project.</div>
+        </div>
+        <div class="p-5">
+          ${err}
+          <label class="block text-sm font-medium text-stone-700 mb-1">Organization name</label>
+          <input id="new-org-name" value="${escapeHtml(state.newOrgName || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="Acme Corp" />
+          <div class="text-xs text-stone-500 mt-1">A URL-safe handle (slug) is derived from the name automatically.</div>
+        </div>
+        <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
+          <button id="new-org-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
+          <button id="new-org-create" ${state.newOrgBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.newOrgBusy ? "Creating…" : "Create organization"}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// Empty-org state: the org has zero projects (e.g. its last was deleted). The
+// data plane fails closed (409), so we show a create-your-first-project panel
+// instead of a broken dashboard.
+function emptyOrgView() {
+  return `
+    <main class="flex-1 flex items-center justify-center p-8">
+      <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
+        <div class="text-3xl mb-2">📁</div>
+        <div class="text-lg font-semibold text-stone-900">No projects yet</div>
+        <div class="text-sm text-stone-500 mt-1 mb-5">This organization is empty. Create your first project, then point it at your own Qlerify model — nothing is preloaded.</div>
+        <div class="text-left">
+          <label class="block text-xs text-stone-500 mb-1">Project name</label>
+          <input id="empty-proj-name" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" placeholder="Q3 Forecast" />
+          <button id="empty-proj-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create project</button>
+          <div id="empty-proj-err" class="text-xs text-rose-600 mt-2"></div>
+          <div class="text-[11px] text-stone-400 mt-3">You can also manage projects from <a href="#admin" class="underline">Org Admin</a>.</div>
+        </div>
+      </div>
+    </main>`;
+}
+
+function bindEmptyOrg() {
+  const create = async () => {
+    const errEl = document.getElementById("empty-proj-err");
+    const name = document.getElementById("empty-proj-name").value.trim();
+    if (!name) { errEl.textContent = "Project name is required"; return; }
+    try {
+      const wss = await api("/v1/workspaces");
+      const workspaceId = (wss[0] || {}).id;
+      if (!workspaceId) { errEl.textContent = "This org has no workspace — create one in Org Admin first."; return; }
+      const proj = await api("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+      AUTH.setProject(proj.id); // switch straight into the brand-new project
+      await ensureMe();
+      navigate("#");
+    } catch (e) { errEl.textContent = e.message; }
+  };
+  document.getElementById("empty-proj-create")?.addEventListener("click", create);
+  document.getElementById("empty-proj-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+}
+
+// A project exists but has no model yet (freshly created — nothing is preloaded).
+// Prompt the user to point it at their own Qlerify model (opens the same dialog
+// the dashboard's "⚙ Set model" button uses).
+function noModelView() {
+  return `
+    <main class="flex-1 flex items-center justify-center p-8">
+      <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
+        <div class="text-3xl mb-2">🧩</div>
+        <div class="text-lg font-semibold text-stone-900">This project has no model yet</div>
+        <div class="text-sm text-stone-500 mt-1 mb-5">Point it at a Qlerify model to generate its workflow and data. Nothing is preloaded — the model is yours.</div>
+        <button id="nomodel-set" class="rounded-md bg-stone-900 text-white py-2 px-4 text-sm font-medium hover:bg-stone-800">⚙ Set this project's model</button>
+      </div>
+    </main>`;
+}
+
+function bindNoModel() {
+  document.getElementById("nomodel-set")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
 }
 
 function loginView() {
@@ -2767,7 +2579,7 @@ function loginView() {
         <label class="block text-xs font-medium text-stone-600 mb-1">Password</label>
         <input id="login-password" type="password" autocomplete="current-password" class="w-full mb-4 rounded-md border border-stone-300 px-3 py-2 text-sm" />
         <button class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Sign in</button>
-        <div class="text-[11px] text-stone-400 mt-3">The demo runs as the <b>system</b> tenant without signing in — <a href="#" id="login-skip" class="underline">continue as system</a>.</div>
+        <div class="text-[11px] text-stone-400 mt-3">Or run as the <b>system</b> tenant without signing in — <a href="#" id="login-skip" class="underline">continue as system</a>.</div>
       </form>
     </div>`;
 }
@@ -2924,20 +2736,28 @@ function adminTabContent(tab, a) {
       ${tbl(["Workspace", "Environment", "Lifecycle"], rows, "No workspaces.")}`;
   }
   if (tab === "projects") {
-    const rows = (a.projects || []).map((pr) => `<tr>
+    const sysProjId = state.me?.systemProjectId;
+    // The system/demo project is infrastructure, not a manageable tenant project
+    // (it can't be deleted and is re-seeded every boot). Keep it OUT of this
+    // management table — it still appears in the breadcrumb for navigation.
+    const manageable = (a.projects || []).filter((pr) => pr.id !== sysProjId);
+    const hidSystem = (a.projects || []).length !== manageable.length;
+    const rows = manageable.map((pr) => `<tr>
       <td class="px-4 py-2 font-medium">${escapeHtml(pr.name)}</td>
       <td class="px-4 py-2 mono text-xs text-stone-500">${escapeHtml(String(pr.workspaceId).slice(0, 12))}</td>
       <td class="px-4 py-2 text-stone-500">${escapeHtml(pr.lifecycleState || "active")}</td>
+      <td class="px-4 py-2 text-right"><button data-proj-del="${escapeHtml(pr.id)}" data-proj-name="${escapeHtml(pr.name)}" class="text-xs px-2 py-1 rounded border border-rose-200 text-rose-700 hover:bg-rose-50">Delete</button></td>
     </tr>`).join("");
     const wsOpts = (a.workspaces || []).map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+    const emptyMsg = "No projects yet — create one and point it at a Qlerify model.";
     return `
       <div class="mb-4 flex items-end gap-2">
         <div><label class="block text-xs text-stone-500 mb-1">Project</label><input id="proj-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="Q3 Forecast" /></div>
         <div><label class="block text-xs text-stone-500 mb-1">Workspace</label><select id="proj-ws" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${wsOpts}</select></div>
         <button id="proj-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add project</button>
       </div>
-      <div class="text-xs text-stone-500 mb-3">A new project starts as a copy of the org's current model and gets its own data — switch to it from the breadcrumb at the top.</div>
-      ${tbl(["Project", "Workspace", "Lifecycle"], rows, "No projects.")}`;
+      <div class="text-xs text-stone-500 mb-3">A new project starts empty — point it at your own Qlerify model (⚙ Set model) to give it data. Switch projects from the breadcrumb at the top. Deleting a project permanently drops its tables, data, run history, and model versions.</div>
+      ${tbl(["Project", "Workspace", "Lifecycle", ""], rows, emptyMsg)}`;
   }
   // audit
   const rows = (a.audit || []).map((ev) => `<tr>
@@ -2999,6 +2819,16 @@ function bindAdmin() {
     if (!workspaceId) throw new Error("Pick a workspace");
     await api("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
   }));
+  document.querySelectorAll("[data-proj-del]").forEach((el) => el.addEventListener("click", () => act(async () => {
+    const id = el.dataset.projDel;
+    const name = el.dataset.projName || "this project";
+    if (!confirm(`Delete project "${name}"?\n\nThis permanently drops its tables, all data, run history, and model versions. This cannot be undone.`)) return;
+    await api(`/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+    // If we just deleted the active project, fall back to the org's Default.
+    if (AUTH.project() === id) AUTH.setProject(null);
+    // Refresh who-am-I so the breadcrumb picker drops the deleted project.
+    try { state.me = await api("/v1/whoami"); } catch {}
+  })));
   document.getElementById("audit-verify")?.addEventListener("click", async () => {
     const el = document.getElementById("audit-verify-result");
     el.textContent = "verifying…";

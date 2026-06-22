@@ -7,6 +7,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
+import { isHandledError } from "../errors.js";
 import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/model.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
@@ -35,6 +36,17 @@ function entitiesForBc(bc: string): EntitySchema[] {
  * root in the BC's events). */
 function defaultEntityForBc(bc: string): string | null {
   return eventsForBc(bc).map((e) => e.aggregateRoot).find(Boolean) ?? null;
+}
+
+/** Value objects referenced by this BC's entities — listed as their own populatable
+ * "tables" in the explorer (a connector can fill a value object as its own table). */
+function valueObjectsForBc(bc: string): EntitySchema[] {
+  const o = getOntology();
+  const names = new Set<string>();
+  for (const e of entitiesForBc(bc)) {
+    for (const f of e.fields) if (f.relatedEntity && o.valueObject(f.relatedEntity)) names.add(f.relatedEntity);
+  }
+  return [...names].map((n) => o.valueObject(n)).filter((v): v is EntitySchema => !!v);
 }
 
 function slimEvent(e: OntologyEvent) {
@@ -120,6 +132,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
       name: bc,
       events: events.map(slimEvent),
       entities: entitiesForBc(bc),
+      valueObjects: valueObjectsForBc(bc),
       commands,
       adapters: listAdapters().filter((a) => a.boundedContext === bc).map(serializeAdapter),
       provenance: prov ?? { mode: "simulated", eventCount: 0 },
@@ -144,15 +157,18 @@ export function registerBcRoutes(app: FastifyInstance): void {
   app.post("/api/bc/:bc/adapter/:id/test", async (req, reply) => {
     const a = getAdapter((req.params as any).id);
     if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
-    const entity = getOntology().entity(a.targetEntity);
-    if (!entity) return reply.code(400).send({ error: "NO_ENTITY", message: `entity "${a.targetEntity}" not in the model` });
     const limit = Math.max(1, Math.min(50, Number((req.body as any)?.limit ?? 5)));
     try {
+      // getOntology() is inside the try so a project with no model yet yields a
+      // clean ModelNotLoadedError (409) rather than an unhandled throw.
+      const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
+      if (!entity) return reply.code(400).send({ error: "NO_ENTITY", message: `"${a.targetEntity}" is not an entity or value object in the model` });
       const fieldMap = await a.mapping();
       const { rows } = await a.pull({ limit });
       const mapped = (rows[a.targetEntity] ?? []).map((r) => applyFieldMap(r, fieldMap));
       return { entity: a.targetEntity, mode: a.mode, count: mapped.length, rows: mapped, diff: diffRows(mapped, entity) };
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return reply.code(400).send({ error: "TEST_FAILED", message: err?.message ?? String(err) });
     }
   });

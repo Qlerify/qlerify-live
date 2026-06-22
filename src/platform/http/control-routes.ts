@@ -21,6 +21,7 @@ import {
   createOrganization,
   createProject,
   createWorkspace,
+  deleteProject,
   ensureIdentity,
 } from "../provisioning/index.js";
 import { requireTenant } from "../tenancy/context.js";
@@ -91,8 +92,10 @@ export function registerControlRoutes(app: FastifyInstance) {
         isPlatformAdmin: !!ctx.isPlatformAdmin,
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
         organizations: await accessibleOrgs(ctx),
-        projectId: ctx.projectId,
-        isSystemProject: ctx.projectId === SYSTEM_PROJECT_ID,
+        projectId: ctx.projectId ?? null,
+        isSystemProject: ctx.projectId === SYSTEM_PROJECT_ID, // always false now (no system project row); kept for client compat
+        systemProjectId: SYSTEM_PROJECT_ID, // sentinel; no real project carries it
+
         // The org's projects, readable by any member (for the breadcrumb picker).
         projects: await prisma.platProject.findMany({
           where: { organizationId: ctx.organizationId },
@@ -463,6 +466,21 @@ export function registerControlRoutes(app: FastifyInstance) {
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
       const proj = await createProject(ctx.organizationId, body.workspaceId, body.name, ctx.principal.id);
       return reply.code(201).send({ id: proj.id, name: proj.name, workspaceId: proj.workspaceId });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Delete a project and cascade-drop its data plane + model metadata. Destructive
+  // → org-admin gated (same as creation; §6.4 maps deletion to `administer`). The
+  // system default project is refused by deleteProject().
+  app.delete("/v1/projects/:id", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const projectId = (req.params as { id: string }).id;
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const result = await deleteProject(ctx.organizationId, projectId, ctx.principal.id);
+      return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);
     }

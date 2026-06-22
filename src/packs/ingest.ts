@@ -24,11 +24,26 @@ export interface IngestSummary {
   mode: ProvMode;
 }
 
+/** Coerce a row's values to what the raw-SQL projection columns accept. Nested
+ * objects/arrays (e.g. an embedded value object a connector returned inline) are
+ * JSON-stringified so they land in the TEXT column verbatim — this is the
+ * "embed the VO as JSON on the row" path, free because gen_ columns are TEXT. */
+function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) {
+    out[k] = v !== null && typeof v === "object" ? JSON.stringify(v) : v;
+  }
+  return out;
+}
+
 export async function ingestPull(adapterId: string, opts: { limit?: number } = {}): Promise<IngestSummary> {
   const adapter = getAdapter(adapterId);
   if (!adapter) throw new Error(`unknown adapter: ${adapterId}`);
-  const entity = getOntology().entity(adapter.targetEntity);
-  if (!entity) throw new Error(`adapter "${adapterId}": entity "${adapter.targetEntity}" is not in the loaded model`);
+  // The target may be an entity OR a value object (a value object populated
+  // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
+  const o = getOntology();
+  const entity = o.entity(adapter.targetEntity) ?? o.valueObject(adapter.targetEntity);
+  if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
 
   await store.ensureTable(entity);
   const fieldMap = await adapter.mapping();
@@ -38,7 +53,7 @@ export async function ingestPull(adapterId: string, opts: { limit?: number } = {
   let inserted = 0;
   let skipped = 0;
   for (const raw of incoming) {
-    const mapped = applyFieldMap(raw, fieldMap);
+    const mapped = flattenValues(applyFieldMap(raw, fieldMap));
     const id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
     mapped.id = id;
     mapped._provenance = adapter.mode; // current-state provenance on the row

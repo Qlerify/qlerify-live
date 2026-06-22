@@ -1,33 +1,32 @@
 // Provisioning & lifecycle (spec §10 Provisioning Orchestrator, pooled-only).
 //
 // Two jobs:
-//  1. seedSystemOrg() — idempotent boot seed. Creates the SYSTEM tenant and folds
-//     the existing on-disk workflow.json (+ overlay.json) in as its ontology's
-//     version 0. This is what lets the single-tenant demo keep running once
-//     tenancy exists: header-less requests authenticate as the system identity
-//     and resolve to the system org, so the demo flows THROUGH the spine.
+//  1. seedSystemOrg() — idempotent boot seed. Creates the SYSTEM tenant (org +
+//     identity + superuser) so header-less requests have somewhere to resolve to.
+//     It seeds NO project and NO model: there is no preset/demo content anymore.
+//     A header-less / freshly-provisioned org lands on the empty-org screen until
+//     a user creates a project and points it at their own Qlerify model.
 //  2. createOrganization()/createEnvironment()/… — provision a NEW tenant:
 //     org + registry row (pooled, local stack) + dev/prod environments + a
-//     default workspace/project + an owner role assignment, all audited.
+//     default workspace (but ZERO projects) + an owner role assignment, audited.
 //
 // These run in the CONTROL plane (it "knows all tenants", §10), so they use the
 // Prisma client directly rather than the tenant-scoped store — you cannot be
 // "inside" an org you are in the act of creating.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { prisma } from "../../db.js";
 import { DomainError } from "../../errors.js";
-import { QLERIFY_DIR } from "../../ontology/model.js";
+import { QLERIFY_DIR, forgetProjectModel } from "../../ontology/model.js";
+import { dropProjectionTablesForProject } from "../../twin/projection-store.js";
 import { hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
 import {
   SYSTEM_CUSTOMER_ACCOUNT_ID,
   SYSTEM_ENV_ID,
   SYSTEM_IDENTITY_ID,
-  SYSTEM_ONTOLOGY_ID,
-  SYSTEM_ONTOLOGY_RESOURCE_ID,
   SYSTEM_ORG_ID,
   SYSTEM_PROJECT_ID,
   SYSTEM_STACK_ID,
@@ -37,10 +36,8 @@ import {
   slugify,
 } from "../ids.js";
 import type { BuiltinRoleKey, PrincipalType, ScopeType } from "../types.js";
-import { createVersion, ensureOntologyResource } from "../ontology-store/ontology-store.js";
 
 const BUILTIN_ROLES: BuiltinRoleKey[] = ["owner", "editor", "viewer", "deployer", "org_admin"];
-const STABLE_SYSTEM_ONTOLOGY_NAME = "workflow"; // one ontology slot, versioned over swaps
 
 function titleCase(s: string): string {
   return s.replace(/(^|_)([a-z])/g, (_m, _p, c) => " " + c.toUpperCase()).trim();
@@ -148,29 +145,81 @@ export async function createProject(organizationId: string, workspaceId: string,
   if (!ws) throw new DomainError(`workspace "${workspaceId}" not found in this organization`);
   const proj = await prisma.platProject.create({ data: { id: newId(), organizationId, workspaceId, name } });
   await recordAudit({ organizationId, actorPrincipalId: ownerId, action: "project.create", targetRef: `project:${proj.id}`, decision: "allow", reason: name });
-  await cloneModelIntoProject(organizationId, proj.id, workspaceId, ownerId);
+  // A new project starts with NO model — the user points it at their own Qlerify
+  // model via PUT /v1/project/model. Nothing is cloned/preloaded.
   return proj;
 }
 
-/** Clone the on-disk default model into a project as its own v0 so the project
- * runs immediately with its own copy. The SYSTEM default project is NOT cloned —
- * it reads the live .qlerify/workflow.json directly (the demo's byte-identical
- * path); every OTHER project is CAS-backed. */
-async function cloneModelIntoProject(organizationId: string, projectId: string, workspaceId: string, ownerId: string): Promise<void> {
-  const workflowPath = join(QLERIFY_DIR, "workflow.json");
-  if (!existsSync(workflowPath)) return;
-  const workflowBytes = readFileSync(workflowPath, "utf8");
-  const overlayPath = join(QLERIFY_DIR, "overlay.json");
-  const overlayBytes = existsSync(overlayPath) ? readFileSync(overlayPath, "utf8") : null;
-  const { ontologyId } = await ensureOntologyResource({
-    organizationId,
-    projectId,
-    workspaceId,
-    environmentId: null,
-    name: "workflow",
-    ownerId,
+/** Delete a project and CASCADE-drop everything it owns: its raw-SQL projection
+ * tables (gen__p<project>_*) and their data, its EventLog run history, and its
+ * control-plane metadata (ontology + versions + branches, resources + markings,
+ * project-scoped role assignments, and the project row itself). Then new tables
+ * are built lazily the next time a (different) project's model is applied.
+ *
+ * The virtual SYSTEM project id is refused (defense-in-depth) — it is never a
+ * real, deletable project row.
+ *
+ * Deliberately NOT touched here:
+ *  - Adapters/connectors. They are global (not project-scoped) today and are
+ *    AI-authored/throwaway; their lifecycle is handled separately.
+ *  - Content-addressed model blobs in the CAS. They are write-once and may be
+ *    DEDUPED across this org's projects (two projects pointed at the same model
+ *    share a hash), so deleting them could corrupt a sibling project. They are
+ *    left as harmless orphans (CAS GC is a separate, org-level concern). */
+export async function deleteProject(
+  organizationId: string,
+  projectId: string,
+  actorPrincipalId: string,
+): Promise<{ id: string; droppedTables: string[]; droppedModels: number }> {
+  if (projectId === SYSTEM_PROJECT_ID) {
+    throw new DomainError("The system default project cannot be deleted.");
+  }
+  const proj = await prisma.platProject.findFirst({
+    where: { id: projectId, organizationId },
+    select: { id: true, name: true },
   });
-  await createVersion(organizationId, ontologyId, workflowBytes, overlayBytes, { source: "initial", createdBy: ownerId });
+  if (!proj) throw new DomainError(`project "${projectId}" not found in this organization`);
+
+  // Ontology + resource ids owned by this project drive the metadata cascade.
+  const onts = await prisma.platOntology.findMany({ where: { organizationId, projectId }, select: { id: true } });
+  const ontologyIds = onts.map((o) => o.id);
+  const resources = await prisma.platResource.findMany({ where: { organizationId, projectId }, select: { id: true } });
+  const resourceIds = resources.map((r) => r.id);
+
+  // Atomically remove the project's metadata + run history. FK-safe order:
+  // versions/branches → ontology → resource markings → resource → grants →
+  // project. Deleting the PlatProject row in the SAME commit means a stale
+  // X-Project-Id can never resolve back to it (authn validates the id in-org and
+  // falls back to Default when the row is gone) — so the model self-heal can't
+  // resurrect an orphan.
+  await prisma.$transaction([
+    prisma.platOntologyVersion.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
+    prisma.platOntologyBranch.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
+    prisma.platOntology.deleteMany({ where: { organizationId, projectId } }),
+    prisma.platResourceMarking.deleteMany({ where: { organizationId, resourceId: { in: resourceIds } } }),
+    prisma.platResource.deleteMany({ where: { organizationId, projectId } }),
+    prisma.platRoleAssignment.deleteMany({ where: { organizationId, scopeType: "project", scopeId: projectId } }),
+    prisma.eventLog.deleteMany({ where: { organizationId, projectId } }),
+    prisma.platProject.deleteMany({ where: { id: projectId, organizationId } }),
+  ]);
+
+  // Drop the physical projection tables AFTER the metadata commit: a failure here
+  // can only orphan now-invisible tables, never leave a half-listed project.
+  const droppedTables = await dropProjectionTablesForProject(projectId);
+
+  // Evict the project's live model from the in-memory loader caches.
+  forgetProjectModel(projectId);
+
+  await recordAudit({
+    organizationId,
+    actorPrincipalId,
+    action: "project.delete",
+    targetRef: `project:${projectId}`,
+    decision: "allow",
+    reason: `deleted project "${proj.name}" — dropped ${droppedTables.length} table(s), ${ontologyIds.length} model(s)`,
+  });
+
+  return { id: projectId, droppedTables, droppedModels: ontologyIds.length };
 }
 
 async function uniqueSlug(name: string): Promise<string> {
@@ -214,23 +263,20 @@ export async function createOrganization(p: CreateOrgParams, actorPrincipalId?: 
     data: { organizationId: orgId, customerAccountId, tenancyMode: "pooled", homeRegion, stackId: SYSTEM_STACK_ID, status: "active" },
   });
 
-  // Environments + a default workspace/project under development.
+  // Environments + a default workspace. NO project is created: a fresh org starts
+  // empty (zero projects) and lands on the empty-org screen, where the owner
+  // creates their first project and points it at their own Qlerify model.
   const devId = newId();
   await prisma.platEnvironment.create({ data: { id: devId, organizationId: orgId, name: "development", region: homeRegion } });
   await prisma.platEnvironment.create({ data: { id: newId(), organizationId: orgId, name: "production", region: homeRegion } });
   const wsId = newId();
   await prisma.platWorkspace.create({ data: { id: wsId, organizationId: orgId, environmentId: devId, name: "Default" } });
-  const defaultProjectId = newId();
-  await prisma.platProject.create({ data: { id: defaultProjectId, organizationId: orgId, workspaceId: wsId, name: "Default" } });
 
   const ownerId = p.ownerIdentityId ?? actorPrincipalId ?? undefined;
   if (ownerId) {
     await addMembership(ownerId, orgId);
     await assignRole({ organizationId: orgId, principalId: ownerId, principalType: "identity", roleKey: "owner", scopeType: "organization", scopeId: orgId, grantedBy: actorPrincipalId });
   }
-
-  // The new org's Default project gets its own copy of the current model (CAS-backed).
-  await cloneModelIntoProject(orgId, defaultProjectId, wsId, ownerId ?? SYSTEM_IDENTITY_ID);
 
   await recordAudit({
     organizationId: orgId,
@@ -251,8 +297,9 @@ export async function lookupTenant(organizationId: string) {
 
 let systemSeeded = false;
 
-/** Idempotent: create the system tenant and fold the on-disk model in as its
- * ontology's version 0. Safe to call on every boot. */
+/** Idempotent: create the system tenant (org + identity + superuser) so
+ * header-less requests resolve somewhere. Seeds NO project and NO model — the
+ * system org starts empty. Safe to call on every boot. */
 export async function seedSystemOrg(): Promise<void> {
   if (systemSeeded) return;
   await ensureBuiltinRoles();
@@ -291,13 +338,11 @@ export async function seedSystemOrg(): Promise<void> {
     update: {},
     create: { id: SYSTEM_WORKSPACE_ID, organizationId: SYSTEM_ORG_ID, environmentId: SYSTEM_ENV_ID, name: "Default" },
   });
-  await prisma.platProject.upsert({
-    where: { id: SYSTEM_PROJECT_ID },
-    update: {},
-    create: { id: SYSTEM_PROJECT_ID, organizationId: SYSTEM_ORG_ID, workspaceId: SYSTEM_WORKSPACE_ID, name: "Default" },
-  });
+  // No system project and no model are seeded — the system org starts empty, like
+  // any freshly provisioned org, and lands on the empty-org screen.
 
-  // The system identity the demo authenticates as, + its membership + owner grant.
+  // The system identity header-less requests authenticate as, + its membership +
+  // owner grant.
   await prisma.platIdentity.upsert({
     where: { subject: SYSTEM_SUBJECT },
     update: {},
@@ -313,25 +358,6 @@ export async function seedSystemOrg(): Promise<void> {
     scopeId: SYSTEM_ORG_ID,
     grantedBy: SYSTEM_IDENTITY_ID,
   });
-
-  // Fold the on-disk model in as the system ontology's version 0 (the
-  // .qlerify/history embryo, generalized into the multi-tenant store).
-  const { ontologyId } = await ensureOntologyResource({
-    organizationId: SYSTEM_ORG_ID,
-    resourceId: SYSTEM_ONTOLOGY_RESOURCE_ID,
-    ontologyId: SYSTEM_ONTOLOGY_ID,
-    environmentId: SYSTEM_ENV_ID,
-    workspaceId: SYSTEM_WORKSPACE_ID,
-    name: STABLE_SYSTEM_ONTOLOGY_NAME,
-    ownerId: SYSTEM_IDENTITY_ID,
-  });
-  const workflowPath = join(QLERIFY_DIR, "workflow.json");
-  if (existsSync(workflowPath)) {
-    const workflowBytes = readFileSync(workflowPath, "utf8");
-    const overlayPath = join(QLERIFY_DIR, "overlay.json");
-    const overlayBytes = existsSync(overlayPath) ? readFileSync(overlayPath, "utf8") : null;
-    await createVersion(SYSTEM_ORG_ID, ontologyId, workflowBytes, overlayBytes, { source: "initial", createdBy: SYSTEM_IDENTITY_ID });
-  }
 
   await seedSuperuser();
   systemSeeded = true;

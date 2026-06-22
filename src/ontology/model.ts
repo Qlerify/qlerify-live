@@ -25,6 +25,7 @@ import { readFileSync, existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { ModelNotLoadedError } from "../errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Absolute path to the .qlerify directory holding workflow.json (and the
@@ -487,17 +488,30 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
 
 let cached: Ontology | undefined;
 
+/** A valid but EMPTY ontology — the "no model loaded" baseline (zero events,
+ * entities, commands, roles). Returned by the system path when there is no model
+ * on disk, so boot, module-load (the event registry, the chat system prompt) and
+ * every system-context getOntology() caller keep working instead of crashing.
+ * There is no preset/demo model anymore — a project's model arrives only via
+ * the per-project set-model flow (PUT /v1/project/model). */
+export function emptyOntology(): Ontology {
+  return buildOntology({ boundedContext: "Uninitialized", domainEvents: {}, schemas: {}, roles: [] }, {});
+}
+
 // --- Per-project model resolution -------------------------------------------
 // The live model is scoped to the ACTIVE project (currentProjectId from ALS).
-// The SYSTEM default project reads the on-disk workflow.json — the demo's
-// byte-identical path — while every other project's model content is bound via
-// setProjectModel() by the request pipeline (the onRequest hook loads it from the
-// content-addressed store BEFORE the handler runs, so the sync getOntology()
-// never has to do I/O and never falls back to the wrong model).
+// Every project's model content is bound via setProjectModel() by the request
+// pipeline (the onRequest hook loads it from the content-addressed store BEFORE
+// the handler runs, so the sync getOntology() never has to do I/O). The system
+// context (no request / boot / module-load) resolves to the empty ontology
+// unless a model has been placed on disk (none is, by default).
 
-/** The system project's model: today's memoized on-disk singleton, unchanged. */
+/** The system-context model. Empty unless a workflow.json happens to be on disk
+ * (none is shipped — the preset demo was removed). Memoized for the process. */
 function getSystemOntology(): Ontology {
-  if (!cached) cached = loadOntology();
+  if (!cached) {
+    cached = existsSync(join(QLERIFY_DIR, "workflow.json")) ? loadOntology() : emptyOntology();
+  }
   return cached;
 }
 
@@ -519,6 +533,16 @@ export function setProjectModel(projectId: string, workflow: string, overlay: st
     const oldest = projectContent.keys().next().value;
     if (oldest === undefined) break;
     projectContent.delete(oldest);
+  }
+}
+
+/** Evict a project's bound model from the in-memory caches (its content binding
+ * and any parsed Ontology keyed by it). Called when a project is deleted so a
+ * stale entry can't linger for a reused id. */
+export function forgetProjectModel(projectId: string): void {
+  projectContent.delete(projectId);
+  for (const k of [...parsedByKey.keys()]) {
+    if (k.startsWith(`${projectId}::`)) parsedByKey.delete(k);
   }
 }
 
@@ -548,7 +572,7 @@ export function getOntology(): Ontology {
   if (isSystemProject()) return getSystemOntology();
   const pid = currentProjectId();
   const c = projectContent.get(pid);
-  if (!c) throw new Error(`model for project ${pid} is not loaded`);
+  if (!c) throw new ModelNotLoadedError();
   const key = `${pid}::${c.hash}`;
   let o = parsedByKey.get(key);
   if (!o) {

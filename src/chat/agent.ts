@@ -9,7 +9,8 @@ import { TOOLS, runTool } from "./tools.js";
 
 const MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 const EFFORT = (process.env.CHAT_EFFORT ?? "medium") as "low" | "medium" | "high";
-const MAX_ITERATIONS = 8;
+// Headroom for the connector build→test→repair→ingest loop (each is a tool turn).
+const MAX_ITERATIONS = 14;
 
 let _client: Anthropic | null = null;
 function client(): Anthropic {

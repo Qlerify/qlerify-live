@@ -14,6 +14,11 @@ import { getOntology } from "../ontology/model.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js";
+import {
+  createConnector, setConnectorCredentials, buildConnector, connectorInfo,
+  readConnectorCode, removeConnector,
+} from "../packs/connector/orchestrate.js";
+import { ingestPull } from "../packs/ingest.js";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -203,6 +208,96 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["adapterId", "confirmed"],
     },
   },
+  // ---- Connector Builder (Part 2.4) — build full-power connectors on the fly ----
+  {
+    name: "list_model_kinds",
+    description:
+      "List each system (bounded context) with its entities and value objects, plus the connectors/adapters already on it. Use to find the right target to populate, or to check what already exists, when the user's selection is ambiguous. The user's [Context: ...] block usually already names the system + table — prefer that.",
+    input_schema: {
+      type: "object",
+      properties: { boundedContext: { type: "string", description: "Optional — limit to one system." } },
+    },
+  },
+  {
+    name: "create_connector",
+    description:
+      "WRITE — Create a new full-power connector for a system, targeting one kind (an entity OR a value object). It starts empty; you then set credentials (if needed), build its code, test, and ingest. The connector can integrate with anything (databases, cloud SDKs, REST/SOAP, files). Requires confirmation: state the system + target, ask 'Shall I create it?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        boundedContext: { type: "string", description: "The system / bounded context name." },
+        target: { type: "string", description: "The entity or value-object name this connector populates." },
+        id: { type: "string", description: "Optional explicit connector id; defaults to <system>-<target>." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["boundedContext", "target", "confirmed"],
+    },
+  },
+  {
+    name: "set_connector_credentials",
+    description:
+      "Store the connector's credentials as a JSON object of ANY shape — e.g. {accessKeyId, secretAccessKey, region, table} for DynamoDB, {apiKey} for a REST API, {connectionString} for Postgres. Stored plaintext for this PoC. Only the FIELD NAMES are ever echoed back, never the values. Collect the needed fields from the user, then call this. No separate confirmation — the user providing them is the consent.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        credentials: { type: "object", description: "Credential fields as a JSON object. Values are secret and never shown back.", additionalProperties: true },
+      },
+      required: ["adapterId", "credentials"],
+    },
+  },
+  {
+    name: "build_connector",
+    description:
+      "WRITE — Have AI write (or repair) the connector's integration code from a natural-language description of the source, then auto-install whatever npm packages the code imports. The connector may use ANY package or protocol (AWS SDK, pg, googleapis, fetch, soap…). Stop-and-show: it writes + registers the code but does NOT run or ingest — test it next with adapter_dry_run. To REPAIR a failed connector, pass errorReport (the error + trace from the failed adapter_dry_run) and it will rewrite the code to fix it. Requires confirmation: summarize what you'll build/fix, ask 'Shall I build it?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        instructions: { type: "string", description: "Natural-language description of the source and how to read it (which table/endpoint/query, pagination, shape). Persisted; on a repair turn you can omit it to reuse the last one." },
+        errorReport: { type: "string", description: "On a repair turn: the error + redacted trace from the failed adapter_dry_run, so the AI can fix the code." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "confirmed"],
+    },
+  },
+  {
+    name: "ingest_connector",
+    description:
+      "WRITE — Run the connector for real and LAND its rows into the target table (gen_<kind>), so they appear in the explorer's Items pane. Only do this after a successful adapter_dry_run. Requires confirmation: state how many rows you'll pull into which table, ask 'Shall I populate it?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        limit: { type: "number", description: "Max rows to ingest (default 25)." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "confirmed"],
+    },
+  },
+  {
+    name: "view_connector_code",
+    description:
+      "Return the connector's current source code and its detected npm dependencies. Use when the user asks to see or review the connector code.",
+    input_schema: {
+      type: "object",
+      properties: { adapterId: { type: "string" } },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "remove_connector",
+    description:
+      "WRITE — Delete a connector entirely (its code, stored credentials, and config). Use for 'delete this connector' or 'start over'. Rows already ingested into the table are left as-is. Requires confirmation: ask 'Shall I delete it?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "confirmed"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -260,6 +355,20 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleRegenerateAdapterBody(args);
       case "reset_adapter":
         return handleResetAdapter(args);
+      case "list_model_kinds":
+        return ok(handleListModelKinds(typeof args.boundedContext === "string" ? args.boundedContext : undefined));
+      case "create_connector":
+        return handleCreateConnector(args);
+      case "set_connector_credentials":
+        return handleSetConnectorCredentials(args);
+      case "build_connector":
+        return await handleBuildConnector(args);
+      case "ingest_connector":
+        return await handleIngestConnector(args);
+      case "view_connector_code":
+        return ok(handleViewConnectorCode(String(args.adapterId ?? "")));
+      case "remove_connector":
+        return handleRemoveConnector(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -465,4 +574,105 @@ function handleResetAdapter(args: Record<string, any>) {
     reset: true, adapterId: id, kind: fresh.kind, mode: fresh.mode,
     note: "Adapter wiped to a clean simulated draft (code + credentials deleted). Re-configure the connection, then regenerate the body to build from scratch.",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Connector Builder (Part 2.4)
+// ---------------------------------------------------------------------------
+
+function handleListModelKinds(bcFilter?: string) {
+  const o = getOntology();
+  const adapters = listAdapters();
+  const want = (bc: string) => !bcFilter || bc.toLowerCase() === bcFilter.toLowerCase();
+  const systems = o.boundedContexts.filter(want).map((bc) => {
+    const entities = o.entities.filter((e) => o.boundedContextOf(e.name) === bc);
+    const voNames = new Set<string>();
+    for (const e of entities) {
+      for (const f of e.fields) if (f.relatedEntity && o.valueObject(f.relatedEntity)) voNames.add(f.relatedEntity);
+    }
+    return {
+      system: bc,
+      entities: entities.map((e) => e.name),
+      valueObjects: [...voNames],
+      connectors: adapters
+        .filter((a) => a.boundedContext === bc)
+        .map((a) => ({ id: a.id, kind: a.kind, target: a.targetEntity, mode: a.mode })),
+    };
+  });
+  return { systems };
+}
+
+function handleCreateConnector(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Confirm the system + target with the user first, then call again with confirmed=true.");
+  }
+  const boundedContext = String(args.boundedContext ?? "");
+  const target = String(args.target ?? "");
+  if (!boundedContext || !target) return err("boundedContext and target are required");
+  const cfg = createConnector({ boundedContext, target, id: typeof args.id === "string" ? args.id : undefined });
+  return ok({
+    created: true, adapterId: cfg.id, boundedContext: cfg.boundedContext, target: cfg.targetEntity, targetKind: cfg.targetKind,
+    note: "Empty connector created. Next: if the source needs auth, collect the fields and call set_connector_credentials; then build_connector with a description of the source.",
+  });
+}
+
+function handleSetConnectorCredentials(args: Record<string, any>) {
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  const creds = args.credentials;
+  if (!creds || typeof creds !== "object" || Array.isArray(creds)) return err("credentials must be a JSON object of fields");
+  const keys = setConnectorCredentials(id, creds as Record<string, unknown>);
+  return ok({ stored: true, adapterId: id, credentialKeys: keys, note: "Stored (plaintext, PoC). Values are never echoed back. Now build_connector." });
+}
+
+async function handleBuildConnector(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Summarize what you'll build (or fix), get the user's explicit yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  if (!process.env.ANTHROPIC_API_KEY) return err("ANTHROPIC_API_KEY not set — cannot author a connector");
+  const r = await buildConnector(
+    id,
+    typeof args.instructions === "string" ? args.instructions : undefined,
+    typeof args.errorReport === "string" ? args.errorReport : undefined,
+  );
+  return ok({
+    built: true, adapterId: id, targetKind: r.targetKind, dependencies: r.deps, codeBytes: r.bytes,
+    install: { ok: r.install.ok, installed: r.install.installed, skipped: r.install.skipped, ...(r.install.ok ? {} : { log: r.install.log }) },
+    note: r.install.ok
+      ? "Code written + packages installed. Now TEST it with adapter_dry_run before ingesting. If it errors, call build_connector again with the errorReport to fix it."
+      : "Code written but some npm packages failed to install (see install.log). The dry-run will likely fail until deps resolve.",
+  });
+}
+
+async function handleIngestConnector(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Confirm the row count + target table with the user first, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  const limit = Number(args.limit ?? 25);
+  const summary = await ingestPull(id, { limit: limit > 0 ? limit : 25 });
+  return ok({
+    ingested: true, ...summary,
+    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.`,
+  });
+}
+
+function handleViewConnectorCode(id: string) {
+  if (!id) return { error: "adapterId required" };
+  const info = connectorInfo(id);
+  if (!info) return { error: `no connector "${id}"` };
+  return { adapterId: id, target: info.target, targetKind: info.targetKind, dependencies: info.deps, hasCode: info.hasCode, credentialKeys: info.credentialKeys, code: readConnectorCode(id) ?? null };
+}
+
+function handleRemoveConnector(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Confirm deletion with the user first, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  removeConnector(id);
+  return ok({ removed: true, adapterId: id, note: "Connector code, credentials, and config deleted. Ingested rows (if any) were left in the table." });
 }

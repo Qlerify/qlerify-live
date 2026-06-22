@@ -87,6 +87,16 @@ export interface AdapterConfig {
   bodyPath?: string;
   /** sha256 of the prompt that produced the current body (provenance/drift). */
   bodyPromptHash?: string;
+  // --- Full-power connector (Part 2.4) — kind "connector" ---
+  /** What `targetEntity` names: a model entity or a value object. Value-object
+   * targets become their own gen_<VO> table when populated directly. */
+  targetKind?: "entity" | "valueObject";
+  /** The operator's latest natural-language description of the source. Persisted so
+   * a repair/regeneration turn keeps the original intent. */
+  instructions?: string;
+  /** npm packages the connector module imports (detected from its imports and
+   * installed into the connector workspace at build time). */
+  deps?: string[];
 }
 
 /** Resolves a credentialsRef to the actual secret. Dev = env var; KeyVault later

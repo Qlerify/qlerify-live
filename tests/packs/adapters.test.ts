@@ -9,7 +9,7 @@ import { getOntology } from "../../src/ontology/model.js";
 import * as store from "../../src/twin/projection-store.js";
 import { prisma } from "../../src/db.js";
 
-const TEST_ENTITY = "PurchaseOrder"; // a real SAP entity in the loaded Ericsson model
+const TEST_ENTITY = "PurchaseOrder"; // an arbitrary entity name for the gen_ projection table
 
 // Clean slate: drop any stale gen_ table from a prior session (it may predate the
 // _provenance column) so ensureTable recreates it fresh with the current schema.

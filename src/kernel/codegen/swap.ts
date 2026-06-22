@@ -30,11 +30,7 @@ const INFRA_TABLES = new Set(["EventLog"]);
 // deterministically — listed so the operator knows what remains after the swap.
 const DOMAIN_AUTHORED = [
   "src/<bc>/<aggregate>/*.logic.ts — apply()/detect() bodies (stubbed; author or `npm run codegen:ai`)",
-  "src/<bc>/queries.ts — read-model/projection queries",
-  "src/simulator/runner.ts + stepper.ts — the scripted storyline",
-  "src/events/derived.ts — rules-engine wiring",
-  "src/events/bus.ts — resolveDemandId scope resolver (rename/retarget to the new aggregate graph)",
-  "web/app.js — BC_PANELS / column hints (or wire to /api/ontology)",
+  "web/app.js — column hints (or wire to /api/ontology)",
 ];
 
 function currentTables(): string[] {

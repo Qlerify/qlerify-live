@@ -8,16 +8,6 @@ const API = "";
 const role = "Automation";
 const root = document.getElementById("app");
 
-const BC_PANELS = [
-  { bc: "Helix",     title: "Helix",     subtitle: "Demand & build planning", tables: ["demands","buildPlans","builds","buildDemand"] },
-  { bc: "PRIM",      title: "PRIM",      subtitle: "Product & release master", tables: ["projects","bomItems","engineeringReleases"] },
-  { bc: "SAP",       title: "SAP",       subtitle: "ERP, procurement & orders", tables: ["purchaseOrders","workOrders"] },
-  { bc: "ESTER",     title: "ESTER",     subtitle: "Engineering changes", tables: ["engineeringChanges"] },
-  { bc: "Compass",   title: "Compass",   subtitle: "Production scheduling", tables: ["sites","lines","bookings"] },
-  { bc: "Test",      title: "Test",      subtitle: "NPI test results", tables: ["testResults"] },
-  { bc: "Logistics", title: "Logistics", subtitle: "Warehouse, pack & ship", tables: ["units","shipments"] },
-];
-
 const STATUS_TONE = {
   NEW: "bg-stone-200 text-stone-700",
   PLANNED: "bg-sky-100 text-sky-800",
@@ -101,8 +91,6 @@ const state = {
   instance: null,   // per-run detail from /sim/instance
   prevInstance: null, // the instance snapshot before the last step (per-run diff)
   log: [],
-  snapshot: null,
-  prev: null,
   currentIndex: 0,
   // per-BC adapter workbench (Part 2.3)
   bc: null,           // current bounded context (#bc/<Name>)
@@ -195,7 +183,7 @@ async function sendChat() {
   let content;
   if (state.view === "detail" && state.demandId) {
     const cur = state.demands.find((d) => d.id === state.demandId);
-    const desc = cur ? `${cur.qty} × ${cur.productName} for ${cur.customerId} (${cur.status})` : "(unknown)";
+    const desc = cur ? `status ${cur.status ?? "—"}` : "(unknown)";
     content = [
       { type: "text", text: `[Context: viewing demand ${state.demandId} — ${desc}. When the user says "this demand", "it", or refers to a step without naming a demand, they mean this one.]` },
       { type: "text", text },
@@ -678,8 +666,6 @@ async function onHashChange() {
   state.view = r.view;
   state.demandId = r.demandId ?? null;
   state.bc = r.bc ?? null;
-  state.prev = null;
-  state.snapshot = null;
   state.bcBusy = false; // never carry a stuck busy-flag across navigation
 
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
@@ -781,79 +767,25 @@ async function deleteDemand(demandId, ev) {
   }
 }
 
-// Format a relative time like "3s ago" or "2 min ago" or "1 h ago".
-function relativeTime(secs) {
-  if (secs == null) return "—";
-  if (secs < 60) return `${secs}s ago`;
-  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
-  return `${Math.floor(secs / 86400)} d ago`;
-}
-
-// Traffic-light tone keyed on real wall-clock dwell. Demo-friendly thresholds:
-// active <30s, slow <2min, stalled >=2min. Final + done → grey (complete).
-function staleness(dwellSeconds, isComplete) {
-  if (isComplete) return { dot: "bg-stone-300", label: "complete", textCls: "text-stone-500" };
-  if (dwellSeconds == null)   return { dot: "bg-stone-300", label: "new",      textCls: "text-stone-500" };
-  if (dwellSeconds < 30)      return { dot: "bg-emerald-500 animate-pulse", label: "active",  textCls: "text-emerald-700" };
-  if (dwellSeconds < 120)     return { dot: "bg-amber-500",  label: "slow",   textCls: "text-amber-700"  };
-  return                            { dot: "bg-rose-500",   label: "stalled", textCls: "text-rose-700"  };
-}
-
 function dashboardRow(d, cols) {
   const pct = Math.round((d.progress / d.total) * 100) || 0;
-  // Columns derived from the root-aggregate row's own fields.
-  if (cols) {
-    const cells = cols.map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
-    return `
-      <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#demand/${d.id}">
-        <td class="px-4 py-3"><span class="inline-block w-2 h-2 rounded-full bg-stone-300"></span></td>
-        <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0, 16)}…</td>
-        ${cells}
-        <td class="px-4 py-3">${d.status ? pill(d.status, d.status) : "—"}</td>
-        <td class="px-4 py-3 w-64">
-          <div class="flex items-center gap-2">
-            <div class="flex-1 h-1.5 bg-stone-200 rounded overflow-hidden"><div class="h-1.5 bg-amber-400 transition-all" style="width:${pct}%"></div></div>
-            <div class="text-xs text-stone-500 tabular-nums w-12 text-right">${d.progress}/${d.total}</div>
-          </div>
-        </td>
-        <td class="px-4 py-3 text-xs">${d.lastEvent ? `<div class="text-stone-700 flex items-center gap-1.5">${escapeHtml(d.lastEvent.eventName)} ${provChip(d.lastEvent.provenance)}</div>` : `<span class="text-stone-400">no events yet</span>`}</td>
-        <td class="px-4 py-3 text-right"><button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this run">✕</button></td>
-      </tr>`;
-  }
-  const lastBC = d.lastEvent?.boundedContext ?? "";
-  const isComplete = d.status === "DELIVERED";
-  const tone = staleness(d.dwellSeconds, isComplete);
+  // Columns derived from the root-aggregate row's own fields (model-generic).
+  const cells = (cols || []).map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
   return `
     <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#demand/${d.id}">
-      <td class="px-4 py-3">
-        <span class="inline-block w-2 h-2 rounded-full ${tone.dot}" title="${tone.label}"></span>
-      </td>
-      <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0,16)}…</td>
-      <td class="px-4 py-3 text-sm text-stone-700">${d.customerId}</td>
-      <td class="px-4 py-3 text-sm font-medium text-stone-900">${d.productName}</td>
-      <td class="px-4 py-3 text-sm tabular-nums text-stone-700">${d.qty}</td>
-      <td class="px-4 py-3 text-sm text-stone-700">${d.requestedWeek}</td>
-      <td class="px-4 py-3">${pill(d.status, d.status)}</td>
+      <td class="px-4 py-3"><span class="inline-block w-2 h-2 rounded-full bg-stone-300"></span></td>
+      <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0, 16)}…</td>
+      ${cells}
+      <td class="px-4 py-3">${d.status ? pill(d.status, d.status) : "—"}</td>
       <td class="px-4 py-3 w-64">
         <div class="flex items-center gap-2">
-          <div class="flex-1 h-1.5 bg-stone-200 rounded overflow-hidden">
-            <div class="h-1.5 bg-amber-400 transition-all" style="width:${pct}%"></div>
-          </div>
+          <div class="flex-1 h-1.5 bg-stone-200 rounded overflow-hidden"><div class="h-1.5 bg-amber-400 transition-all" style="width:${pct}%"></div></div>
           <div class="text-xs text-stone-500 tabular-nums w-12 text-right">${d.progress}/${d.total}</div>
         </div>
       </td>
-      <td class="px-4 py-3 text-xs">
-        ${d.lastEvent ? `
-          <div class="text-stone-700 flex items-center gap-1.5">${d.lastEvent.eventName} ${provChip(d.lastEvent.provenance)}</div>
-          <div class="text-stone-500 text-[11px]">${lastBC} · <span class="${tone.textCls} font-medium">${relativeTime(d.dwellSeconds)}</span></div>
-        ` : `<span class="text-stone-400">no events yet</span>`}
-      </td>
-      <td class="px-4 py-3 text-right">
-        <button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this demand">✕</button>
-      </td>
-    </tr>
-  `;
+      <td class="px-4 py-3 text-xs">${d.lastEvent ? `<div class="text-stone-700 flex items-center gap-1.5">${escapeHtml(d.lastEvent.eventName)} ${provChip(d.lastEvent.provenance)}</div>` : `<span class="text-stone-400">no events yet</span>`}</td>
+      <td class="px-4 py-3 text-right"><button class="text-stone-400 hover:text-rose-600 text-sm" data-delete="${d.id}" title="Reset this run">✕</button></td>
+    </tr>`;
 }
 
 // List columns derived from the root-aggregate rows of the loaded model.
@@ -1636,14 +1568,6 @@ async function doReset() {
   }
 }
 
-function rowKey(row) { return row.id ?? JSON.stringify(row); }
-function rowChanged(bc, tableName, row) {
-  if (!state.prev) return false;
-  const prev = state.prev?.[bc]?.[tableName]?.find((r) => rowKey(r) === rowKey(row));
-  if (!prev) return true;
-  return JSON.stringify(prev) !== JSON.stringify(row);
-}
-
 function pill(text, status) {
   const tone = STATUS_TONE[status] || "bg-stone-100 text-stone-700";
   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${tone}">${text}</span>`;
@@ -1652,96 +1576,6 @@ function pill(text, status) {
 function shortId(id) {
   if (!id) return "—";
   return String(id).length > 14 ? String(id).slice(0, 8) + "…" : id;
-}
-
-function tableHTML(bc, name, rows) {
-  if (!rows || rows.length === 0) {
-    return `<div class="text-[11px] text-stone-400 italic px-3 py-1.5">${name} — empty</div>`;
-  }
-  const cols = pickColumns(name, rows[0]);
-  const head = cols.map((c) => `<th class="text-left font-medium text-stone-500 px-2 py-1">${c.label}</th>`).join("");
-  const body = rows.map((row) => {
-    const changed = rowChanged(bc, name, row);
-    const tds = cols.map((c) => `<td class="px-2 py-1 align-top">${c.render(row) ?? "—"}</td>`).join("");
-    return `<tr class="${changed ? "row-changed" : "hover:bg-stone-50"}">${tds}</tr>`;
-  }).join("");
-  return `
-    <div class="overflow-hidden rounded-md border border-stone-200 bg-white">
-      <div class="text-[11px] font-semibold uppercase tracking-wide text-stone-500 px-3 py-1.5 bg-stone-50 border-b border-stone-200">${name} <span class="text-stone-400 font-normal">· ${rows.length} row${rows.length===1?"":"s"}</span></div>
-      <table class="w-full text-[12px]"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-    </div>
-  `;
-}
-
-function pickColumns(name, sample) {
-  const id = { label: "id", render: (r) => `<span class="mono text-stone-600">${shortId(r.id)}</span>` };
-  const status = { label: "status", render: (r) => r.status ? pill(r.status, r.status) : "—" };
-  switch (name) {
-    case "demands":
-      return [id, { label: "product", render: (r) => r.productName }, { label: "qty", render: (r) => r.qty }, { label: "week", render: (r) => r.requestedWeek }, status];
-    case "projects":
-      return [id, { label: "product", render: (r) => r.productName }, status];
-    case "bomItems":
-      return [id, { label: "part", render: (r) => `<span class="mono">${r.partNumber}</span>` }, { label: "qty/unit", render: (r) => r.qtyPerUnit }, { label: "design", render: (r) => pill(r.designState, r.designState) }];
-    case "engineeringReleases":
-      return [id, status, { label: "approvedAt", render: (r) => r.approvedAt ? r.approvedAt.slice(0,10) : "—" }];
-    case "engineeringChanges":
-      return [id, { label: "bom item", render: (r) => shortId(r.bomItemId) }, { label: "description", render: (r) => `<span class="text-stone-600">${r.description}</span>` }, status];
-    case "buildPlans":
-      return [id, { label: "v", render: (r) => `v${r.versionNo}` }, status, { label: "reason", render: (r) => r.reason ?? "—" }];
-    case "builds":
-      return [id, { label: "no", render: (r) => r.buildNo }, { label: "qty", render: (r) => r.qty }, { label: "site", render: (r) => r.siteId ? r.siteId.replace("site-","") : "—" }, { label: "material", render: (r) => pill(r.materialStatus, r.materialStatus) }, status];
-    case "buildDemand":
-      return [{ label: "part", render: (r) => `<span class="mono">${r.partNumber}</span>` }, { label: "req", render: (r) => r.qtyRequired }, { label: "avail", render: (r) => `<span class="${r.qtyAvailable >= r.qtyRequired ? "text-emerald-700 font-medium" : "text-stone-500"}">${r.qtyAvailable}</span>` }];
-    case "purchaseOrders":
-      return [id, { label: "part", render: (r) => `<span class="mono">${r.partNumber}</span>` }, { label: "qty", render: (r) => r.qty }, { label: "eta", render: (r) => r.confirmedEta ?? "—" }, status];
-    case "workOrders":
-      return [id, { label: "qty", render: (r) => r.qty }, status];
-    case "sites":
-      return [id, { label: "name", render: (r) => r.name }];
-    case "lines":
-      return [id, { label: "name", render: (r) => r.name }, { label: "cap/wk", render: (r) => r.capacityPerWeek }];
-    case "bookings":
-      return [id, { label: "line", render: (r) => r.lineId }, status];
-    case "testResults":
-      return [{ label: "type", render: (r) => pill(r.testType, r.testType) }, { label: "result", render: (r) => pill(r.result, r.result) }, { label: "serial", render: (r) => `<span class="mono">${r.unitSerial}</span>` }];
-    case "units":
-      return [{ label: "serial", render: (r) => `<span class="mono">${r.serialNo}</span>` }, status];
-    case "shipments":
-      return [id, { label: "units", render: (r) => (r.units || []).length }, status];
-    default:
-      return Object.keys(sample).slice(0, 4).map((k) => ({ label: k, render: (r) => String(r[k] ?? "—") }));
-  }
-}
-
-function detailHeader() {
-  const total = state.events.length;
-  const cur = state.demands.find((d) => d.id === state.demandId);
-  const headline = cur ? `${cur.qty} × ${cur.productName} for ${cur.customerId}` : "Demand";
-  const subline = cur ? `requested week ${cur.requestedWeek} · ${cur.status}` : "";
-  return `
-    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
-      <div class="px-6 py-4 flex items-center gap-6">
-        <button id="btn-back" class="p-1.5 -ml-1 rounded text-stone-500 hover:text-stone-900 hover:bg-stone-100" title="Back to dashboard">←</button>
-        <div class="flex-1 min-w-0">
-          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${state.demandId ? state.demandId.slice(0,16) + "…" : ""}</div>
-          <div class="text-stone-900 text-xl font-semibold leading-tight">${headline}</div>
-          <div class="text-xs text-stone-500">${subline}</div>
-        </div>
-        <div class="text-sm text-stone-500 mr-3 tabular-nums">step <span class="font-semibold text-stone-800">${state.currentIndex}</span> / ${total}</div>
-        <div class="flex items-center gap-2">
-          <label class="flex items-center gap-2 text-sm text-stone-600 cursor-pointer mr-2">
-            <input id="disrupt" type="checkbox" ${state.withDisruptions ? "checked" : ""} class="accent-amber-500" />
-            ⚠ Cascading disruptions
-          </label>
-          <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
-          <button id="btn-next"  ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
-          <button id="btn-all"   ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>
-          <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
-        </div>
-      </div>
-    </header>
-  `;
 }
 
 // Build a per-step lookup of the businessAt timestamp recorded when each step fired.
@@ -2006,26 +1840,6 @@ function lastEventCaption() {
           </div>
         </div>
       </div>
-    </div>
-  `;
-}
-
-function bcPanel(panel) {
-  if (!state.snapshot) return "";
-  const data = state.snapshot[panel.bc] || {};
-  const last = state.log[0];
-  const isActive = last && last.boundedContext === panel.bc;
-  const tables = panel.tables.map((t) => tableHTML(panel.bc, t, data[t] || [])).join("");
-  return `
-    <div class="panel ${isActive ? "active" : ""} flex flex-col gap-2 p-3 rounded-lg border border-stone-200 bg-white shadow-sm">
-      <div class="flex items-baseline justify-between">
-        <div>
-          <div class="font-semibold text-stone-800">${panel.title}</div>
-          <div class="text-[11px] text-stone-500">${panel.subtitle}</div>
-        </div>
-        ${isActive ? `<span class="text-[10px] uppercase tracking-widest text-amber-700 font-bold">active</span>` : ""}
-      </div>
-      <div class="flex flex-col gap-2">${tables}</div>
     </div>
   `;
 }
@@ -2388,16 +2202,107 @@ function currentOrgName() {
   return o ? (o.name || o.slug) : (id ? id.slice(0, 8) : "—");
 }
 
+// --- Organisation avatar (initials on a deterministic pastel tile) ----------
+// Same seed → same colour, so an org keeps its identity across the switcher,
+// the menu header, and the org list.
+function orgColor(seed) {
+  const palette = [
+    ["bg-sky-100", "text-sky-700"], ["bg-violet-100", "text-violet-700"],
+    ["bg-emerald-100", "text-emerald-700"], ["bg-amber-100", "text-amber-700"],
+    ["bg-rose-100", "text-rose-700"], ["bg-fuchsia-100", "text-fuchsia-700"],
+    ["bg-teal-100", "text-teal-700"], ["bg-indigo-100", "text-indigo-700"],
+  ];
+  const s = String(seed || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+
+function orgInitials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "—";
+  const two = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0];
+  return two.toUpperCase();
+}
+
+function orgAvatar(org, sizeCls, textCls) {
+  const [bg, fg] = orgColor(org?.id || org?.slug || org?.name);
+  return `<span class="inline-flex items-center justify-center rounded-md font-semibold shrink-0 ${bg} ${fg} ${sizeCls} ${textCls}">${escapeHtml(orgInitials(org?.name || org?.slug))}</span>`;
+}
+
+// Best-effort member count for the current org's menu-header subtitle. The
+// /v1/members read is org-admin gated, so a non-admin simply gets the slug
+// fallback — we mark the org as "attempted" up front to avoid refetch storms.
+async function loadOrgMemberCount() {
+  const orgId = state.me?.organizationId;
+  if (!orgId || state.orgMemberCountFor === orgId) return;
+  state.orgMemberCountFor = orgId;
+  try {
+    const members = await api("/v1/members");
+    state.orgMemberCount = Array.isArray(members) ? members.length : null;
+  } catch (_e) {
+    state.orgMemberCount = null;
+  }
+  if (state.orgMenuOpen) render();
+}
+
+// The org dropdown: current org header + admin shortcut, the switchable org
+// list, and create-new. Anchored under the tenant-bar avatar button; a
+// transparent full-screen backdrop closes it on any outside click.
+function orgMenuPanel() {
+  const me = state.me;
+  const orgs = state.orgs || [];
+  const curId = me?.organizationId || "";
+  const curOrg = orgs.find((o) => o.id === curId) || { id: curId, name: currentOrgName() };
+  const count = state.orgMemberCountFor === curId ? state.orgMemberCount : null;
+  const subtitle = count != null
+    ? `${count} member${count === 1 ? "" : "s"}`
+    : (curOrg.slug ? escapeHtml(curOrg.slug) : "");
+  const check = `<svg viewBox="0 0 20 20" fill="none" class="h-4 w-4 text-stone-900 shrink-0"><path d="M5 10.5l3.5 3.5L15 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const list = orgs.map((o) => `
+    <button role="menuitem" data-org-pick="${escapeHtml(o.id)}" class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-stone-100 text-left">
+      ${orgAvatar(o, "h-7 w-7", "text-xs")}
+      <span class="flex-1 text-sm text-stone-800 truncate">${escapeHtml(o.name || o.slug)}</span>
+      ${o.id === curId ? check : ""}
+    </button>`).join("") || `<div class="px-2 py-2 text-sm text-stone-400">No organisations.</div>`;
+  return `
+    <div id="org-menu-backdrop" class="fixed inset-0 z-40"></div>
+    <div id="org-menu" role="menu" aria-label="Organisations" class="absolute left-0 top-full mt-1.5 z-50 w-72 rounded-xl border border-stone-200 bg-white shadow-xl text-stone-900 overflow-hidden">
+      <div class="p-3">
+        <div class="flex items-center gap-3">
+          ${orgAvatar(curOrg, "h-10 w-10", "text-sm")}
+          <div class="min-w-0">
+            <div class="font-semibold text-stone-900 truncate">${escapeHtml(curOrg.name || currentOrgName())}</div>
+            ${subtitle ? `<div class="text-xs text-stone-500 truncate">${subtitle}</div>` : ""}
+          </div>
+        </div>
+        <button role="menuitem" id="org-menu-admin" class="mt-3 w-full px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 text-left font-medium text-stone-800">Organisation admin</button>
+      </div>
+      <div class="border-t border-stone-200 p-2">
+        <div class="px-2 pt-1 pb-1.5 text-[11px] uppercase tracking-wide text-stone-400 font-semibold">My organisations</div>
+        <div class="max-h-64 overflow-auto">${list}</div>
+      </div>
+      <button role="menuitem" id="org-menu-create" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
+        <span class="inline-flex items-center justify-center h-7 w-7 rounded-md border border-stone-300 text-stone-500 text-lg leading-none">+</span>
+        <span class="text-sm font-medium text-stone-800">Create new organisation</span>
+      </button>
+    </div>`;
+}
+
+// The Qlerify diamond mark (from the app's favicon.svg), inlined so it inherits
+// the surrounding text colour via currentColor — white on the dark tenant bar,
+// brand green on the light login card.
+function qlerifyMark(cls) {
+  return `<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" class="shrink-0 ${cls}"><path d="M23.7425 23.7122H29.5003C29.5169 23.7124 29.5305 23.7259 29.5306 23.7425V29.5003C29.5304 29.5168 29.5168 29.5304 29.5003 29.5306H23.7425C23.7259 29.5305 23.7124 29.5169 23.7122 29.5003V23.7425C23.7123 23.7258 23.7258 23.7123 23.7425 23.7122Z"/><path d="M15.0404 27.8003L3.07345 15.8334C2.8545 15.6144 2.85461 15.2597 3.07345 15.0406L15.0404 3.0737C15.2594 2.8547 15.6141 2.8547 15.8331 3.0737L27.8001 15.0406C28.0189 15.2597 28.019 15.6144 27.8001 15.8334L15.8331 27.8003C15.6142 28.0191 15.2594 28.0191 15.0404 27.8003Z"/></svg>`;
+}
+
 function tenantBar() {
   const me = state.me;
   const subject = me?.subject || "system";
   const isAdmin = !!me?.isPlatformAdmin;
   const orgs = state.orgs || [];
   const curId = me?.organizationId || "";
-  const options = orgs.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === curId ? "selected" : ""}>${escapeHtml(o.name || o.slug)}</option>`).join("");
-  const switcher = orgs.length > 1
-    ? `<select id="org-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${options}</select>`
-    : `<span class="text-sm font-medium text-stone-100">${escapeHtml(currentOrgName())}</span>`;
+  const curOrg = orgs.find((o) => o.id === curId) || { id: curId, name: currentOrgName() };
   const projects = me?.projects || [];
   const curProj = me?.projectId || "";
   const emptyOrg = projects.length === 0;
@@ -2410,11 +2315,16 @@ function tenantBar() {
   return `
     <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
       <div class="px-6 py-1.5 flex items-center gap-3">
-        <span class="font-semibold tracking-tight text-stone-100">Qlerify<span class="text-amber-400">·</span>Platform</span>
+        <span class="flex items-center gap-1.5 text-stone-100">${qlerifyMark("h-4 w-4")}<span class="font-semibold tracking-tight">Qlerify<span class="text-amber-400">·</span>Live</span></span>
         <span class="text-stone-600">›</span>
-        <span class="text-stone-500 text-xs uppercase tracking-wide">Org</span>
-        ${switcher}
-        <button id="btn-new-org" class="text-xs px-1.5 py-0.5 rounded border border-stone-700 text-stone-400 hover:text-amber-300 hover:border-amber-400" title="Create a new organization (you become its owner)">+ New org</button>
+        <div class="relative" id="org-menu-wrap">
+          <button id="org-menu-btn" aria-haspopup="menu" aria-expanded="${state.orgMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Organisation menu — switch, create, or manage">
+            ${orgAvatar(curOrg, "h-6 w-6", "text-[11px]")}
+            <span class="text-sm font-medium text-stone-100 max-w-[220px] truncate">${escapeHtml(currentOrgName())}</span>
+            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          ${state.orgMenuOpen ? orgMenuPanel() : ""}
+        </div>
         ${isAdmin ? `<span class="text-[10px] uppercase font-bold px-1.5 py-px rounded bg-amber-500 text-stone-900" title="Platform superadmin — can switch into any organization (every cross-tenant act is audited)">SUPERUSER</span>` : ""}
         <span class="text-stone-600">›</span>
         <span class="text-stone-500 text-xs uppercase tracking-wide">Project</span>
@@ -2422,7 +2332,6 @@ function tenantBar() {
         <div class="flex-1"></div>
         <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
         <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
-        <a href="#admin" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "admin" ? "bg-stone-800 text-white" : ""}" title="Organization admin">⚙ Admin</a>
         <span class="text-stone-600">·</span>
         <span class="text-stone-400" title="Signed in as">${escapeHtml(subject)}</span>
         <button id="btn-logout" class="px-2 py-0.5 rounded hover:bg-stone-800 text-stone-500 hover:text-stone-200" title="Sign out">Sign out</button>
@@ -2431,11 +2340,6 @@ function tenantBar() {
 }
 
 function bindTenantBar() {
-  document.getElementById("org-switch")?.addEventListener("change", async (e) => {
-    AUTH.setOrg(e.target.value); // also clears the selected project
-    await ensureMe();
-    onHashChange();
-  });
   document.getElementById("proj-switch")?.addEventListener("change", async (e) => {
     AUTH.setProject(e.target.value);
     await ensureMe();
@@ -2470,11 +2374,36 @@ function bindTenantBar() {
       render();
     }
   };
-  document.getElementById("btn-new-org")?.addEventListener("click", () => {
+  // --- Organisation menu (avatar dropdown: switch / admin / create) ---------
+  // Dismiss without acting (Escape / outside-click): close and return focus to
+  // the trigger so a keyboard user isn't dropped onto <body> by the re-render.
+  const dismissOrgMenu = () => { state.orgMenuOpen = false; render(); document.getElementById("org-menu-btn")?.focus(); };
+  document.getElementById("org-menu-btn")?.addEventListener("click", () => {
+    state.orgMenuOpen = !state.orgMenuOpen;
+    if (state.orgMenuOpen) loadOrgMemberCount(); // best-effort subtitle, re-renders when ready
+    render();
+  });
+  document.getElementById("org-menu-backdrop")?.addEventListener("click", dismissOrgMenu);
+  document.getElementById("org-menu-admin")?.addEventListener("click", () => { state.orgMenuOpen = false; navigate("#admin"); });
+  document.querySelectorAll("[data-org-pick]").forEach((el) => el.addEventListener("click", () => {
+    const id = el.getAttribute("data-org-pick");
+    state.orgMenuOpen = false;
+    if (id === (state.me?.organizationId || "")) { render(); return; } // already the current org — just close
+    AUTH.setOrg(id); // also clears the selected project
+    state.orgMemberCount = null; state.orgMemberCountFor = null; // invalidate the cached subtitle for the new org
+    onHashChange(); // reloads whoami + the current view for the newly selected org
+  }));
+  document.getElementById("org-menu-create")?.addEventListener("click", () => {
+    state.orgMenuOpen = false;
     state.newOrgOpen = true; state.newOrgErr = null; state.newOrgName = "";
     render();
     setTimeout(() => document.getElementById("new-org-name")?.focus(), 30);
   });
+  // Close the menu on Escape — bound once for the app's lifetime.
+  if (!bindTenantBar._escBound) {
+    bindTenantBar._escBound = true;
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.orgMenuOpen) dismissOrgMenu(); });
+  }
   document.getElementById("new-org-cancel")?.addEventListener("click", () => { state.newOrgOpen = false; render(); });
   document.getElementById("new-org-name")?.addEventListener("input", (e) => { state.newOrgName = e.target.value; });
   document.getElementById("new-org-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") createOrg(); });
@@ -2571,7 +2500,7 @@ function loginView() {
   return `
     <div class="min-h-screen flex items-center justify-center bg-gradient-to-b from-stone-50 to-stone-100">
       <form id="login-form" class="w-80 rounded-xl border border-stone-200 bg-white p-6 shadow-sm">
-        <div class="text-lg font-semibold mb-1">Qlerify<span class="text-amber-500">·</span>Platform</div>
+        <div class="flex items-center gap-2 mb-1"><span style="color:#50E593">${qlerifyMark("h-6 w-6")}</span><span class="text-lg font-semibold">Qlerify<span class="text-amber-500">·</span>Live</span></div>
         <div class="text-sm text-stone-500 mb-4">Sign in to the multi-tenant console</div>
         ${err}
         <label class="block text-xs font-medium text-stone-600 mb-1">Username</label>
@@ -2610,7 +2539,7 @@ function bindLogin() {
 // --- Org Admin page --------------------------------------------------------
 
 async function loadAdmin() {
-  const tab = state.admin?.tab || "members";
+  const tab = state.admin?.tab || "general";
   const [members, roles, markings, environments, workspaces, projects, audit] = await Promise.all([
     api("/v1/members").catch(() => []),
     api("/v1/role-assignments").catch(() => []),
@@ -2624,11 +2553,11 @@ async function loadAdmin() {
   render();
 }
 
-const ADMIN_TABS = [["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["projects", "Projects"], ["audit", "Audit log"]];
+const ADMIN_TABS = [["general", "General"], ["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["projects", "Projects"], ["audit", "Audit log"]];
 
 function adminView() {
-  const a = state.admin || { tab: "members" };
-  const tab = a.tab || "members";
+  const a = state.admin || { tab: "general" };
+  const tab = a.tab || "general";
   const tabBtns = ADMIN_TABS.map(([k, label]) =>
     `<button data-admin-tab="${k}" class="px-3 py-1.5 text-sm rounded-md ${tab === k ? "bg-stone-900 text-white" : "border border-stone-300 bg-white hover:bg-stone-50"}">${label}</button>`).join("");
   return `
@@ -2658,6 +2587,45 @@ function roleChip(k) {
 }
 
 function adminTabContent(tab, a) {
+  if (tab === "general") {
+    const curOrg = (state.orgs || []).find((o) => o.id === state.me?.organizationId) || {};
+    const orgName = curOrg.name || currentOrgName();
+    const slug = curOrg.slug || "—";
+    const isSystem = curOrg.slug === "system";
+    const delOpen = !!a.deleteOrgOpen;
+    const delBusy = !!a.deleteOrgBusy;
+    const dangerInner = isSystem
+      ? `<div class="text-xs text-stone-500">The system organisation cannot be deleted.</div>`
+      : !delOpen
+      ? `<button id="org-delete-open" class="px-4 py-2 text-sm rounded-md bg-rose-600 text-white hover:bg-rose-700 font-medium">Delete this organisation</button>`
+      : `<div class="rounded-md border border-rose-300 bg-white p-3 max-w-md">
+           <div class="text-xs text-stone-700 mb-2">This permanently deletes <b>${escapeHtml(orgName)}</b> and every project, model, dataset, member, and audit record it owns. Type <span class="mono font-semibold">${escapeHtml(orgName)}</span> below to confirm.</div>
+           <input id="org-delete-confirm" autocomplete="off" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" placeholder="${escapeHtml(orgName)}" />
+           <div class="flex items-center gap-2">
+             <button id="org-delete-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
+             <button id="org-delete-go" disabled class="px-4 py-2 text-sm rounded-md bg-rose-600 text-white hover:bg-rose-700 font-medium disabled:opacity-40 disabled:cursor-not-allowed">${delBusy ? "Deleting…" : "Delete permanently"}</button>
+           </div>
+           <div id="org-delete-err" class="text-xs text-rose-600 mt-2"></div>
+         </div>`;
+    return `
+      <div class="max-w-2xl space-y-6">
+        <div class="rounded-lg border border-stone-200 bg-white p-5">
+          <div class="text-sm font-semibold text-stone-900">Organisation name</div>
+          <div class="text-xs text-stone-500 mt-0.5 mb-3">The display name shown across the console. The URL handle (slug <span class="mono">${escapeHtml(slug)}</span>) stays the same.</div>
+          <div class="flex items-end gap-2">
+            <input id="org-name-input" value="${escapeHtml(orgName)}" ${isSystem ? "disabled" : ""} class="flex-1 rounded-md border border-stone-300 px-3 py-2 text-sm disabled:bg-stone-50 disabled:text-stone-400" />
+            <button id="org-name-save" ${isSystem ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save</button>
+          </div>
+          <div id="org-name-msg" class="text-xs mt-2"></div>
+          ${isSystem ? `<div class="text-xs text-stone-400 mt-1">The system organisation can't be renamed.</div>` : ""}
+        </div>
+        <div class="rounded-lg border border-rose-300 bg-rose-50/40 p-5">
+          <div class="text-sm font-semibold text-rose-800">Danger zone</div>
+          <div class="text-xs text-rose-700 mt-0.5 mb-3">Deleting this organisation permanently removes all of its projects, models, data, members, and history. This action cannot be undone.</div>
+          ${dangerInner}
+        </div>
+      </div>`;
+  }
   if (tab === "members") {
     const rows = (a.members || []).map((m) => `<tr>
       <td class="px-4 py-2 mono text-xs">${escapeHtml(m.subject)}</td>
@@ -2836,6 +2804,70 @@ function bindAdmin() {
       const r = await api("/v1/audit/verify");
       el.innerHTML = r.ok ? `<span class="text-emerald-700">✓ intact — ${r.length} events, hash chain verified</span>` : `<span class="text-rose-700">✗ tampering detected at seq ${r.brokenAtSeq}</span>`;
     } catch (e) { el.textContent = e.message; }
+  });
+
+  // --- General tab: rename the org ------------------------------------------
+  const curOrgName = () => (state.orgs || []).find((o) => o.id === state.me?.organizationId)?.name || currentOrgName();
+  document.getElementById("org-name-save")?.addEventListener("click", async () => {
+    const setMsg = (cls, text) => { const m = document.getElementById("org-name-msg"); if (m) { m.className = `text-xs mt-2 ${cls}`; m.textContent = text; } };
+    const name = (document.getElementById("org-name-input")?.value || "").trim();
+    if (!name) { setMsg("text-rose-600", "Name is required."); return; }
+    if (name === curOrgName()) { setMsg("text-stone-400", "No change."); return; }
+    setMsg("text-stone-400", "Saving…");
+    try {
+      const orgId = state.me?.organizationId;
+      const updated = await api(`/v1/organizations/${encodeURIComponent(orgId)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+      // Refresh who-am-I so the top-bar org pill + switcher show the new name.
+      try { state.me = await api("/v1/whoami"); state.orgs = state.me.organizations || []; } catch { /* keep the old context */ }
+      render(); // repaint the admin header, the input, and the tenant bar
+      setMsg("text-emerald-700", `Renamed to "${updated.name}".`);
+    } catch (e) {
+      setMsg("text-rose-600", e.message);
+    }
+  });
+
+  // --- General tab: delete the org (typed-name confirmation) -----------------
+  document.getElementById("org-delete-open")?.addEventListener("click", () => {
+    state.admin = { ...(state.admin || {}), deleteOrgOpen: true };
+    render();
+    setTimeout(() => document.getElementById("org-delete-confirm")?.focus(), 30);
+  });
+  document.getElementById("org-delete-cancel")?.addEventListener("click", () => {
+    state.admin = { ...(state.admin || {}), deleteOrgOpen: false };
+    render();
+  });
+  // Enable the irreversible button only when the typed name matches exactly.
+  const delInput = document.getElementById("org-delete-confirm");
+  const delGo = document.getElementById("org-delete-go");
+  if (delInput && delGo) delInput.addEventListener("input", () => { delGo.disabled = delInput.value.trim() !== curOrgName(); });
+  document.getElementById("org-delete-go")?.addEventListener("click", async () => {
+    const errEl = document.getElementById("org-delete-err");
+    const name = curOrgName();
+    if ((document.getElementById("org-delete-confirm")?.value || "").trim() !== name) { if (errEl) errEl.textContent = "The name doesn't match."; return; }
+    const orgId = state.me?.organizationId;
+    state.admin = { ...(state.admin || {}), deleteOrgBusy: true };
+    render();
+    try {
+      await api(`/v1/organizations/${encodeURIComponent(orgId)}`, { method: "DELETE" });
+      // Switch away from the now-deleted org. Prefer another accessible org; if this
+      // was the caller's only org there's nowhere to land, so sign out for a clean
+      // re-auth rather than leaving a broken, org-less console.
+      const remaining = (state.orgs || []).filter((o) => o.id !== orgId);
+      state.me = null; state.orgs = []; state.admin = null;
+      if (remaining.length) {
+        AUTH.setOrg(remaining[0].id); // also clears the selected project
+        state.modelMsg = { ok: true, text: `Organisation "${name}" was permanently deleted.` };
+        navigate("#");
+        setTimeout(() => { state.modelMsg = null; render(); }, 3500);
+      } else {
+        AUTH.clear();
+        navigate("#login");
+      }
+    } catch (e) {
+      state.admin = { ...(state.admin || {}), deleteOrgBusy: false };
+      render();
+      const e2 = document.getElementById("org-delete-err"); if (e2) e2.textContent = e.message;
+    }
   });
 }
 

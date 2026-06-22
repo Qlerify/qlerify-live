@@ -1,8 +1,7 @@
-// Model-generic simulator. Drives ANY loaded model the way the Ericsson stepper
-// drives the demo: create a root-aggregate instance, then step through the
-// events in linearOrder, invoking each event's command via the generic base
-// command. A "run" is scoped by its root instance id (set on the bus so emitted
-// events group under it, exactly like the Ericsson per-demand scoping).
+// Model-generic simulator. Drives ANY loaded model: create a root-aggregate
+// instance, then step through the events in linearOrder, invoking each event's
+// command via the generic base command. A "run" is scoped by its root instance
+// id (set on the bus so emitted events group under it, per run).
 //
 // Arg synthesis is best-effort from the model: ids and FK-shaped fields
 // (`xxxId`) are linked to instances already created in the run; everything else

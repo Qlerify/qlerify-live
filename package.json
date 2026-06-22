@@ -1,9 +1,9 @@
 {
-  "name": "ericsson-hw-flow-sim",
+  "name": "qlerify-live",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "End-to-end demo simulator for the Ericsson HW Flow event storming workflow",
+  "description": "Model-driven runtime that turns a Qlerify domain model into a live, multi-tenant app",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
@@ -13,11 +13,8 @@
     "codegen": "tsx src/kernel/codegen/generate.ts",
     "codegen:ai": "tsx src/kernel/codegen/ai.ts",
     "swap": "tsx src/kernel/codegen/swap.ts",
-    "sim": "tsx src/simulator/runner.ts",
-    "sim:disruptions": "tsx src/simulator/runner.ts --with-disruptions",
     "db:push": "prisma db push",
     "db:reset": "rm -f prisma/dev.db prisma/dev.db-journal && prisma db push --skip-generate",
-    "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio"
   },
   "dependencies": {

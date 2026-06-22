@@ -7,7 +7,6 @@ import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
-import { wireDerivedEvents } from "./events/derived.js";
 import { startOntologyWatch, onOntologyReload } from "./ontology/model.js";
 import { loadPacks } from "./packs/loadPacks.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
@@ -53,7 +52,6 @@ export async function buildServer() {
 
   registerRoutes(app);
   registerControlRoutes(app);
-  wireDerivedEvents();
   startOntologyWatch(app.log);
 
   // Discover + register source-system packs (additive, fail-soft, dynamic import).

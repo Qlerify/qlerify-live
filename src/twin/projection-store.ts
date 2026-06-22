@@ -7,11 +7,11 @@
 // restart — which is what makes a live "apply" (with a loader) possible.
 //
 // CRITICAL: every projection table is namespaced with a `gen_` prefix so it can
-// NEVER collide with a Prisma-managed table. The hand-written Ericsson schema and
-// the append-only EventLog are pure Prisma (typed DateTime columns etc.); without
-// the prefix, applying a model would DROP/recreate e.g. `Demand` as a raw-SQL
-// table and corrupt Prisma's reads. Callers pass the logical entity name (e.g.
-// "Account"); this module maps it to the physical table (`gen_Account`).
+// NEVER collide with a Prisma-managed table. The control-plane tables and the
+// append-only EventLog are pure Prisma (typed DateTime columns etc.); without the
+// prefix, applying a model could DROP/recreate one of them as a raw-SQL table and
+// corrupt Prisma's reads. Callers pass the logical entity name (e.g. "Account");
+// this module maps it to the physical table (`gen_Account`).
 
 import { prisma } from "../db.js";
 import type { Ontology, EntitySchema } from "../ontology/model.js";
@@ -151,7 +151,7 @@ export interface ApplyResult {
 }
 
 /** Drop every `gen_` projection table and recreate the current model's entity
- * tables. Prisma-managed tables (Ericsson schema, EventLog) are NEVER touched.
+ * tables. Prisma-managed tables (control plane + EventLog) are NEVER touched.
  * In-process, synchronous, no restart — the destructive "drop tables on swap". */
 export async function applyModelTables(ontology: Ontology): Promise<ApplyResult> {
   orgColCache.clear(); // tables are being rebuilt — drop the column-presence cache

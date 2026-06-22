@@ -4,10 +4,9 @@
 // RawEvent/BusinessEvent split + emitting a RawPulled event are Part 5 (the one
 // place this re-points later).
 //
-// NOTE: the target is the gen_ projection store. The Ericsson demo's typed Prisma
-// read-models (Demand/PurchaseOrder/…) are NOT written here — wiring adapter data
-// into those is part of retiring the Ericsson dual-track, deliberately out of
-// scope for adapter v1 (which stays strictly additive).
+// NOTE: the target is the gen_ projection store — the only state store. Adapter
+// data lands in the model's raw-SQL gen_ tables, never in any typed Prisma table
+// (the schema holds only the control plane + EventLog).
 
 import { getOntology } from "../ontology/model.js";
 import { newId } from "../util/ids.js";

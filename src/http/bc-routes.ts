@@ -2,7 +2,7 @@
 // PROJECTION over substrate that already exists (the ontology, the adapter
 // registry, the provenance meta, the gen_ projection store, the EventLog) — no new
 // tables, no new source of truth. Strictly additive: mounted from registerRoutes,
-// the Ericsson dashboard + /sim routes are untouched. Slice 1 carries ZERO AI,
+// the dashboard + /sim routes are untouched. Slice 1 carries ZERO AI,
 // credentials, or dynamic code execution — the AI-codegen-and-run crux is Slice 2.
 
 import type { FastifyInstance } from "fastify";

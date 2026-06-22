@@ -21,8 +21,10 @@ import {
   createOrganization,
   createProject,
   createWorkspace,
+  deleteOrganization,
   deleteProject,
   ensureIdentity,
+  updateOrganization,
 } from "../provisioning/index.js";
 import { requireTenant } from "../tenancy/context.js";
 import { setActiveProjectModel } from "../../twin/apply.js";
@@ -165,6 +167,36 @@ export function registerControlRoutes(app: FastifyInstance) {
   app.get("/v1/organizations", async (req, reply) => {
     try {
       return await accessibleOrgs(requireTenant());
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Rename the current org (display name only — the slug stays stable). Destructive
+  // to nothing; still org-admin gated, and you can only edit the org you're in.
+  app.patch("/v1/organizations/:id", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const id = (req.params as { id: string }).id;
+      if (id !== ctx.organizationId) throw new DomainError("you can only modify the organization you are signed into");
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const body = (req.body ?? {}) as { name?: string };
+      return await updateOrganization(ctx.organizationId, { name: body.name }, ctx.principal.id);
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Delete the current org and CASCADE everything it owns. Irreversible →
+  // org-admin gated; the system org and a cross-org id are refused.
+  app.delete("/v1/organizations/:id", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const id = (req.params as { id: string }).id;
+      if (id !== ctx.organizationId) throw new DomainError("you can only delete the organization you are signed into");
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const result = await deleteOrganization(ctx.organizationId, ctx.principal.id);
+      return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);
     }

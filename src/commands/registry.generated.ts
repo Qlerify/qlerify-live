@@ -3,17 +3,9 @@
 // Side-effect registration of each generated command (handler + detect +
 // DESCRIBE), keyed by HTTP route segment. Imported once at server startup
 // (src/http/routes.ts) to mount routes and back /describe and /detect.
-import { register } from "./registry.js";
-import { orderMaterial } from "../sap/purchase-order/order-material.gen.js";
-import * as orderMaterialLogic from "../sap/purchase-order/order-material.logic.js";
-import { confirmOrderWithETA } from "../sap/purchase-order/confirm-order-with-eta.gen.js";
-import * as confirmOrderWithETALogic from "../sap/purchase-order/confirm-order-with-eta.logic.js";
-import { changeMaterialETA } from "../sap/purchase-order/change-material-eta.gen.js";
-import * as changeMaterialETALogic from "../sap/purchase-order/change-material-eta.logic.js";
-import { receiveMaterial } from "../sap/purchase-order/receive-material.gen.js";
-import * as receiveMaterialLogic from "../sap/purchase-order/receive-material.logic.js";
+//
+// No commands are generated for the current model. Run `npm run codegen` after
+// a model swap to (re)populate this file; until then every command dispatches
+// through the model-driven generic path in src/http/routes.ts.
 
-register("order-material", { commandName: "OrderMaterial", boundedContext: "SAP", handlerName: "orderMaterial", route: "/commands/sap/order-material", eventRef: "#/domainEvents/MaterialOrdered", role: "Buyer", handler: orderMaterial, detect: orderMaterialLogic.detect, DESCRIBE: orderMaterialLogic.DESCRIBE });
-register("confirm-order-with-eta", { commandName: "ConfirmOrderWithETA", boundedContext: "SAP", handlerName: "confirmOrderWithETA", route: "/commands/sap/confirm-order-with-eta", eventRef: "#/domainEvents/SupplierConfirmedOrderWithETA", role: "Supplier", handler: confirmOrderWithETA, detect: confirmOrderWithETALogic.detect, DESCRIBE: confirmOrderWithETALogic.DESCRIBE });
-register("change-material-eta", { commandName: "ChangeMaterialETA", boundedContext: "SAP", handlerName: "changeMaterialETA", route: "/commands/sap/change-material-eta", eventRef: "#/domainEvents/MaterialETAChanged", role: "Supplier", handler: changeMaterialETA, detect: changeMaterialETALogic.detect, DESCRIBE: changeMaterialETALogic.DESCRIBE });
-register("receive-material", { commandName: "ReceiveMaterial", boundedContext: "SAP", handlerName: "receiveMaterial", route: "/commands/sap/receive-material", eventRef: "#/domainEvents/MaterialReceivedAtSite", role: "Goods Receiving", handler: receiveMaterial, detect: receiveMaterialLogic.detect, DESCRIBE: receiveMaterialLogic.DESCRIBE });
+export {};

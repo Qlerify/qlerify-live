@@ -86,7 +86,7 @@ export interface OntologyEvent {
   role: string;
   /** Aggregate-root entity name, e.g. "Demand". */
   aggregateRoot: string;
-  /** Bounded context the event was declared in, e.g. "Helix". */
+  /** Bounded context the event was declared in, e.g. "Sales". */
   boundedContext: string;
   /** Command schema name that triggers the event, e.g. "CreateDemand". */
   commandName: string;
@@ -399,7 +399,7 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
   // loaded model — its title/rootAggregate overrides are stale and must be
   // ignored (the model-switch "stale labels" bug). Require a MAJORITY of the
   // overlay's keys to resolve: a single shared event key (e.g. ProjectCreated,
-  // present in both the Ericsson and IAM models) must NOT make a foreign
+  // which can appear in two unrelated models) must NOT make a foreign
   // overlay look like it belongs here.
   const overlayKeys = Object.keys(overlayEvents);
   const matchingKeys = overlayKeys.filter((k) => eventByKey.has(k)).length;

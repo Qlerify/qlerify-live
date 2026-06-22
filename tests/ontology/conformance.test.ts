@@ -87,7 +87,7 @@ const handlers = parseHandlers();
 describe("ontology loads and is well-formed", () => {
   // Model-relative (no magic numbers): a swapped model with a different event /
   // BC / role count must still pass, so we assert internal consistency rather
-  // than the specific Ericsson shape.
+  // than any one model's specific shape.
   it("events form an acyclic follows graph", () => {
     expect(ontology.events.length).toBeGreaterThan(0);
     expect(ontology.topologicalOrder()).toHaveLength(ontology.events.length);

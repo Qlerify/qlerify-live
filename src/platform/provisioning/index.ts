@@ -290,6 +290,115 @@ export async function createOrganization(p: CreateOrgParams, actorPrincipalId?: 
   return { id: orgId, slug, customerAccountId, homeRegion, environments: { developmentId: devId }, workspaceId: wsId };
 }
 
+/** Rename an organization. Only the display name changes — the slug is a stable
+ * routing/lookup handle and is deliberately left untouched. The system org is
+ * refused. */
+export async function updateOrganization(
+  organizationId: string,
+  patch: { name?: string },
+  actorPrincipalId?: string | null,
+) {
+  if (organizationId === SYSTEM_ORG_ID) throw new DomainError("The system organization cannot be renamed.");
+  const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
+  if (!org) throw new DomainError("organization not found");
+  const name = (patch.name ?? "").trim();
+  if (!name) throw new DomainError("name is required");
+  if (name === org.name) return { id: org.id, name: org.name, slug: org.slug, homeRegion: org.homeRegion, status: org.status };
+
+  const updated = await prisma.platOrganization.update({ where: { id: organizationId }, data: { name } });
+  await recordAudit({
+    organizationId,
+    actorPrincipalId: actorPrincipalId ?? null,
+    action: "organization.update",
+    targetRef: `organization:${organizationId}`,
+    decision: "allow",
+    reason: `renamed "${org.name}" → "${name}"`,
+  });
+  return { id: updated.id, name: updated.name, slug: updated.slug, homeRegion: updated.homeRegion, status: updated.status };
+}
+
+/** Delete an organization and CASCADE everything it owns. Irreversible.
+ *
+ * Order: (1) delete every project via deleteProject() — that drops each project's
+ * physical projection tables (gen__p*), event-log run history, and project-scoped
+ * model/resource graph; then (2) atomically delete the remaining org-scoped
+ * control-plane rows (org-level ontologies/resources, memberships, roles,
+ * markings, groups, service accounts, envs/workspaces, tenant registry, the org's
+ * audit chain) in FK-safe order, ending with the org row itself; then (3) drop the
+ * org's dedicated customer account if no sibling org shares it.
+ *
+ * The SYSTEM org is refused (defense-in-depth) — it is the header-less resolution
+ * home and must always exist. The deletion is audited under the SYSTEM stream
+ * because the org's own audit chain is removed in the cascade. */
+export async function deleteOrganization(
+  organizationId: string,
+  actorPrincipalId: string,
+): Promise<{ id: string; deletedProjects: number; droppedTables: number }> {
+  if (organizationId === SYSTEM_ORG_ID) {
+    throw new DomainError("The system organization cannot be deleted.");
+  }
+  const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
+  if (!org) throw new DomainError("organization not found");
+
+  // (1) Projects first — each call drops that project's physical tables + history.
+  const projects = await prisma.platProject.findMany({ where: { organizationId }, select: { id: true } });
+  let droppedTables = 0;
+  for (const p of projects) {
+    const r = await deleteProject(organizationId, p.id, actorPrincipalId);
+    droppedTables += r.droppedTables.length;
+  }
+
+  // (2) The remaining org-level model graph + all flat org-scoped rows, atomically.
+  // FK-safe order: ontology versions/branches → ontologies → resource markings →
+  // resources; then the independent tables; workspaces before environments (the
+  // workspace→environment composite FK); finally registry, audit, and the org row.
+  const onts = await prisma.platOntology.findMany({ where: { organizationId }, select: { id: true } });
+  const ontologyIds = onts.map((o) => o.id);
+
+  await prisma.$transaction([
+    prisma.platOntologyVersion.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
+    prisma.platOntologyBranch.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
+    prisma.platOntology.deleteMany({ where: { organizationId } }),
+    prisma.platResourceMarking.deleteMany({ where: { organizationId } }),
+    prisma.platResource.deleteMany({ where: { organizationId } }),
+    prisma.eventLog.deleteMany({ where: { organizationId } }),
+    prisma.platSharingGrant.deleteMany({ where: { organizationId } }),
+    prisma.platMarkingGrant.deleteMany({ where: { organizationId } }),
+    prisma.platMarking.deleteMany({ where: { organizationId } }),
+    prisma.platRoleAssignment.deleteMany({ where: { organizationId } }),
+    prisma.platRole.deleteMany({ where: { organizationId } }), // org-scoped custom roles only (builtins have a null org)
+    prisma.platGroupMembership.deleteMany({ where: { organizationId } }),
+    prisma.platGroup.deleteMany({ where: { organizationId } }),
+    prisma.platServiceAccount.deleteMany({ where: { organizationId } }),
+    prisma.platOrgMembership.deleteMany({ where: { organizationId } }),
+    prisma.platProject.deleteMany({ where: { organizationId } }), // belt-and-suspenders (already gone above)
+    prisma.platWorkspace.deleteMany({ where: { organizationId } }),
+    prisma.platEnvironment.deleteMany({ where: { organizationId } }),
+    prisma.platTenantRegistry.deleteMany({ where: { organizationId } }),
+    prisma.platAuditEvent.deleteMany({ where: { organizationId } }),
+    prisma.platOrganization.deleteMany({ where: { id: organizationId } }),
+  ]);
+
+  // (3) The org's dedicated customer account — only if no other org references it,
+  // and never the shared SYSTEM account.
+  if (org.customerAccountId !== SYSTEM_CUSTOMER_ACCOUNT_ID) {
+    const siblings = await prisma.platOrganization.count({ where: { customerAccountId: org.customerAccountId } });
+    if (siblings === 0) await prisma.platCustomerAccount.deleteMany({ where: { id: org.customerAccountId } });
+  }
+
+  // Audited under the SYSTEM stream — the org's own chain was deleted above.
+  await recordAudit({
+    organizationId: SYSTEM_ORG_ID,
+    actorPrincipalId,
+    action: "organization.delete",
+    targetRef: `organization:${organizationId}`,
+    decision: "allow",
+    reason: `deleted org "${org.slug}" — ${projects.length} project(s), ${droppedTables} table(s)`,
+  });
+
+  return { id: organizationId, deletedProjects: projects.length, droppedTables };
+}
+
 /** Tenant Registry lookup (§10) — pooled/local in inc 1. */
 export async function lookupTenant(organizationId: string) {
   return prisma.platTenantRegistry.findUnique({ where: { organizationId } });

@@ -1013,6 +1013,30 @@ async function createDemand() {
   }
 }
 
+// Replay the domain events the ingested data implies, then refresh the list so
+// the rows that were sitting at "no events yet" light up with their evidence.
+async function deriveFromIngested() {
+  if (state.busy) return;
+  state.busy = true; render();
+  try {
+    const r = await api("/sim/derive", { method: "POST", body: "{}" });
+    await loadDashboard();
+    if (r.totalEmitted > 0) {
+      const fired = (r.events || [])
+        .filter((e) => e.emitted > 0)
+        .map((e) => `• ${e.name}: ${e.emitted}${e.sample ? `  (${e.sample})` : ""}`)
+        .join("\n");
+      alert(`Simulated ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the ingested data:\n\n${fired}`);
+    } else {
+      alert("No new events to simulate — the ingested data adds no evidence beyond what's already in the event log.");
+    }
+  } catch (e) {
+    alert("Simulate from data failed: " + e.message);
+  } finally {
+    state.busy = false; render();
+  }
+}
+
 async function deleteDemand(demandId, ev) {
   ev.stopPropagation();
   if (!confirm("Remove this item and all its data?")) return;
@@ -1069,6 +1093,7 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
+        <button id="btn-derive" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium" title="Replay the domain events your ingested data implies (Account Registered, Account Confirmed, …)">⚡ Simulate from data</button>
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1109,6 +1134,7 @@ function dashboardView() {
 
 function bindDashboard() {
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
+  document.getElementById("btn-derive")?.addEventListener("click", deriveFromIngested);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
   });
@@ -2275,6 +2301,13 @@ function businessByStep() {
   return m;
 }
 
+// The set of event refs that actually fired for the loaded instance (from the
+// event log) — the gap-safe basis for "which steps are done". A derived run fires
+// a non-contiguous subset, so step state must come from here, not a linear cursor.
+function firedRefSet() {
+  return new Set((state.log || []).map((entry) => entry.eventRef));
+}
+
 // Readable business date. Rendered in UTC so it's stable regardless of the
 // viewer's timezone (the businessAt value is a date carried in the event data).
 function fmtBizDate(iso) {
@@ -2393,7 +2426,13 @@ const FLOW = { cardW: 176, cardH: 104, colPitch: 224, rowPitch: 148 };
 
 function timeline() {
   const total = state.events.length;
-  const pct = total ? (state.currentIndex / total) * 100 : 0;
+  // Which events actually fired for THIS instance — from the event log, not a
+  // contiguous step cursor. Derivation (and any non-linear run) fires a SUBSET of
+  // the model's events (e.g. Account Confirmed fires but Account Logged In does
+  // not, leaving a gap), so colour each box by whether its own event is in the
+  // log — every fired step then reads as done regardless of gaps.
+  const firedRefs = firedRefSet();
+  const pct = total ? (firedRefs.size / total) * 100 : 0;
   const biz = businessByStep();
   let prevBizIso = null;
 
@@ -2402,30 +2441,23 @@ function timeline() {
   const W = (layout.cols - 1) * colPitch + cardW;
   const H = (layout.lanes - 1) * rowPitch + cardH;
 
-  // Per-lane "frontier" = the most recently fired event on each lane (its
-  // highest linear step index). Stepping interleaves the lanes, so each branch
-  // has advanced to a different point: any fired event *before* its lane's
-  // frontier is that branch's past and gets a green tint; the frontier itself
-  // (the branch's latest) and not-yet-fired events do not.
-  const laneFrontier = new Map();
-  state.events.forEach((e, i) => {
-    if (i >= state.currentIndex) return;
-    const lane = layout.place.get(e.ref)?.lane ?? 0;
-    const cur = laneFrontier.get(lane);
-    if (cur == null || i > cur) laneFrontier.set(lane, i);
-  });
+  // The most-recently-fired step (highest linear index that fired) — the cursor
+  // we ring as "latest", replacing the old contiguous currentIndex-1.
+  let lastFiredIndex = -1;
+  state.events.forEach((e, i) => { if (firedRefs.has(e.ref)) lastFiredIndex = i; });
 
   // Iterate in declared (linear) order so `data-step`, the fired/current logic,
   // and the business-date gap accumulation all stay tied to the step sequence;
   // each card is then *positioned* by its lane/column placement.
   const cards = state.events.map((e, i) => {
     const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
-    const fired = i < state.currentIndex;
-    const isCurrent = i === state.currentIndex - 1;
+    const fired = firedRefs.has(e.ref);
+    const isCurrent = i === lastFiredIndex;
     const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
     const ringClass = isCurrent ? "ring-2 ring-amber-400" : "";
-    // Already-completed on this branch (fired and before the lane's frontier).
-    const isPast = fired && i < (laneFrontier.get(pos.lane) ?? -1);
+    // Every fired step is done → green. (No contiguous-frontier exclusion: a
+    // derived run's fired set has gaps, and each fired box should read as done.)
+    const isPast = fired;
 
     const bizIso = biz.get(e.ref);
     const bizLabel = fired ? fmtBizDate(bizIso) : null;
@@ -2469,7 +2501,7 @@ function timeline() {
     const sx = a.col * colPitch + cardW, sy = a.lane * rowPitch + cardH / 2;
     const ex = b.col * colPitch,         ey = b.lane * rowPitch + cardH / 2;
     const dx = Math.max(24, (ex - sx) * 0.5);
-    const fired = b.idx < state.currentIndex;
+    const fired = firedRefs.has(to); // edge lit when its target event has fired (gap-safe)
     return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${fired ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
   }).join("");
 
@@ -2756,7 +2788,7 @@ function genericDetailView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} · ${root.id ? escapeHtml(String(root.id).slice(0, 16)) + "…" : ""}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(prettyEntity(m.rootAggregate))} ${root.status ? pill(String(root.status), String(root.status)) : ""}</div>
         </div>
-        <div class="text-sm text-stone-500 mr-2 tabular-nums">step <span class="font-semibold text-stone-800">${state.currentIndex}</span> / ${total}</div>
+        <div class="text-sm text-stone-500 mr-2 tabular-nums"><span class="font-semibold text-stone-800">${firedRefSet().size}</span> / ${total} fired</div>
         <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
         <button id="btn-next" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
         <button id="btn-all" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>

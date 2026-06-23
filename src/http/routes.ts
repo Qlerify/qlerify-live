@@ -15,6 +15,7 @@ import {
   genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
 } from "../twin/sim.js";
 import { provenanceMeta } from "../twin/provenance.js";
+import { deriveFromData } from "../twin/derive.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { ingestPull } from "../packs/ingest.js";
 import { registerBcRoutes } from "./bc-routes.js";
@@ -303,6 +304,19 @@ export function registerRoutes(app: FastifyInstance) {
       if (step.done) break;
     }
     return { steps };
+  });
+
+  // DERIVE — replay the domain events the ingested data's evidence implies into
+  // the event log (one place the simulator reads real data instead of synthesizing
+  // it). `preview: true` reports what would fire without writing. Idempotent.
+  app.post("/sim/derive", async (req, reply) => {
+    const body = (req.body ?? {}) as { preview?: boolean; limit?: number };
+    try {
+      return await deriveFromData({ preview: body.preview, limit: body.limit });
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
   });
 }
 

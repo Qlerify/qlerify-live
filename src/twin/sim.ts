@@ -13,7 +13,7 @@ import { prisma } from "../db.js";
 import { newId } from "../util/ids.js";
 import { withScope } from "../events/bus.js";
 import { provenanceFor } from "./provenance.js";
-import { currentOrgId, currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { currentOrgId, currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
@@ -33,11 +33,11 @@ export function dataModelSignature(): string {
  * slate), or when the loaded model's projection tables are missing / drifted.
  * The UI uses this to auto-rebuild on a model change instead of a manual button. */
 export async function rebuildNeeded(): Promise<boolean> {
-  // Non-system projects use their own lazily-created, per-project gen_ tables and
+  // Non-system workflows use their own lazily-created, per-workflow gen_ tables and
   // a fixed CAS model version — they never need the system's global drop/recreate
-  // rebuild (which also resets shared state). The dashboard creates a project's
+  // rebuild (which also resets shared state). The dashboard creates a workflow's
   // tables on first "+ New".
-  if (!isSystemProject()) return false;
+  if (!isSystemWorkflow()) return false;
   // Model switch: the data in the tables is from a previously-loaded model, so a
   // clean-slate rebuild is needed. Null marker = data unclaimed yet.
   const dataModel = await store.getMeta("dataModel");
@@ -259,7 +259,7 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
         role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
         provenance: await provenanceFor(event.boundedContext),
         organizationId: currentOrgId(),
-        projectId: currentProjectId(),
+        workflowId: currentWorkflowId(),
       },
     });
   }
@@ -297,8 +297,8 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
 
 /** Clear all runs: every projection row + the whole event log. */
 export async function genericDeleteAll(): Promise<void> {
-  await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() }); // scoped to the active project
-  await store.clearAll(); // listProjectionTables is project-scoped → clears only this project's tables
+  await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() }); // scoped to the active workflow
+  await store.clearAll(); // listProjectionTables is workflow-scoped → clears only this workflow's tables
 }
 
 /** List runs: one row per root-aggregate instance, with progress. */

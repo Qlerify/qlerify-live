@@ -17,7 +17,7 @@
 // the org it is operating on directly.
 
 import { prisma } from "../../db.js";
-import { setProjectModel } from "../../ontology/model.js";
+import { setWorkflowModel } from "../../ontology/model.js";
 import { newId } from "../ids.js";
 import { canonicalize } from "./canonical.js";
 import { fsContentStore as cas } from "./content-store.js";
@@ -49,8 +49,8 @@ function summarize(workflowJson: string): VersionSummary {
 }
 
 /** env/ws/proj scope collapsed to a single comparable key (§8.2 uniqueness). */
-function scopeKeyOf(environmentId?: string | null, workspaceId?: string | null, projectId?: string | null): string {
-  return [environmentId ?? "-", workspaceId ?? "-", projectId ?? "-"].join("/");
+function scopeKeyOf(environmentId?: string | null, workspaceId?: string | null, workflowId?: string | null): string {
+  return [environmentId ?? "-", workspaceId ?? "-", workflowId ?? "-"].join("/");
 }
 
 export interface EnsureOntologyParams {
@@ -60,20 +60,20 @@ export interface EnsureOntologyParams {
   ontologyId?: string;
   environmentId?: string | null;
   workspaceId?: string | null;
-  /** The project this model belongs to (null = org-level/legacy). */
-  projectId?: string | null;
+  /** The workflow this model belongs to (null = org-level/legacy). */
+  workflowId?: string | null;
   name: string;
   ownerId: string;
 }
 
 /** Idempotently ensure the PlatResource(type=Ontology) + PlatOntology rows for a
- * model exist. Dedup is keyed on (org, project, name) — keying on (org, name)
- * alone would alias every project's model to the first project's, since they all
+ * model exist. Dedup is keyed on (org, workflow, name) — keying on (org, name)
+ * alone would alias every workflow's model to the first workflow's, since they all
  * use name "workflow". Returns the resolved ids. Safe to call repeatedly. */
 export async function ensureOntologyResource(p: EnsureOntologyParams): Promise<{ resourceId: string; ontologyId: string }> {
-  const projectId = p.projectId ?? null;
+  const workflowId = p.workflowId ?? null;
   const existing = await prisma.platOntology.findFirst({
-    where: { organizationId: p.organizationId, projectId, name: p.name },
+    where: { organizationId: p.organizationId, workflowId, name: p.name },
     select: { id: true, resourceId: true },
   });
   if (existing) return { resourceId: existing.resourceId, ontologyId: existing.id };
@@ -86,11 +86,11 @@ export async function ensureOntologyResource(p: EnsureOntologyParams): Promise<{
       organizationId: p.organizationId,
       environmentId: p.environmentId ?? null,
       workspaceId: p.workspaceId ?? null,
-      projectId,
+      workflowId,
       resourceType: "Ontology",
       name: p.name,
       ownerId: p.ownerId,
-      scopeKey: scopeKeyOf(p.environmentId, p.workspaceId, projectId),
+      scopeKey: scopeKeyOf(p.environmentId, p.workspaceId, workflowId),
     },
   });
   await prisma.platOntology.create({
@@ -100,7 +100,7 @@ export async function ensureOntologyResource(p: EnsureOntologyParams): Promise<{
       resourceId,
       environmentId: p.environmentId ?? null,
       workspaceId: p.workspaceId ?? null,
-      projectId,
+      workflowId,
       name: p.name,
     },
   });
@@ -226,21 +226,21 @@ export async function getOntologyById(organizationId: string, id: string) {
   return prisma.platOntology.findFirst({ where: { id, organizationId } });
 }
 
-/** Bind a project's current model content into the live loader cache, so a
- * subsequent getOntology() (sync, in the handler) returns THIS project's model.
+/** Bind a workflow's current model content into the live loader cache, so a
+ * subsequent getOntology() (sync, in the handler) returns THIS workflow's model.
  * Called by the onRequest hook before the handler runs. Returns false when the
- * project has no model yet — getOntology() then throws ModelNotLoadedError and
- * the UI shows the "set this project's model" prompt. There is NO on-disk
- * self-heal anymore: a model arrives only via PUT /v1/project/model. */
-export async function ensureProjectModelLoaded(organizationId: string, projectId: string): Promise<boolean> {
+ * workflow has no model yet — getOntology() then throws ModelNotLoadedError and
+ * the UI shows the "set this workflow's model" prompt. There is NO on-disk
+ * self-heal anymore: a model arrives only via PUT /v1/workflow/model. */
+export async function ensureWorkflowModelLoaded(organizationId: string, workflowId: string): Promise<boolean> {
   const ont = await prisma.platOntology.findFirst({
-    where: { organizationId, projectId, name: "workflow" },
+    where: { organizationId, workflowId, name: "workflow" },
     select: { id: true, currentVersionId: true },
   });
   if (!ont?.currentVersionId) return false;
   const content = await getVersionContent(organizationId, ont.currentVersionId);
   if (!content) return false;
-  setProjectModel(projectId, content.workflow, content.overlay, content.manifestHash);
+  setWorkflowModel(workflowId, content.workflow, content.overlay, content.manifestHash);
   return true;
 }
 

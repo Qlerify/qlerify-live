@@ -20,16 +20,16 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { isHandledError } from "../../errors.js";
 import { resolveTenantContext, type AuthnHeaders } from "../authn/index.js";
-import { ensureProjectModelLoaded } from "../ontology-store/ontology-store.js";
+import { ensureWorkflowModelLoaded } from "../ontology-store/ontology-store.js";
 import { enterTenant } from "../tenancy/context.js";
 import type { TenantContext } from "../types.js";
 
 let cachedSystemCtx: TenantContext | undefined;
 
 function hasCredentials(h: AuthnHeaders): boolean {
-  // X-Project-Id counts: a request that selects a project must go through full
-  // resolution (and project-model loading), not the cached system context.
-  return !!(h.authorization || h["x-identity-subject"] || h["x-org-id"] || h["x-org-slug"] || h["x-project-id"]);
+  // X-Workflow-Id counts: a request that selects a workflow must go through full
+  // resolution (and workflow-model loading), not the cached system context.
+  return !!(h.authorization || h["x-identity-subject"] || h["x-org-id"] || h["x-org-slug"] || h["x-workflow-id"]);
 }
 
 export function registerTenantPlugin(app: FastifyInstance) {
@@ -48,12 +48,12 @@ export function registerTenantPlugin(app: FastifyInstance) {
       const ctx = await resolveTenantContext(headers);
       if (!hasCredentials(headers)) cachedSystemCtx = ctx;
       (req as any).tenant = ctx;
-      // Bind the active project's model BEFORE the handler so the synchronous
-      // getOntology() resolves the right model. A project with no model yet loads
+      // Bind the active workflow's model BEFORE the handler so the synchronous
+      // getOntology() resolves the right model. A workflow with no model yet loads
       // nothing → getOntology() throws ModelNotLoadedError and the UI prompts to
-      // set one. With no active project (empty org) there is nothing to load.
-      if (ctx.projectId) {
-        await ensureProjectModelLoaded(ctx.organizationId, ctx.projectId);
+      // set one. With no active workflow (empty org) there is nothing to load.
+      if (ctx.workflowId) {
+        await ensureWorkflowModelLoaded(ctx.organizationId, ctx.workflowId);
       }
     } catch (err) {
       if (isHandledError(err)) {

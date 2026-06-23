@@ -6,7 +6,7 @@ import { prisma } from "../db.js";
 import { AuthError, DomainError } from "../errors.js";
 import { recordAudit } from "./audit/index.js";
 import { authorize, type AuthzResource } from "./pdp/index.js";
-import { isSystemProject, requireTenant } from "./tenancy/context.js";
+import { isSystemWorkflow, requireTenant } from "./tenancy/context.js";
 import type { TenantContext } from "./types.js";
 
 /** Authorize `action` against `resource`; audit the decision; throw on DENY. */
@@ -37,12 +37,12 @@ export async function ensureAllowed(
  * has no ontology resource yet (deny-by-default unless org owner/admin). */
 export async function guardModelAction(action: string): Promise<void> {
   const ctx = requireTenant();
-  // These routes mutate the on-disk demo model + shared state — system project only.
-  if (!isSystemProject()) {
-    throw new DomainError("Model lifecycle (fetch/apply/roll/restore) operates on the system default project only.");
+  // These routes mutate the on-disk demo model + shared state — system workflow only.
+  if (!isSystemWorkflow()) {
+    throw new DomainError("Model lifecycle (fetch/apply/roll/restore) operates on the system default workflow only.");
   }
   const ont = await prisma.platOntology.findFirst({
-    where: { organizationId: ctx.organizationId, projectId: null, name: "workflow" },
+    where: { organizationId: ctx.organizationId, workflowId: null, name: "workflow" },
     select: { resourceId: true, environmentId: true, workspaceId: true },
   });
   const resource: AuthzResource = ont
@@ -52,7 +52,7 @@ export async function guardModelAction(action: string): Promise<void> {
         scopeType: "resource",
         environmentId: ont.environmentId,
         workspaceId: ont.workspaceId,
-        projectId: null,
+        workflowId: null,
       }
     : { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" };
   await ensureAllowed(action, resource, ctx);

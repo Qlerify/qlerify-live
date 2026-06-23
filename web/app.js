@@ -108,10 +108,10 @@ const state = {
   chatBusy: false,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
-  // registry health — non-null message means the active project's model couldn't
+  // registry health — non-null message means the active workflow's model couldn't
   // be built into the event registry; surfaced as a top banner.
   registryError: null,
-  // toast message (e.g. after setting a project's model)
+  // toast message (e.g. after setting a workflow's model)
   modelMsg: null,
 };
 
@@ -123,13 +123,13 @@ const state = {
 const AUTH = {
   token: () => localStorage.getItem("ql.token") || "",
   org: () => localStorage.getItem("ql.org") || "",
-  project: () => localStorage.getItem("ql.project") || "",
+  workflow: () => localStorage.getItem("ql.workflow") || "",
   setSession: (token) => localStorage.setItem("ql.token", token || ""),
-  // Switching org invalidates the selected project — clear it so the new org
-  // resolves its own default project (or the empty-org state) until one is picked.
-  setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
-  setProject: (id) => { if (id) localStorage.setItem("ql.project", id); else localStorage.removeItem("ql.project"); },
-  clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.project"); },
+  // Switching org invalidates the selected workflow — clear it so the new org
+  // resolves its own default workflow (or the empty-org state) until one is picked.
+  setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); },
+  setWorkflow: (id) => { if (id) localStorage.setItem("ql.workflow", id); else localStorage.removeItem("ql.workflow"); },
+  clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); },
 };
 
 async function api(path, opts = {}) {
@@ -139,8 +139,8 @@ async function api(path, opts = {}) {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const org = AUTH.org();
   if (org) headers["X-Org-Id"] = org;
-  const project = AUTH.project();
-  if (project) headers["X-Project-Id"] = project;
+  const workflow = AUTH.workflow();
+  if (workflow) headers["X-Workflow-Id"] = workflow;
   const res = await fetch(API + path, { cache: "no-store", ...opts, headers });
   if (res.status === 401 && !path.startsWith("/v1/auth/")) {
     AUTH.clear();
@@ -525,22 +525,22 @@ async function loadRegistryStatus() {
   }
 }
 
-// Set-this-project's-model control. Points the active project at a Qlerify model
-// (link, or uploaded/pasted workflow.json) and rebuilds this project's data.
-function projectModelControls() {
+// Set-this-workflow's-model control. Points the active workflow at a Qlerify model
+// (link, or uploaded/pasted workflow.json) and rebuilds this workflow's data.
+function workflowModelControls() {
   if (!state.me) return "";
-  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this project's model with a Qlerify model">⚙ Set model</button>`;
+  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this workflow's model with a Qlerify model">⚙ Set model</button>`;
 }
 
-function projectModelDialog() {
+function workflowModelDialog() {
   if (!state.projModelOpen) return "";
   const err = state.projModelErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.projModelErr)}</div>` : "";
   return `
     <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
       <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
         <div class="px-5 py-4 border-b border-stone-200">
-          <div class="text-lg font-semibold">Set this project's model</div>
-          <div class="text-sm text-stone-500 mt-0.5">Point the project at a Qlerify model. It replaces <b>this project's</b> model and rebuilds <b>this project's</b> data — the demo and other projects are untouched.</div>
+          <div class="text-lg font-semibold">Set this workflow's model</div>
+          <div class="text-sm text-stone-500 mt-0.5">Point the workflow at a Qlerify model. It replaces <b>this workflow's</b> model and rebuilds <b>this workflow's</b> data — the demo and other workflows are untouched.</div>
         </div>
         <div class="p-5 overflow-auto flex-1">
           ${err}
@@ -560,13 +560,13 @@ function projectModelDialog() {
         </div>
         <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
           <button id="proj-model-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
-          <button id="proj-model-apply" ${state.projModelBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.projModelBusy ? "Applying…" : "Apply to project"}</button>
+          <button id="proj-model-apply" ${state.projModelBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.projModelBusy ? "Applying…" : "Apply to workflow"}</button>
         </div>
       </div>
     </div>`;
 }
 
-function bindProjectModel() {
+function bindWorkflowModel() {
   document.getElementById("btn-proj-model")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
   document.getElementById("proj-model-cancel")?.addEventListener("click", () => { state.projModelOpen = false; render(); });
   document.getElementById("proj-model-url")?.addEventListener("input", (e) => { state.projModelUrl = e.target.value; });
@@ -597,9 +597,9 @@ function bindProjectModel() {
     }
     state.projModelBusy = true; state.projModelErr = null; render();
     try {
-      await api("/v1/project/model", { method: "PUT", body: JSON.stringify(payload) });
+      await api("/v1/workflow/model", { method: "PUT", body: JSON.stringify(payload) });
       state.projModelOpen = false; state.projModelBusy = false; state.projModelText = ""; state.projModelUrl = "";
-      state.modelMsg = { ok: true, text: "Project model updated — rebuilding this project." };
+      state.modelMsg = { ok: true, text: "Workflow model updated — rebuilding this workflow." };
       await ensureMe();
       onHashChange();
       setTimeout(() => { state.modelMsg = null; render(); }, 2500);
@@ -618,7 +618,7 @@ function registryBanner() {
   if (!state.registryError) return "";
   return `
     <div class="bg-rose-600 text-white px-6 py-3 text-sm shadow">
-      <div class="font-semibold">⚠ This project's model couldn't be loaded</div>
+      <div class="font-semibold">⚠ This workflow's model couldn't be loaded</div>
       <div class="mt-0.5 opacity-90">${escapeHtml(state.registryError)}</div>
       <div class="mt-1 text-xs opacity-80">The event registry couldn't be built from the current model. Set a valid Qlerify model (⚙ Set model) and this banner clears.</div>
     </div>
@@ -676,18 +676,18 @@ async function onHashChange() {
   // login screen now instead of flashing a frame of header-less content.
   if (location.hash === "#login") { state.view = "login"; render(); return; }
 
-  // Empty org (a fresh org, or its last project was deleted): the data plane fails
-  // closed, so don't fetch it — show the "create your first project" state. Admin
-  // stays reachable so the user can manage the org and create a project there too.
-  const emptyOrg = state.me && (state.me.projects || []).length === 0;
+  // Empty org (a fresh org, or its last workflow was deleted): the data plane fails
+  // closed, so don't fetch it — show the "create your first workflow" state. Admin
+  // stays reachable so the user can manage the org and create a workflow there too.
+  const emptyOrg = state.me && (state.me.workflows || []).length === 0;
   if (emptyOrg && r.view !== "admin") {
     state.view = "empty-org";
     render();
     return;
   }
 
-  // A project that exists but has no model yet → the data plane throws
-  // MODEL_NOT_LOADED. Catch it and show the "set this project's model" prompt
+  // A workflow that exists but has no model yet → the data plane throws
+  // MODEL_NOT_LOADED. Catch it and show the "set this workflow's model" prompt
   // instead of a broken view.
   try {
     if (r.view === "detail") {
@@ -712,7 +712,7 @@ async function onHashChange() {
 }
 
 // The API helper throws Error(`<status> <path>: <body>`); the body carries the
-// server's error code. Detect the "project has no model yet" state so the UI can
+// server's error code. Detect the "workflow has no model yet" state so the UI can
 // prompt for one rather than surfacing a raw error.
 function isNoModelErr(e) {
   return !!e && typeof e.message === "string" && /MODEL_NOT_LOADED/.test(e.message);
@@ -809,7 +809,7 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
-        ${projectModelControls()}
+        ${workflowModelControls()}
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -849,7 +849,7 @@ function dashboardView() {
 }
 
 function bindDashboard() {
-  bindProjectModel();
+  bindWorkflowModel();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
@@ -2100,7 +2100,7 @@ function render() {
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
   // user) so the whole app reads as a multi-tenant console.
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${projectModelDialog()}${newOrgDialog()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${newOrgDialog()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -2141,7 +2141,7 @@ function render() {
     root.innerHTML = wrap(noModelView());
     bindTenantBar();
     bindNoModel();
-    bindProjectModel();
+    bindWorkflowModel();
     bindChat();
   } else if (state.view === "bcs") {
     root.innerHTML = wrap(explorerView());
@@ -2177,7 +2177,7 @@ async function ensureMe() {
     // retry once header-less so they land on their default org. The backend stays
     // strict (a non-member selector is always denied); recovery is client-side.
     if (AUTH.org() && isOrgSelectorErr(e)) {
-      AUTH.setOrg(null); // also clears the selected project
+      AUTH.setOrg(null); // also clears the selected workflow
       try {
         state.me = await api("/v1/whoami");
         state.orgs = state.me.organizations || [];
@@ -2303,14 +2303,14 @@ function tenantBar() {
   const orgs = state.orgs || [];
   const curId = me?.organizationId || "";
   const curOrg = orgs.find((o) => o.id === curId) || { id: curId, name: currentOrgName() };
-  const projects = me?.projects || [];
-  const curProj = me?.projectId || "";
-  const emptyOrg = projects.length === 0;
-  const projName = (projects.find((p) => p.id === curProj) || {}).name || (emptyOrg ? "No project" : "Default");
+  const workflows = me?.workflows || [];
+  const curProj = me?.workflowId || "";
+  const emptyOrg = workflows.length === 0;
+  const projName = (workflows.find((p) => p.id === curProj) || {}).name || (emptyOrg ? "No workflow" : "Default");
   const projControl = emptyOrg
-    ? `<a href="#" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no projects yet">+ Create project</a>`
-    : projects.length > 1
-    ? `<select id="proj-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${projects.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === curProj ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>`
+    ? `<a href="#" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no workflows yet">+ Create workflow</a>`
+    : workflows.length > 1
+    ? `<select id="proj-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${workflows.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === curProj ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>`
     : `<a href="#" class="text-sm text-stone-100 hover:text-white">${escapeHtml(projName)}</a>`;
   return `
     <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
@@ -2327,7 +2327,7 @@ function tenantBar() {
         </div>
         ${isAdmin ? `<span class="text-[10px] uppercase font-bold px-1.5 py-px rounded bg-amber-500 text-stone-900" title="Platform superadmin — can switch into any organization (every cross-tenant act is audited)">SUPERUSER</span>` : ""}
         <span class="text-stone-600">›</span>
-        <span class="text-stone-500 text-xs uppercase tracking-wide">Project</span>
+        <span class="text-stone-500 text-xs uppercase tracking-wide">Workflow</span>
         ${projControl}
         <div class="flex-1"></div>
         <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
@@ -2341,7 +2341,7 @@ function tenantBar() {
 
 function bindTenantBar() {
   document.getElementById("proj-switch")?.addEventListener("change", async (e) => {
-    AUTH.setProject(e.target.value);
+    AUTH.setWorkflow(e.target.value);
     await ensureMe();
     onHashChange();
   });
@@ -2353,8 +2353,8 @@ function bindTenantBar() {
   });
 
   // Create-organization dialog (self-service: POST /v1/organizations makes the
-  // caller the owner). The new org provisions a default workspace but no project,
-  // so switching into it lands on the empty-org "create your first project" view.
+  // caller the owner). The new org provisions a default workspace but no workflow,
+  // so switching into it lands on the empty-org "create your first workflow" view.
   const createOrg = async () => {
     if (state.newOrgBusy) return;
     const name = (document.getElementById("new-org-name")?.value || state.newOrgName || "").trim();
@@ -2362,11 +2362,11 @@ function bindTenantBar() {
     state.newOrgBusy = true; state.newOrgErr = null; render();
     try {
       const org = await api("/v1/organizations", { method: "POST", body: JSON.stringify({ name }) });
-      AUTH.setOrg(org.id); // switch into the brand-new org (also clears the selected project)
+      AUTH.setOrg(org.id); // switch into the brand-new org (also clears the selected workflow)
       state.newOrgOpen = false; state.newOrgBusy = false; state.newOrgName = "";
       state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new org
-      state.modelMsg = { ok: true, text: `Organization "${name}" created — you're its owner. Create your first project to get started.` };
-      navigate("#"); // empty new org → the create-first-project screen
+      state.modelMsg = { ok: true, text: `Organization "${name}" created — you're its owner. Create your first workflow to get started.` };
+      navigate("#"); // empty new org → the create-first-workflow screen
       setTimeout(() => { state.modelMsg = null; render(); }, 3000);
     } catch (e) {
       state.newOrgBusy = false;
@@ -2389,7 +2389,7 @@ function bindTenantBar() {
     const id = el.getAttribute("data-org-pick");
     state.orgMenuOpen = false;
     if (id === (state.me?.organizationId || "")) { render(); return; } // already the current org — just close
-    AUTH.setOrg(id); // also clears the selected project
+    AUTH.setOrg(id); // also clears the selected workflow
     state.orgMemberCount = null; state.orgMemberCountFor = null; // invalidate the cached subtitle for the new org
     onHashChange(); // reloads whoami + the current view for the newly selected org
   }));
@@ -2411,7 +2411,7 @@ function bindTenantBar() {
 }
 
 // Self-service create-organization modal, opened from the tenant bar's "+ New org"
-// button. Mirrors projectModelDialog()'s open/busy/err state pattern.
+// button. Mirrors workflowModelDialog()'s open/busy/err state pattern.
 function newOrgDialog() {
   if (!state.newOrgOpen) return "";
   const err = state.newOrgErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.newOrgErr)}</div>` : "";
@@ -2420,7 +2420,7 @@ function newOrgDialog() {
       <div class="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col">
         <div class="px-5 py-4 border-b border-stone-200">
           <div class="text-lg font-semibold">Create organization</div>
-          <div class="text-sm text-stone-500 mt-0.5">A new tenant with its own members, projects, and data. You become its owner — it starts empty, ready for your first project.</div>
+          <div class="text-sm text-stone-500 mt-0.5">A new tenant with its own members, workflows, and data. You become its owner — it starts empty, ready for your first workflow.</div>
         </div>
         <div class="p-5">
           ${err}
@@ -2436,22 +2436,22 @@ function newOrgDialog() {
     </div>`;
 }
 
-// Empty-org state: the org has zero projects (e.g. its last was deleted). The
-// data plane fails closed (409), so we show a create-your-first-project panel
+// Empty-org state: the org has zero workflows (e.g. its last was deleted). The
+// data plane fails closed (409), so we show a create-your-first-workflow panel
 // instead of a broken dashboard.
 function emptyOrgView() {
   return `
     <main class="flex-1 flex items-center justify-center p-8">
       <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
         <div class="text-3xl mb-2">📁</div>
-        <div class="text-lg font-semibold text-stone-900">No projects yet</div>
-        <div class="text-sm text-stone-500 mt-1 mb-5">This organization is empty. Create your first project, then point it at your own Qlerify model — nothing is preloaded.</div>
+        <div class="text-lg font-semibold text-stone-900">No workflows yet</div>
+        <div class="text-sm text-stone-500 mt-1 mb-5">This organization is empty. Create your first workflow, then point it at your own Qlerify model — nothing is preloaded.</div>
         <div class="text-left">
-          <label class="block text-xs text-stone-500 mb-1">Project name</label>
+          <label class="block text-xs text-stone-500 mb-1">Workflow name</label>
           <input id="empty-proj-name" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" placeholder="Q3 Forecast" />
-          <button id="empty-proj-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create project</button>
+          <button id="empty-proj-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create workflow</button>
           <div id="empty-proj-err" class="text-xs text-rose-600 mt-2"></div>
-          <div class="text-[11px] text-stone-400 mt-3">You can also manage projects from <a href="#admin" class="underline">Org Admin</a>.</div>
+          <div class="text-[11px] text-stone-400 mt-3">You can also manage workflows from <a href="#admin" class="underline">Org Admin</a>.</div>
         </div>
       </div>
     </main>`;
@@ -2461,13 +2461,13 @@ function bindEmptyOrg() {
   const create = async () => {
     const errEl = document.getElementById("empty-proj-err");
     const name = document.getElementById("empty-proj-name").value.trim();
-    if (!name) { errEl.textContent = "Project name is required"; return; }
+    if (!name) { errEl.textContent = "Workflow name is required"; return; }
     try {
       const wss = await api("/v1/workspaces");
       const workspaceId = (wss[0] || {}).id;
       if (!workspaceId) { errEl.textContent = "This org has no workspace — create one in Org Admin first."; return; }
-      const proj = await api("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
-      AUTH.setProject(proj.id); // switch straight into the brand-new project
+      const proj = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+      AUTH.setWorkflow(proj.id); // switch straight into the brand-new workflow
       await ensureMe();
       navigate("#");
     } catch (e) { errEl.textContent = e.message; }
@@ -2476,7 +2476,7 @@ function bindEmptyOrg() {
   document.getElementById("empty-proj-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
 }
 
-// A project exists but has no model yet (freshly created — nothing is preloaded).
+// A workflow exists but has no model yet (freshly created — nothing is preloaded).
 // Prompt the user to point it at their own Qlerify model (opens the same dialog
 // the dashboard's "⚙ Set model" button uses).
 function noModelView() {
@@ -2484,9 +2484,9 @@ function noModelView() {
     <main class="flex-1 flex items-center justify-center p-8">
       <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
         <div class="text-3xl mb-2">🧩</div>
-        <div class="text-lg font-semibold text-stone-900">This project has no model yet</div>
+        <div class="text-lg font-semibold text-stone-900">This workflow has no model yet</div>
         <div class="text-sm text-stone-500 mt-1 mb-5">Point it at a Qlerify model to generate its workflow and data. Nothing is preloaded — the model is yours.</div>
-        <button id="nomodel-set" class="rounded-md bg-stone-900 text-white py-2 px-4 text-sm font-medium hover:bg-stone-800">⚙ Set this project's model</button>
+        <button id="nomodel-set" class="rounded-md bg-stone-900 text-white py-2 px-4 text-sm font-medium hover:bg-stone-800">⚙ Set this workflow's model</button>
       </div>
     </main>`;
 }
@@ -2540,20 +2540,20 @@ function bindLogin() {
 
 async function loadAdmin() {
   const tab = state.admin?.tab || "general";
-  const [members, roles, markings, environments, workspaces, projects, audit] = await Promise.all([
+  const [members, roles, markings, environments, workspaces, workflows, audit] = await Promise.all([
     api("/v1/members").catch(() => []),
     api("/v1/role-assignments").catch(() => []),
     api("/v1/markings").catch(() => []),
     api("/v1/environments").catch(() => []),
     api("/v1/workspaces").catch(() => []),
-    api("/v1/projects").catch(() => []),
+    api("/v1/workflows").catch(() => []),
     api("/v1/audit?limit=60").catch(() => []),
   ]);
-  state.admin = { tab, members, roles, markings, environments, workspaces, projects, audit };
+  state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit };
   render();
 }
 
-const ADMIN_TABS = [["general", "General"], ["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["projects", "Projects"], ["audit", "Audit log"]];
+const ADMIN_TABS = [["general", "General"], ["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["workflows", "Workflows"], ["audit", "Audit log"]];
 
 function adminView() {
   const a = state.admin || { tab: "general" };
@@ -2599,7 +2599,7 @@ function adminTabContent(tab, a) {
       : !delOpen
       ? `<button id="org-delete-open" class="px-4 py-2 text-sm rounded-md bg-rose-600 text-white hover:bg-rose-700 font-medium">Delete this organisation</button>`
       : `<div class="rounded-md border border-rose-300 bg-white p-3 max-w-md">
-           <div class="text-xs text-stone-700 mb-2">This permanently deletes <b>${escapeHtml(orgName)}</b> and every project, model, dataset, member, and audit record it owns. Type <span class="mono font-semibold">${escapeHtml(orgName)}</span> below to confirm.</div>
+           <div class="text-xs text-stone-700 mb-2">This permanently deletes <b>${escapeHtml(orgName)}</b> and every workflow, model, dataset, member, and audit record it owns. Type <span class="mono font-semibold">${escapeHtml(orgName)}</span> below to confirm.</div>
            <input id="org-delete-confirm" autocomplete="off" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" placeholder="${escapeHtml(orgName)}" />
            <div class="flex items-center gap-2">
              <button id="org-delete-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
@@ -2621,7 +2621,7 @@ function adminTabContent(tab, a) {
         </div>
         <div class="rounded-lg border border-rose-300 bg-rose-50/40 p-5">
           <div class="text-sm font-semibold text-rose-800">Danger zone</div>
-          <div class="text-xs text-rose-700 mt-0.5 mb-3">Deleting this organisation permanently removes all of its projects, models, data, members, and history. This action cannot be undone.</div>
+          <div class="text-xs text-rose-700 mt-0.5 mb-3">Deleting this organisation permanently removes all of its workflows, models, data, members, and history. This action cannot be undone.</div>
           ${dangerInner}
         </div>
       </div>`;
@@ -2649,7 +2649,7 @@ function adminTabContent(tab, a) {
       <td class="px-4 py-2 text-stone-600">${escapeHtml(r.scopeType)}: <span class="mono text-xs">${escapeHtml(String(r.scopeId).slice(0, 12))}</span></td>
     </tr>`).join("");
     const roleOpts = ["owner", "editor", "viewer", "deployer", "org_admin"].map((k) => `<option>${k}</option>`).join("");
-    const scopeOpts = ["organization", "environment", "workspace", "project", "resource"].map((k) => `<option>${k}</option>`).join("");
+    const scopeOpts = ["organization", "environment", "workspace", "workflow", "resource"].map((k) => `<option>${k}</option>`).join("");
     return `
       <div class="mb-4 flex items-end gap-2 flex-wrap">
         <div><label class="block text-xs text-stone-500 mb-1">Principal id</label><input id="r-principal" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm mono" placeholder="identity id" /></div>
@@ -2703,13 +2703,13 @@ function adminTabContent(tab, a) {
       </div>
       ${tbl(["Workspace", "Environment", "Lifecycle"], rows, "No workspaces.")}`;
   }
-  if (tab === "projects") {
-    const sysProjId = state.me?.systemProjectId;
-    // The system/demo project is infrastructure, not a manageable tenant project
+  if (tab === "workflows") {
+    const sysProjId = state.me?.systemWorkflowId;
+    // The system/demo workflow is infrastructure, not a manageable tenant workflow
     // (it can't be deleted and is re-seeded every boot). Keep it OUT of this
     // management table — it still appears in the breadcrumb for navigation.
-    const manageable = (a.projects || []).filter((pr) => pr.id !== sysProjId);
-    const hidSystem = (a.projects || []).length !== manageable.length;
+    const manageable = (a.workflows || []).filter((pr) => pr.id !== sysProjId);
+    const hidSystem = (a.workflows || []).length !== manageable.length;
     const rows = manageable.map((pr) => `<tr>
       <td class="px-4 py-2 font-medium">${escapeHtml(pr.name)}</td>
       <td class="px-4 py-2 mono text-xs text-stone-500">${escapeHtml(String(pr.workspaceId).slice(0, 12))}</td>
@@ -2717,15 +2717,15 @@ function adminTabContent(tab, a) {
       <td class="px-4 py-2 text-right"><button data-proj-del="${escapeHtml(pr.id)}" data-proj-name="${escapeHtml(pr.name)}" class="text-xs px-2 py-1 rounded border border-rose-200 text-rose-700 hover:bg-rose-50">Delete</button></td>
     </tr>`).join("");
     const wsOpts = (a.workspaces || []).map((w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
-    const emptyMsg = "No projects yet — create one and point it at a Qlerify model.";
+    const emptyMsg = "No workflows yet — create one and point it at a Qlerify model.";
     return `
       <div class="mb-4 flex items-end gap-2">
-        <div><label class="block text-xs text-stone-500 mb-1">Project</label><input id="proj-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="Q3 Forecast" /></div>
+        <div><label class="block text-xs text-stone-500 mb-1">Workflow</label><input id="proj-name" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="Q3 Forecast" /></div>
         <div><label class="block text-xs text-stone-500 mb-1">Workspace</label><select id="proj-ws" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm">${wsOpts}</select></div>
-        <button id="proj-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add project</button>
+        <button id="proj-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add workflow</button>
       </div>
-      <div class="text-xs text-stone-500 mb-3">A new project starts empty — point it at your own Qlerify model (⚙ Set model) to give it data. Switch projects from the breadcrumb at the top. Deleting a project permanently drops its tables, data, run history, and model versions.</div>
-      ${tbl(["Project", "Workspace", "Lifecycle", ""], rows, emptyMsg)}`;
+      <div class="text-xs text-stone-500 mb-3">A new workflow starts empty — point it at your own Qlerify model (⚙ Set model) to give it data. Switch workflows from the breadcrumb at the top. Deleting a workflow permanently drops its tables, data, run history, and model versions.</div>
+      ${tbl(["Workflow", "Workspace", "Lifecycle", ""], rows, emptyMsg)}`;
   }
   // audit
   const rows = (a.audit || []).map((ev) => `<tr>
@@ -2783,18 +2783,18 @@ function bindAdmin() {
   document.getElementById("proj-add")?.addEventListener("click", () => act(async () => {
     const name = document.getElementById("proj-name").value.trim();
     const workspaceId = document.getElementById("proj-ws").value;
-    if (!name) throw new Error("Project name is required");
+    if (!name) throw new Error("Workflow name is required");
     if (!workspaceId) throw new Error("Pick a workspace");
-    await api("/v1/projects", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+    await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
   }));
   document.querySelectorAll("[data-proj-del]").forEach((el) => el.addEventListener("click", () => act(async () => {
     const id = el.dataset.projDel;
-    const name = el.dataset.projName || "this project";
-    if (!confirm(`Delete project "${name}"?\n\nThis permanently drops its tables, all data, run history, and model versions. This cannot be undone.`)) return;
-    await api(`/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
-    // If we just deleted the active project, fall back to the org's Default.
-    if (AUTH.project() === id) AUTH.setProject(null);
-    // Refresh who-am-I so the breadcrumb picker drops the deleted project.
+    const name = el.dataset.projName || "this workflow";
+    if (!confirm(`Delete workflow "${name}"?\n\nThis permanently drops its tables, all data, run history, and model versions. This cannot be undone.`)) return;
+    await api(`/v1/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
+    // If we just deleted the active workflow, fall back to the org's Default.
+    if (AUTH.workflow() === id) AUTH.setWorkflow(null);
+    // Refresh who-am-I so the breadcrumb picker drops the deleted workflow.
     try { state.me = await api("/v1/whoami"); } catch {}
   })));
   document.getElementById("audit-verify")?.addEventListener("click", async () => {
@@ -2855,7 +2855,7 @@ function bindAdmin() {
       const remaining = (state.orgs || []).filter((o) => o.id !== orgId);
       state.me = null; state.orgs = []; state.admin = null;
       if (remaining.length) {
-        AUTH.setOrg(remaining[0].id); // also clears the selected project
+        AUTH.setOrg(remaining[0].id); // also clears the selected workflow
         state.modelMsg = { ok: true, text: `Organisation "${name}" was permanently deleted.` };
         navigate("#");
         setTimeout(() => { state.modelMsg = null; render(); }, 3500);

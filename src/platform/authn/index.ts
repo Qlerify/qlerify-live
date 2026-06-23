@@ -139,27 +139,27 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
   if (!org) throw new AuthError("organization not found");
   if (org.status !== "active") throw new AuthError(`organization "${org.slug}" is ${org.status}`);
 
-  // Active project: validated to be a project in THIS org (never trusted as a raw
+  // Active workflow: validated to be a workflow in THIS org (never trusted as a raw
   // id). An invalid / cross-org / stale selector falls back to the org's "Default"
-  // project rather than failing the request — the client never gets a project it
+  // workflow rather than failing the request — the client never gets a workflow it
   // didn't legitimately select, but a stale picker value can't lock anyone out.
-  // The system org is treated like any other org here (no special demo project).
-  const projectSelector = header(headers, "x-project-id");
-  let projectId: string | undefined;
-  if (projectSelector) {
-    const proj = await prisma.platProject.findFirst({ where: { id: projectSelector, organizationId: org.id }, select: { id: true } });
-    projectId = proj?.id;
+  // The system org is treated like any other org here (no special demo workflow).
+  const workflowSelector = header(headers, "x-workflow-id");
+  let workflowId: string | undefined;
+  if (workflowSelector) {
+    const proj = await prisma.platWorkflow.findFirst({ where: { id: workflowSelector, organizationId: org.id }, select: { id: true } });
+    workflowId = proj?.id;
   }
-  if (!projectId) {
-    // Land on the org's "Default" project when present, else its oldest. If the org
-    // has NO projects (a fresh org, or its last was deleted), leave projectId UNSET
-    // — the empty-org state: the control plane (whoami / create-project) still
-    // works, but the data plane fails closed (NoActiveProjectError → 409) until the
-    // user creates a project and points it at a model.
+  if (!workflowId) {
+    // Land on the org's "Default" workflow when present, else its oldest. If the org
+    // has NO workflows (a fresh org, or its last was deleted), leave workflowId UNSET
+    // — the empty-org state: the control plane (whoami / create-workflow) still
+    // works, but the data plane fails closed (NoActiveWorkflowError → 409) until the
+    // user creates a workflow and points it at a model.
     const def =
-      (await prisma.platProject.findFirst({ where: { organizationId: org.id, name: "Default" }, orderBy: { createdAt: "asc" }, select: { id: true } })) ??
-      (await prisma.platProject.findFirst({ where: { organizationId: org.id }, orderBy: { createdAt: "asc" }, select: { id: true } }));
-    projectId = def?.id; // undefined ⇒ empty org
+      (await prisma.platWorkflow.findFirst({ where: { organizationId: org.id, name: "Default" }, orderBy: { createdAt: "asc" }, select: { id: true } })) ??
+      (await prisma.platWorkflow.findFirst({ where: { organizationId: org.id }, orderBy: { createdAt: "asc" }, select: { id: true } }));
+    workflowId = def?.id; // undefined ⇒ empty org
   }
 
   return {
@@ -167,7 +167,7 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
     principal: { id: identity.id, type: "identity" },
     identityId: identity.id,
     subject,
-    projectId,
+    workflowId,
     isPlatformAdmin: platformAdmin,
     ...(actingAsPlatformAdmin ? { actingAsPlatformAdmin: true } : {}),
   };

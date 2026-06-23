@@ -23,9 +23,9 @@ export interface TenantContext {
   identityId?: string;
   /** The IdP subject the request authenticated as (audit/diagnostics). */
   subject?: string;
-  /** The active project within the org (from X-Project-Id, validated in-org;
-   * defaults to the org's "Default" project). Scopes the live model + data. */
-  projectId?: string;
+  /** The active workflow within the org (from X-Workflow-Id, validated in-org;
+   * defaults to the org's "Default" workflow). Scopes the live model + data. */
+  workflowId?: string;
   /** This identity holds a global platform-admin grant (superuser). */
   isPlatformAdmin?: boolean;
   /** This request entered a NON-member org via platform-admin break-glass (§10).
@@ -38,7 +38,7 @@ export interface TenantContext {
 export type Permission = "view" | "edit" | "administer" | "deploy";
 
 /** Where a role assignment / resource hangs in the containment tree (§6.2). */
-export type ScopeType = "organization" | "environment" | "workspace" | "project" | "resource";
+export type ScopeType = "organization" | "environment" | "workspace" | "workflow" | "resource";
 
 /** Built-in role keys (§6.3). Custom roles (Phase 2) are additional keys. */
 export type BuiltinRoleKey = "owner" | "editor" | "viewer" | "deployer" | "org_admin";

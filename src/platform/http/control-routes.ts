@@ -11,7 +11,7 @@ import { recordAudit, verifyAuditChain } from "../audit/index.js";
 import { isPlatformAdmin } from "../authn/index.js";
 import { createSession, revokeSession, verifyPassword } from "../authn/sessions.js";
 import { ensureAllowed } from "../authz.js";
-import { newId, SYSTEM_ORG_ID, SYSTEM_PROJECT_ID } from "../ids.js";
+import { newId, SYSTEM_ORG_ID, SYSTEM_WORKFLOW_ID } from "../ids.js";
 import { authorize, resourceRef } from "../pdp/index.js";
 import { ACTION_PERMISSION_MAP } from "../pdp/action-map.js";
 import {
@@ -19,15 +19,15 @@ import {
   assignRole,
   createEnvironment,
   createOrganization,
-  createProject,
+  createWorkflow,
   createWorkspace,
   deleteOrganization,
-  deleteProject,
+  deleteWorkflow,
   ensureIdentity,
   updateOrganization,
 } from "../provisioning/index.js";
 import { requireTenant } from "../tenancy/context.js";
-import { setActiveProjectModel } from "../../twin/apply.js";
+import { setActiveWorkflowModel } from "../../twin/apply.js";
 import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
 import {
   createVersion,
@@ -94,12 +94,12 @@ export function registerControlRoutes(app: FastifyInstance) {
         isPlatformAdmin: !!ctx.isPlatformAdmin,
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
         organizations: await accessibleOrgs(ctx),
-        projectId: ctx.projectId ?? null,
-        isSystemProject: ctx.projectId === SYSTEM_PROJECT_ID, // always false now (no system project row); kept for client compat
-        systemProjectId: SYSTEM_PROJECT_ID, // sentinel; no real project carries it
+        workflowId: ctx.workflowId ?? null,
+        isSystemWorkflow: ctx.workflowId === SYSTEM_WORKFLOW_ID, // always false now (no system workflow row); kept for client compat
+        systemWorkflowId: SYSTEM_WORKFLOW_ID, // sentinel; no real workflow carries it
 
-        // The org's projects, readable by any member (for the breadcrumb picker).
-        projects: await prisma.platProject.findMany({
+        // The org's workflows, readable by any member (for the breadcrumb picker).
+        workflows: await prisma.platWorkflow.findMany({
           where: { organizationId: ctx.organizationId },
           select: { id: true, name: true },
           orderBy: { createdAt: "asc" },
@@ -294,7 +294,7 @@ export function registerControlRoutes(app: FastifyInstance) {
       const id = (req.params as any).id as string;
       const ont = await getOntologyById(ctx.organizationId, id); // scoped → null for other orgs
       if (!ont) return reply.code(404).send({ error: "NOT_FOUND", message: "ontology not found" });
-      await ensureAllowed("ontology.read", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, projectId: null }, ctx);
+      await ensureAllowed("ontology.read", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, workflowId: null }, ctx);
       const versions = await listVersions(ctx.organizationId, ont.id);
       return { id: ont.id, name: ont.name, resourceId: ont.resourceId, currentVersionId: ont.currentVersionId, versions };
     } catch (err) {
@@ -308,7 +308,7 @@ export function registerControlRoutes(app: FastifyInstance) {
       const id = (req.params as any).id as string;
       const ont = await getOntologyById(ctx.organizationId, id);
       if (!ont) return reply.code(404).send({ error: "NOT_FOUND", message: "ontology not found" });
-      await ensureAllowed("ontology.read", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, projectId: null }, ctx);
+      await ensureAllowed("ontology.read", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, workflowId: null }, ctx);
       const content = await currentContent(ctx.organizationId, ont.id);
       if (!content) return reply.code(404).send({ error: "NOT_FOUND", message: "no version content" });
       return content;
@@ -326,7 +326,7 @@ export function registerControlRoutes(app: FastifyInstance) {
       const ont = await getOntologyById(ctx.organizationId, id);
       if (!ont) return reply.code(404).send({ error: "NOT_FOUND", message: "ontology not found" });
       // Writing a new version requires `edit` on the ontology resource.
-      await ensureAllowed("ontology.write", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, projectId: null }, ctx);
+      await ensureAllowed("ontology.write", { id: ont.resourceId, organizationId: ctx.organizationId, scopeType: "resource", environmentId: ont.environmentId, workspaceId: ont.workspaceId, workflowId: null }, ctx);
       const result = await createVersion(ctx.organizationId, ont.id, body.workflow, body.overlay ?? null, { source: body.source ?? "edit", createdBy: ctx.principal.id });
       return reply.code(result.changed ? 201 : 200).send(result);
     } catch (err) {
@@ -444,13 +444,13 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get("/v1/projects", async (req, reply) => {
+  app.get("/v1/workflows", async (req, reply) => {
     try {
       const ctx = requireTenant();
       await assertOrgAdmin(ctx);
       const wsId = (req.query as any)?.workspaceId as string | undefined;
       if (wsId) await inOrgOr404(await prisma.platWorkspace.findFirst({ where: { id: wsId, organizationId: ctx.organizationId } }), "workspace");
-      return prisma.platProject.findMany({
+      return prisma.platWorkflow.findMany({
         where: { organizationId: ctx.organizationId, ...(wsId ? { workspaceId: wsId } : {}) },
         select: { id: true, name: true, workspaceId: true, lifecycleState: true },
         orderBy: { createdAt: "asc" },
@@ -476,7 +476,7 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
-  // --- Workspace / Project creation (org-admin gated) ---------------------
+  // --- Workspace / Workflow creation (org-admin gated) ---------------------
   app.post("/v1/workspaces", async (req, reply) => {
     try {
       const ctx = requireTenant();
@@ -490,38 +490,38 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/v1/projects", async (req, reply) => {
+  app.post("/v1/workflows", async (req, reply) => {
     try {
       const ctx = requireTenant();
       const body = (req.body ?? {}) as { name?: string; workspaceId?: string };
       if (!body.name || !body.workspaceId) throw new DomainError("name and workspaceId are required");
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
-      const proj = await createProject(ctx.organizationId, body.workspaceId, body.name, ctx.principal.id);
+      const proj = await createWorkflow(ctx.organizationId, body.workspaceId, body.name, ctx.principal.id);
       return reply.code(201).send({ id: proj.id, name: proj.name, workspaceId: proj.workspaceId });
     } catch (err) {
       return fail(reply, err);
     }
   });
 
-  // Delete a project and cascade-drop its data plane + model metadata. Destructive
+  // Delete a workflow and cascade-drop its data plane + model metadata. Destructive
   // → org-admin gated (same as creation; §6.4 maps deletion to `administer`). The
-  // system default project is refused by deleteProject().
-  app.delete("/v1/projects/:id", async (req, reply) => {
+  // system default workflow is refused by deleteWorkflow().
+  app.delete("/v1/workflows/:id", async (req, reply) => {
     try {
       const ctx = requireTenant();
-      const projectId = (req.params as { id: string }).id;
+      const workflowId = (req.params as { id: string }).id;
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
-      const result = await deleteProject(ctx.organizationId, projectId, ctx.principal.id);
+      const result = await deleteWorkflow(ctx.organizationId, workflowId, ctx.principal.id);
       return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);
     }
   });
 
-  // Set the ACTIVE (non-system) project's own model from a Qlerify workflow.json.
-  // Stores a new version + rebuilds ONLY this project's data plane (system + other
-  // projects untouched). Org-admin gated.
-  app.put("/v1/project/model", async (req, reply) => {
+  // Set the ACTIVE (non-system) workflow's own model from a Qlerify workflow.json.
+  // Stores a new version + rebuilds ONLY this workflow's data plane (system + other
+  // workflows untouched). Org-admin gated.
+  app.put("/v1/workflow/model", async (req, reply) => {
     try {
       const ctx = requireTenant();
       const body = (req.body ?? {}) as { workflow?: string; overlay?: string | null; sourceUrl?: string };
@@ -539,7 +539,7 @@ export function registerControlRoutes(app: FastifyInstance) {
       if (typeof workflow !== "string" || !workflow.trim()) {
         throw new DomainError("Provide a Qlerify model link, or upload/paste a workflow.json");
       }
-      const result = await setActiveProjectModel(workflow, body.overlay ?? null);
+      const result = await setActiveWorkflowModel(workflow, body.overlay ?? null);
       return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);

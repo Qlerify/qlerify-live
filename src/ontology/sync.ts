@@ -241,7 +241,7 @@ async function fetchSpecification(): Promise<unknown> {
 }
 
 /** Fetch + serialize a Qlerify model from a modeller workflow URL — used to set a
- * project's OWN model from a link. Returns the workflow.json text. Throws a clear
+ * workflow's OWN model from a link. Returns the workflow.json text. Throws a clear
  * error on a malformed URL or a fetch failure. */
 export async function fetchSpecificationFromUrl(workflowUrl: string): Promise<string> {
   const { projectId, workflowId } = parseWorkflowUrl(workflowUrl); // throws on a bad URL

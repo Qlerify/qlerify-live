@@ -39,7 +39,7 @@ export async function buildServer() {
   registerTenantPlugin(app);
 
   // Uniform error mapping — a safety net for routes that let a handled error
-  // bubble (e.g. GET query routes with no local try/catch). Keeps NoActiveProject
+  // bubble (e.g. GET query routes with no local try/catch). Keeps NoActiveWorkflow
   // and friends as clean 4xx instead of a default 500. Real infra errors → 500.
   app.setErrorHandler((err, req, reply) => {
     if (isHandledError(err)) {

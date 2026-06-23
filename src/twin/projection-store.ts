@@ -15,7 +15,7 @@
 
 import { prisma } from "../db.js";
 import type { Ontology, EntitySchema } from "../ontology/model.js";
-import { currentOrgId, currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { currentOrgId, currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
 import { SYSTEM_ORG_ID } from "../platform/ids.js";
 
 // Physical table prefix that isolates raw-SQL projections from Prisma tables.
@@ -30,25 +30,25 @@ function ident(name: string): string {
   return `"${name}"`;
 }
 
-// Per-PROJECT namespacing. The SYSTEM default project uses the un-prefixed
-// `gen_<Entity>` tables (the demo's data, untouched). Every OTHER project gets
+// Per-WORKFLOW namespacing. The SYSTEM default workflow uses the un-prefixed
+// `gen_<Entity>` tables (the demo's data, untouched). Every OTHER workflow gets
 // its own namespace `gen__p<projectHex>_<Entity>` (double underscore) so two
-// projects' models/data never collide. The active project comes from ALS.
-const PROJECT_MARK = "gen__p";
+// workflows' models/data never collide. The active workflow comes from ALS.
+const WORKFLOW_MARK = "gen__p";
 
-/** Hex project key for the active project, or null for the system project. */
+/** Hex workflow key for the active workflow, or null for the system workflow. */
 function projKey(): string | null {
-  return isSystemProject() ? null : currentProjectId().replace(/-/g, "");
+  return isSystemWorkflow() ? null : currentWorkflowId().replace(/-/g, "");
 }
 
-/** Physical table prefix for the ACTIVE project's scope. */
+/** Physical table prefix for the ACTIVE workflow's scope. */
 function physPrefix(): string {
   const pk = projKey();
-  return pk ? `${PROJECT_MARK}${pk}_` : TABLE_PREFIX;
+  return pk ? `${WORKFLOW_MARK}${pk}_` : TABLE_PREFIX;
 }
 
 /** Quoted PHYSICAL table identifier for a logical entity name, in the active
- * project's namespace. */
+ * workflow's namespace. */
 function phys(logical: string): string {
   return ident(physPrefix() + logical);
 }
@@ -62,7 +62,7 @@ function phys(logical: string): string {
 const orgColCache = new Map<string, boolean>();
 
 async function hasOrgColumn(table: string): Promise<boolean> {
-  const physName = physPrefix() + table; // cache per PHYSICAL table — one logical name maps to a different table per project
+  const physName = physPrefix() + table; // cache per PHYSICAL table — one logical name maps to a different table per workflow
   const cached = orgColCache.get(physName);
   if (cached !== undefined) return cached;
   const has = (await tableColumns(table)).has("organization_id");
@@ -102,8 +102,8 @@ export function tableFor(entity: EntitySchema): string {
 }
 
 function createTableSql(entity: EntitySchema): string {
-  // Guard the project namespace: a model entity named "_p…" could otherwise
-  // collide with another project's gen__p<hex>_… tables.
+  // Guard the workflow namespace: a model entity named "_p…" could otherwise
+  // collide with another workflow's gen__p<hex>_… tables.
   if (entity.name.startsWith("_")) {
     throw new Error(`reserved entity name "${entity.name}": model entity names may not start with "_"`);
   }
@@ -131,7 +131,7 @@ function createTableSql(entity: EntitySchema): string {
   return `CREATE TABLE ${phys(entity.name)} (${cols.join(", ")})`;
 }
 
-/** Logical names of the projection tables in the ACTIVE project's namespace. */
+/** Logical names of the projection tables in the ACTIVE workflow's namespace. */
 export async function listProjectionTables(): Promise<string[]> {
   const prefix = physPrefix();
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
@@ -139,9 +139,9 @@ export async function listProjectionTables(): Promise<string[]> {
   );
   return rows
     .map((r) => r.name)
-    // The SYSTEM scope must EXCLUDE the project namespace: a prefix match alone
+    // The SYSTEM scope must EXCLUDE the workflow namespace: a prefix match alone
     // would catch gen__p… because they also start with "gen_".
-    .filter((n) => n.startsWith(prefix) && (prefix !== TABLE_PREFIX || !n.startsWith(PROJECT_MARK)))
+    .filter((n) => n.startsWith(prefix) && (prefix !== TABLE_PREFIX || !n.startsWith(WORKFLOW_MARK)))
     .map((n) => n.slice(prefix.length));
 }
 
@@ -169,15 +169,15 @@ export async function applyModelTables(ontology: Ontology): Promise<ApplyResult>
   return { dropped, created };
 }
 
-/** Drop every projection table in a SPECIFIC project's namespace
+/** Drop every projection table in a SPECIFIC workflow's namespace
  * (gen__p<projectHex>_*), independent of the active ALS context. This is the
- * control-plane teardown used by project deletion: it tears down a project's
- * whole data plane from outside that project's request scope. Returns the
- * physical table names dropped. The system default project's un-prefixed `gen_`
+ * control-plane teardown used by workflow deletion: it tears down a workflow's
+ * whole data plane from outside that workflow's request scope. Returns the
+ * physical table names dropped. The system default workflow's un-prefixed `gen_`
  * tables can NEVER match this `gen__p…` prefix, so the demo is structurally safe
- * even if this is somehow called with the system project id. */
-export async function dropProjectionTablesForProject(projectId: string): Promise<string[]> {
-  const prefix = `${PROJECT_MARK}${projectId.replace(/-/g, "")}_`;
+ * even if this is somehow called with the system workflow id. */
+export async function dropProjectionTablesForWorkflow(workflowId: string): Promise<string[]> {
+  const prefix = `${WORKFLOW_MARK}${workflowId.replace(/-/g, "")}_`;
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
     `SELECT name FROM sqlite_master WHERE type='table'`,
   );
@@ -198,7 +198,7 @@ export async function ensureTable(entity: EntitySchema): Promise<void> {
   orgColCache.set(physPrefix() + entity.name, true); // freshly created → has the org column
 }
 
-/** Does a projection table exist for this logical entity name (active project)? */
+/** Does a projection table exist for this logical entity name (active workflow)? */
 export async function tableExists(logical: string): Promise<boolean> {
   const rows = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
     `SELECT count(*) as n FROM sqlite_master WHERE type='table' AND name = ?`,

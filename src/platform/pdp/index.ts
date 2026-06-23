@@ -30,7 +30,7 @@ export interface AuthzResource {
   organizationId: string;
   /** Where this sits in the tree; defaults to "resource". */
   scopeType?: ScopeType;
-  projectId?: string | null;
+  workflowId?: string | null;
   workspaceId?: string | null;
   environmentId?: string | null;
 }
@@ -157,7 +157,7 @@ export async function authorize(
   }
 
   // 2. DAC (ReBAC) — gather role assignments across the resource's whole
-  //    containment chain (resource → project → workspace → environment → org).
+  //    containment chain (resource → workflow → workspace → environment → org).
   //    A role at any ancestor scope flows down (`parent->permission`), so the
   //    union of granted permissions over the chain is the effective set.
   const required_perm: Permission = actionToPermission(action);
@@ -175,7 +175,7 @@ export async function authorize(
   const scopes: Array<{ scopeType: ScopeType; scopeId: string }> = [
     { scopeType: (resource.scopeType ?? "resource"), scopeId: resource.id },
   ];
-  if (resource.projectId) scopes.push({ scopeType: "project", scopeId: resource.projectId });
+  if (resource.workflowId) scopes.push({ scopeType: "workflow", scopeId: resource.workflowId });
   if (resource.workspaceId) scopes.push({ scopeType: "workspace", scopeId: resource.workspaceId });
   if (resource.environmentId) scopes.push({ scopeType: "environment", scopeId: resource.environmentId });
   scopes.push({ scopeType: "organization", scopeId: organizationId });
@@ -212,7 +212,7 @@ export async function authorize(
 export function resourceRef(row: {
   id: string;
   organizationId: string;
-  projectId?: string | null;
+  workflowId?: string | null;
   workspaceId?: string | null;
   environmentId?: string | null;
 }): AuthzResource {
@@ -220,7 +220,7 @@ export function resourceRef(row: {
     id: row.id,
     organizationId: row.organizationId,
     scopeType: "resource",
-    projectId: row.projectId ?? null,
+    workflowId: row.workflowId ?? null,
     workspaceId: row.workspaceId ?? null,
     environmentId: row.environmentId ?? null,
   };

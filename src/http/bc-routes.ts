@@ -159,7 +159,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
     if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
     const limit = Math.max(1, Math.min(50, Number((req.body as any)?.limit ?? 5)));
     try {
-      // getOntology() is inside the try so a project with no model yet yields a
+      // getOntology() is inside the try so a workflow with no model yet yields a
       // clean ModelNotLoadedError (409) rather than an unhandled throw.
       const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
       if (!entity) return reply.code(400).send({ error: "NO_ENTITY", message: `"${a.targetEntity}" is not an entity or value object in the model` });

@@ -15,7 +15,7 @@ datasource db {
 
 // ---------------------------------------------------------------------------
 // Event log — append-only record of every domain event the simulator emits.
-// Model-agnostic: each row is keyed by org + project + run, so it works for
+// Model-agnostic: each row is keyed by org + workflow + run, so it works for
 // whatever Qlerify model is loaded. Projection/state tables are raw-SQL `gen_`
 // tables created per-model at runtime (see src/twin/projection-store.ts), not
 // Prisma models, so no domain tables live in this schema.
@@ -38,15 +38,15 @@ model EventLog {
   // single emit() chokepoint from the resolved tenant context (null = legacy
   // pre-tenancy rows, read as the system org). See src/platform/*.
   organizationId String?
-  // The project (within the org) this fact belongs to (null = the system default
-  // project / legacy). Enables per-project data scoping in the simulator.
-  projectId      String?
+  // The workflow (within the org) this fact belongs to (null = the system default
+  // workflow / legacy). Enables per-workflow data scoping in the simulator.
+  workflowId     String?
 
   @@index([occurredAt])
   @@index([eventRef])
   @@index([demandId, occurredAt])
   @@index([organizationId, occurredAt])
-  @@index([projectId, occurredAt])
+  @@index([workflowId, occurredAt])
 }
 
 // ===========================================================================
@@ -55,7 +55,7 @@ model EventLog {
 // All control-plane / tenancy tables are physically namespaced with `plat_`
 // (via @@map) so they never collide with the runtime `gen_` projection store.
 // Model names are `Plat*`-prefixed for the same reason (the spec's generic
-// `Project`/`Resource` would otherwise clash with a loaded model's own entities).
+// `Workflow`/`Resource` would otherwise clash with a loaded model's own entities).
 //
 // SQLite caveat (DISCLOSED, not faked): SQLite has no ROW LEVEL SECURITY. The
 // composite foreign keys below give the spec's §8.1 "a child cannot reference a
@@ -124,14 +124,14 @@ model PlatWorkspace {
 
   // Composite FK: the workspace's environment MUST belong to the same org.
   environment    PlatEnvironment @relation(fields: [environmentId, organizationId], references: [id, organizationId])
-  projects       PlatProject[]
+  workflows      PlatWorkflow[]
 
   @@unique([id, organizationId])
   @@unique([organizationId, environmentId, name])
   @@map("plat_workspaces")
 }
 
-model PlatProject {
+model PlatWorkflow {
   id             String   @id @default(uuid())
   organizationId String
   workspaceId    String
@@ -139,16 +139,16 @@ model PlatProject {
   lifecycleState String   @default("active")
   createdAt      DateTime @default(now())
 
-  // Composite FK: the project's workspace MUST belong to the same org.
+  // Composite FK: the workflow's workspace MUST belong to the same org.
   workspace      PlatWorkspace @relation(fields: [workspaceId, organizationId], references: [id, organizationId])
 
   @@unique([id, organizationId])
   @@unique([organizationId, workspaceId, name])
-  @@map("plat_projects")
+  @@map("plat_workflows")
 }
 
 // --- Resource base model (§8.2) --------------------------------------------
-// The authorization unit. Org/env/workspace/project-scoped (any of the parents
+// The authorization unit. Org/env/workspace/workflow-scoped (any of the parents
 // may be null per §8.2). Typed assets (Ontology, Dataset, …) extend it 1:1.
 // scopeKey collapses the nullable scope columns into a single comparable text
 // so name-uniqueness works without Postgres `NULLS NOT DISTINCT` (§8.2 note).
@@ -157,13 +157,13 @@ model PlatResource {
   organizationId String
   environmentId  String?
   workspaceId    String?
-  projectId      String?
+  workflowId     String?
   resourceType   String                  // Ontology | Dataset | Pipeline | …
   name           String
   ownerId        String                  // principal id
   classification String?
   lifecycleState String   @default("active")   // active | archived | deleted
-  scopeKey       String                  // app-computed: env/-/ws/-/proj key for uniqueness
+  scopeKey       String                  // app-computed: env/-/ws/-/wf key for uniqueness
   version        Int      @default(1)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -278,14 +278,14 @@ model PlatRole {
 }
 
 // The source of record that projects into ReBAC tuples (§6.3). principal +
-// role + scope. scopeType ∈ organization|environment|workspace|project|resource.
+// role + scope. scopeType ∈ organization|environment|workspace|workflow|resource.
 model PlatRoleAssignment {
   id             String   @id @default(uuid())
   organizationId String
   principalId    String
   principalType  String                  // identity | group | service_account
   roleKey        String                  // owner | editor | viewer | deployer | org_admin
-  scopeType      String                  // organization | environment | workspace | project | resource
+  scopeType      String                  // organization | environment | workspace | workflow | resource
   scopeId        String
   grantedBy      String?
   grantedAt      DateTime @default(now())
@@ -381,7 +381,7 @@ model PlatOntology {
   resourceId       String   @unique      // 1:1 with its PlatResource (authz unit)
   environmentId    String?
   workspaceId      String?
-  projectId        String?               // the project this model belongs to (null = org-level/legacy)
+  workflowId       String?               // the workflow this model belongs to (null = org-level/legacy)
   name             String
   currentVersionId String?               // pointer → PlatOntologyVersion.id (manifest.current)
   headBranchId     String?               // default "main" branch

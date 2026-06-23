@@ -3,12 +3,12 @@
 // Two jobs:
 //  1. seedSystemOrg() — idempotent boot seed. Creates the SYSTEM tenant (org +
 //     identity + superuser) so header-less requests have somewhere to resolve to.
-//     It seeds NO project and NO model: there is no preset/demo content anymore.
+//     It seeds NO workflow and NO model: there is no preset/demo content anymore.
 //     A header-less / freshly-provisioned org lands on the empty-org screen until
-//     a user creates a project and points it at their own Qlerify model.
+//     a user creates a workflow and points it at their own Qlerify model.
 //  2. createOrganization()/createEnvironment()/… — provision a NEW tenant:
 //     org + registry row (pooled, local stack) + dev/prod environments + a
-//     default workspace (but ZERO projects) + an owner role assignment, audited.
+//     default workspace (but ZERO workflows) + an owner role assignment, audited.
 //
 // These run in the CONTROL plane (it "knows all tenants", §10), so they use the
 // Prisma client directly rather than the tenant-scoped store — you cannot be
@@ -19,8 +19,8 @@ import { join } from "node:path";
 
 import { prisma } from "../../db.js";
 import { DomainError } from "../../errors.js";
-import { QLERIFY_DIR, forgetProjectModel } from "../../ontology/model.js";
-import { dropProjectionTablesForProject } from "../../twin/projection-store.js";
+import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
+import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
 import { hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
 import {
@@ -28,7 +28,7 @@ import {
   SYSTEM_ENV_ID,
   SYSTEM_IDENTITY_ID,
   SYSTEM_ORG_ID,
-  SYSTEM_PROJECT_ID,
+  SYSTEM_WORKFLOW_ID,
   SYSTEM_STACK_ID,
   SYSTEM_SUBJECT,
   SYSTEM_WORKSPACE_ID,
@@ -140,86 +140,86 @@ export async function createWorkspace(organizationId: string, environmentId: str
   return ws;
 }
 
-export async function createProject(organizationId: string, workspaceId: string, name: string, ownerId: string) {
+export async function createWorkflow(organizationId: string, workspaceId: string, name: string, ownerId: string) {
   const ws = await prisma.platWorkspace.findFirst({ where: { id: workspaceId, organizationId } });
   if (!ws) throw new DomainError(`workspace "${workspaceId}" not found in this organization`);
-  const proj = await prisma.platProject.create({ data: { id: newId(), organizationId, workspaceId, name } });
-  await recordAudit({ organizationId, actorPrincipalId: ownerId, action: "project.create", targetRef: `project:${proj.id}`, decision: "allow", reason: name });
-  // A new project starts with NO model — the user points it at their own Qlerify
-  // model via PUT /v1/project/model. Nothing is cloned/preloaded.
+  const proj = await prisma.platWorkflow.create({ data: { id: newId(), organizationId, workspaceId, name } });
+  await recordAudit({ organizationId, actorPrincipalId: ownerId, action: "workflow.create", targetRef: `workflow:${proj.id}`, decision: "allow", reason: name });
+  // A new workflow starts with NO model — the user points it at their own Qlerify
+  // model via PUT /v1/workflow/model. Nothing is cloned/preloaded.
   return proj;
 }
 
-/** Delete a project and CASCADE-drop everything it owns: its raw-SQL projection
- * tables (gen__p<project>_*) and their data, its EventLog run history, and its
+/** Delete a workflow and CASCADE-drop everything it owns: its raw-SQL projection
+ * tables (gen__p<workflow>_*) and their data, its EventLog run history, and its
  * control-plane metadata (ontology + versions + branches, resources + markings,
- * project-scoped role assignments, and the project row itself). Then new tables
- * are built lazily the next time a (different) project's model is applied.
+ * workflow-scoped role assignments, and the workflow row itself). Then new tables
+ * are built lazily the next time a (different) workflow's model is applied.
  *
- * The virtual SYSTEM project id is refused (defense-in-depth) — it is never a
- * real, deletable project row.
+ * The virtual SYSTEM workflow id is refused (defense-in-depth) — it is never a
+ * real, deletable workflow row.
  *
  * Deliberately NOT touched here:
- *  - Adapters/connectors. They are global (not project-scoped) today and are
+ *  - Adapters/connectors. They are global (not workflow-scoped) today and are
  *    AI-authored/throwaway; their lifecycle is handled separately.
  *  - Content-addressed model blobs in the CAS. They are write-once and may be
- *    DEDUPED across this org's projects (two projects pointed at the same model
- *    share a hash), so deleting them could corrupt a sibling project. They are
+ *    DEDUPED across this org's workflows (two workflows pointed at the same model
+ *    share a hash), so deleting them could corrupt a sibling workflow. They are
  *    left as harmless orphans (CAS GC is a separate, org-level concern). */
-export async function deleteProject(
+export async function deleteWorkflow(
   organizationId: string,
-  projectId: string,
+  workflowId: string,
   actorPrincipalId: string,
 ): Promise<{ id: string; droppedTables: string[]; droppedModels: number }> {
-  if (projectId === SYSTEM_PROJECT_ID) {
-    throw new DomainError("The system default project cannot be deleted.");
+  if (workflowId === SYSTEM_WORKFLOW_ID) {
+    throw new DomainError("The system default workflow cannot be deleted.");
   }
-  const proj = await prisma.platProject.findFirst({
-    where: { id: projectId, organizationId },
+  const proj = await prisma.platWorkflow.findFirst({
+    where: { id: workflowId, organizationId },
     select: { id: true, name: true },
   });
-  if (!proj) throw new DomainError(`project "${projectId}" not found in this organization`);
+  if (!proj) throw new DomainError(`workflow "${workflowId}" not found in this organization`);
 
-  // Ontology + resource ids owned by this project drive the metadata cascade.
-  const onts = await prisma.platOntology.findMany({ where: { organizationId, projectId }, select: { id: true } });
+  // Ontology + resource ids owned by this workflow drive the metadata cascade.
+  const onts = await prisma.platOntology.findMany({ where: { organizationId, workflowId }, select: { id: true } });
   const ontologyIds = onts.map((o) => o.id);
-  const resources = await prisma.platResource.findMany({ where: { organizationId, projectId }, select: { id: true } });
+  const resources = await prisma.platResource.findMany({ where: { organizationId, workflowId }, select: { id: true } });
   const resourceIds = resources.map((r) => r.id);
 
-  // Atomically remove the project's metadata + run history. FK-safe order:
+  // Atomically remove the workflow's metadata + run history. FK-safe order:
   // versions/branches → ontology → resource markings → resource → grants →
-  // project. Deleting the PlatProject row in the SAME commit means a stale
-  // X-Project-Id can never resolve back to it (authn validates the id in-org and
+  // workflow. Deleting the PlatWorkflow row in the SAME commit means a stale
+  // X-Workflow-Id can never resolve back to it (authn validates the id in-org and
   // falls back to Default when the row is gone) — so the model self-heal can't
   // resurrect an orphan.
   await prisma.$transaction([
     prisma.platOntologyVersion.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
     prisma.platOntologyBranch.deleteMany({ where: { organizationId, ontologyId: { in: ontologyIds } } }),
-    prisma.platOntology.deleteMany({ where: { organizationId, projectId } }),
+    prisma.platOntology.deleteMany({ where: { organizationId, workflowId } }),
     prisma.platResourceMarking.deleteMany({ where: { organizationId, resourceId: { in: resourceIds } } }),
-    prisma.platResource.deleteMany({ where: { organizationId, projectId } }),
-    prisma.platRoleAssignment.deleteMany({ where: { organizationId, scopeType: "project", scopeId: projectId } }),
-    prisma.eventLog.deleteMany({ where: { organizationId, projectId } }),
-    prisma.platProject.deleteMany({ where: { id: projectId, organizationId } }),
+    prisma.platResource.deleteMany({ where: { organizationId, workflowId } }),
+    prisma.platRoleAssignment.deleteMany({ where: { organizationId, scopeType: "workflow", scopeId: workflowId } }),
+    prisma.eventLog.deleteMany({ where: { organizationId, workflowId } }),
+    prisma.platWorkflow.deleteMany({ where: { id: workflowId, organizationId } }),
   ]);
 
   // Drop the physical projection tables AFTER the metadata commit: a failure here
-  // can only orphan now-invisible tables, never leave a half-listed project.
-  const droppedTables = await dropProjectionTablesForProject(projectId);
+  // can only orphan now-invisible tables, never leave a half-listed workflow.
+  const droppedTables = await dropProjectionTablesForWorkflow(workflowId);
 
-  // Evict the project's live model from the in-memory loader caches.
-  forgetProjectModel(projectId);
+  // Evict the workflow's live model from the in-memory loader caches.
+  forgetWorkflowModel(workflowId);
 
   await recordAudit({
     organizationId,
     actorPrincipalId,
-    action: "project.delete",
-    targetRef: `project:${projectId}`,
+    action: "workflow.delete",
+    targetRef: `workflow:${workflowId}`,
     decision: "allow",
-    reason: `deleted project "${proj.name}" — dropped ${droppedTables.length} table(s), ${ontologyIds.length} model(s)`,
+    reason: `deleted workflow "${proj.name}" — dropped ${droppedTables.length} table(s), ${ontologyIds.length} model(s)`,
   });
 
-  return { id: projectId, droppedTables, droppedModels: ontologyIds.length };
+  return { id: workflowId, droppedTables, droppedModels: ontologyIds.length };
 }
 
 async function uniqueSlug(name: string): Promise<string> {
@@ -239,7 +239,7 @@ export interface CreateOrgParams {
 }
 
 /** Provision a new organization: org + registry + dev/prod envs + default
- * workspace/project + owner grant. Pooled tenancy on the local stack (§12). */
+ * workspace/workflow + owner grant. Pooled tenancy on the local stack (§12). */
 export async function createOrganization(p: CreateOrgParams, actorPrincipalId?: string | null) {
   await ensureBuiltinRoles();
   const homeRegion = p.homeRegion ?? "local";
@@ -263,9 +263,9 @@ export async function createOrganization(p: CreateOrgParams, actorPrincipalId?: 
     data: { organizationId: orgId, customerAccountId, tenancyMode: "pooled", homeRegion, stackId: SYSTEM_STACK_ID, status: "active" },
   });
 
-  // Environments + a default workspace. NO project is created: a fresh org starts
-  // empty (zero projects) and lands on the empty-org screen, where the owner
-  // creates their first project and points it at their own Qlerify model.
+  // Environments + a default workspace. NO workflow is created: a fresh org starts
+  // empty (zero workflows) and lands on the empty-org screen, where the owner
+  // creates their first workflow and points it at their own Qlerify model.
   const devId = newId();
   await prisma.platEnvironment.create({ data: { id: devId, organizationId: orgId, name: "development", region: homeRegion } });
   await prisma.platEnvironment.create({ data: { id: newId(), organizationId: orgId, name: "production", region: homeRegion } });
@@ -319,8 +319,8 @@ export async function updateOrganization(
 
 /** Delete an organization and CASCADE everything it owns. Irreversible.
  *
- * Order: (1) delete every project via deleteProject() — that drops each project's
- * physical projection tables (gen__p*), event-log run history, and project-scoped
+ * Order: (1) delete every workflow via deleteWorkflow() — that drops each workflow's
+ * physical projection tables (gen__p*), event-log run history, and workflow-scoped
  * model/resource graph; then (2) atomically delete the remaining org-scoped
  * control-plane rows (org-level ontologies/resources, memberships, roles,
  * markings, groups, service accounts, envs/workspaces, tenant registry, the org's
@@ -333,18 +333,18 @@ export async function updateOrganization(
 export async function deleteOrganization(
   organizationId: string,
   actorPrincipalId: string,
-): Promise<{ id: string; deletedProjects: number; droppedTables: number }> {
+): Promise<{ id: string; deletedWorkflows: number; droppedTables: number }> {
   if (organizationId === SYSTEM_ORG_ID) {
     throw new DomainError("The system organization cannot be deleted.");
   }
   const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
   if (!org) throw new DomainError("organization not found");
 
-  // (1) Projects first — each call drops that project's physical tables + history.
-  const projects = await prisma.platProject.findMany({ where: { organizationId }, select: { id: true } });
+  // (1) Workflows first — each call drops that workflow's physical tables + history.
+  const workflows = await prisma.platWorkflow.findMany({ where: { organizationId }, select: { id: true } });
   let droppedTables = 0;
-  for (const p of projects) {
-    const r = await deleteProject(organizationId, p.id, actorPrincipalId);
+  for (const p of workflows) {
+    const r = await deleteWorkflow(organizationId, p.id, actorPrincipalId);
     droppedTables += r.droppedTables.length;
   }
 
@@ -371,7 +371,7 @@ export async function deleteOrganization(
     prisma.platGroup.deleteMany({ where: { organizationId } }),
     prisma.platServiceAccount.deleteMany({ where: { organizationId } }),
     prisma.platOrgMembership.deleteMany({ where: { organizationId } }),
-    prisma.platProject.deleteMany({ where: { organizationId } }), // belt-and-suspenders (already gone above)
+    prisma.platWorkflow.deleteMany({ where: { organizationId } }), // belt-and-suspenders (already gone above)
     prisma.platWorkspace.deleteMany({ where: { organizationId } }),
     prisma.platEnvironment.deleteMany({ where: { organizationId } }),
     prisma.platTenantRegistry.deleteMany({ where: { organizationId } }),
@@ -393,10 +393,10 @@ export async function deleteOrganization(
     action: "organization.delete",
     targetRef: `organization:${organizationId}`,
     decision: "allow",
-    reason: `deleted org "${org.slug}" — ${projects.length} project(s), ${droppedTables} table(s)`,
+    reason: `deleted org "${org.slug}" — ${workflows.length} workflow(s), ${droppedTables} table(s)`,
   });
 
-  return { id: organizationId, deletedProjects: projects.length, droppedTables };
+  return { id: organizationId, deletedWorkflows: workflows.length, droppedTables };
 }
 
 /** Tenant Registry lookup (§10) — pooled/local in inc 1. */
@@ -407,7 +407,7 @@ export async function lookupTenant(organizationId: string) {
 let systemSeeded = false;
 
 /** Idempotent: create the system tenant (org + identity + superuser) so
- * header-less requests resolve somewhere. Seeds NO project and NO model — the
+ * header-less requests resolve somewhere. Seeds NO workflow and NO model — the
  * system org starts empty. Safe to call on every boot. */
 export async function seedSystemOrg(): Promise<void> {
   if (systemSeeded) return;
@@ -447,7 +447,7 @@ export async function seedSystemOrg(): Promise<void> {
     update: {},
     create: { id: SYSTEM_WORKSPACE_ID, organizationId: SYSTEM_ORG_ID, environmentId: SYSTEM_ENV_ID, name: "Default" },
   });
-  // No system project and no model are seeded — the system org starts empty, like
+  // No system workflow and no model are seeded — the system org starts empty, like
   // any freshly provisioned org, and lands on the empty-org screen.
 
   // The system identity header-less requests authenticate as, + its membership +

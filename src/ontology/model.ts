@@ -24,7 +24,7 @@
 import { readFileSync, existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { currentProjectId, isSystemProject } from "../platform/tenancy/context.js";
+import { currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
 import { ModelNotLoadedError } from "../errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -263,7 +263,7 @@ export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
 }
 
 /** Build an Ontology from parsed workflow + overlay STRINGS (no fs). The disk
- * loader above and the per-project content loader (a project's model lives in the
+ * loader above and the per-workflow content loader (a workflow's model lives in the
  * content-addressed store, not on disk) both funnel through buildOntology. */
 export function loadOntologyFromStrings(workflowJson: string, overlayJson: string | null): Ontology {
   const wf = JSON.parse(workflowJson) as RawWorkflow;
@@ -492,15 +492,15 @@ let cached: Ontology | undefined;
  * entities, commands, roles). Returned by the system path when there is no model
  * on disk, so boot, module-load (the event registry, the chat system prompt) and
  * every system-context getOntology() caller keep working instead of crashing.
- * There is no preset/demo model anymore — a project's model arrives only via
- * the per-project set-model flow (PUT /v1/project/model). */
+ * There is no preset/demo model anymore — a workflow's model arrives only via
+ * the per-workflow set-model flow (PUT /v1/workflow/model). */
 export function emptyOntology(): Ontology {
   return buildOntology({ boundedContext: "Uninitialized", domainEvents: {}, schemas: {}, roles: [] }, {});
 }
 
-// --- Per-project model resolution -------------------------------------------
-// The live model is scoped to the ACTIVE project (currentProjectId from ALS).
-// Every project's model content is bound via setProjectModel() by the request
+// --- Per-workflow model resolution -------------------------------------------
+// The live model is scoped to the ACTIVE workflow (currentWorkflowId from ALS).
+// Every workflow's model content is bound via setWorkflowModel() by the request
 // pipeline (the onRequest hook loads it from the content-addressed store BEFORE
 // the handler runs, so the sync getOntology() never has to do I/O). The system
 // context (no request / boot / module-load) resolves to the empty ontology
@@ -515,44 +515,44 @@ function getSystemOntology(): Ontology {
   return cached;
 }
 
-// projectId → bound content; parsed Ontology cache keyed by `${projectId}::${hash}`
+// workflowId → bound content; parsed Ontology cache keyed by `${workflowId}::${hash}`
 // (the hash is immutable, so a cache entry is never stale).
-const projectContent = new Map<string, { workflow: string; overlay: string | null; hash: string }>();
+const workflowContent = new Map<string, { workflow: string; overlay: string | null; hash: string }>();
 const parsedByKey = new Map<string, Ontology>();
 const PARSED_CACHE_MAX = 32;
 
-const PROJECT_CONTENT_MAX = 64;
+const WORKFLOW_CONTENT_MAX = 64;
 
-/** Bind a project's current model content (called before the handler runs).
- * Bounded LRU-ish so a long-lived process serving many projects doesn't grow the
+/** Bind a workflow's current model content (called before the handler runs).
+ * Bounded LRU-ish so a long-lived process serving many workflows doesn't grow the
  * content map without limit. */
-export function setProjectModel(projectId: string, workflow: string, overlay: string | null, hash: string): void {
-  if (projectContent.has(projectId)) projectContent.delete(projectId); // move to most-recent
-  projectContent.set(projectId, { workflow, overlay, hash });
-  while (projectContent.size > PROJECT_CONTENT_MAX) {
-    const oldest = projectContent.keys().next().value;
+export function setWorkflowModel(workflowId: string, workflow: string, overlay: string | null, hash: string): void {
+  if (workflowContent.has(workflowId)) workflowContent.delete(workflowId); // move to most-recent
+  workflowContent.set(workflowId, { workflow, overlay, hash });
+  while (workflowContent.size > WORKFLOW_CONTENT_MAX) {
+    const oldest = workflowContent.keys().next().value;
     if (oldest === undefined) break;
-    projectContent.delete(oldest);
+    workflowContent.delete(oldest);
   }
 }
 
-/** Evict a project's bound model from the in-memory caches (its content binding
- * and any parsed Ontology keyed by it). Called when a project is deleted so a
+/** Evict a workflow's bound model from the in-memory caches (its content binding
+ * and any parsed Ontology keyed by it). Called when a workflow is deleted so a
  * stale entry can't linger for a reused id. */
-export function forgetProjectModel(projectId: string): void {
-  projectContent.delete(projectId);
+export function forgetWorkflowModel(workflowId: string): void {
+  workflowContent.delete(workflowId);
   for (const k of [...parsedByKey.keys()]) {
-    if (k.startsWith(`${projectId}::`)) parsedByKey.delete(k);
+    if (k.startsWith(`${workflowId}::`)) parsedByKey.delete(k);
   }
 }
 
-/** Cache key for the ACTIVE project's model — also used by registry.events() so
- * events resolve per project. System uses a stable "system" key (its derived
+/** Cache key for the ACTIVE workflow's model — also used by registry.events() so
+ * events resolve per workflow. System uses a stable "system" key (its derived
  * caches are cleared on reload). */
 export function ontologyCacheKey(): string {
-  if (isSystemProject()) return "system";
-  const pid = currentProjectId();
-  const c = projectContent.get(pid);
+  if (isSystemWorkflow()) return "system";
+  const pid = currentWorkflowId();
+  const c = workflowContent.get(pid);
   return c ? `${pid}::${c.hash}` : `${pid}::unloaded`;
 }
 
@@ -565,13 +565,13 @@ function evictParsed(): void {
   }
 }
 
-/** The live model for the active project. System → disk; other projects → their
- * bound CAS content. A non-system project whose content is not loaded throws
+/** The live model for the active workflow. System → disk; other workflows → their
+ * bound CAS content. A non-system workflow whose content is not loaded throws
  * (never silently serves the demo model — the onRequest hook must bind it). */
 export function getOntology(): Ontology {
-  if (isSystemProject()) return getSystemOntology();
-  const pid = currentProjectId();
-  const c = projectContent.get(pid);
+  if (isSystemWorkflow()) return getSystemOntology();
+  const pid = currentWorkflowId();
+  const c = workflowContent.get(pid);
   if (!c) throw new ModelNotLoadedError();
   const key = `${pid}::${c.hash}`;
   let o = parsedByKey.get(key);

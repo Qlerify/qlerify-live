@@ -75,11 +75,11 @@ function rebuildEvents(): void {
 rebuildEvents();
 onOntologyReload(rebuildEvents);
 
-// Per-PROJECT events. EVENTS (above) stays the SYSTEM/current-model live binding
+// Per-WORKFLOW events. EVENTS (above) stays the SYSTEM/current-model live binding
 // for system-context consumers (chat, the legacy stepper, conformance); events()
-// resolves the ACTIVE project's events, keyed by the same content-hash cache key
+// resolves the ACTIVE workflow's events, keyed by the same content-hash cache key
 // getOntology() uses. This is what makes emit()/findEvent resolve the RIGHT model
-// when a non-system project is active.
+// when a non-system workflow is active.
 const eventsByKey = new Map<string, ReadonlyArray<EventDef>>();
 
 export function events(): ReadonlyArray<EventDef> {
@@ -92,7 +92,7 @@ export function events(): ReadonlyArray<EventDef> {
     return evs;
   } catch {
     // Do NOT cache a failure (so a corrected model retries). The system path
-    // keeps its last-good EVENTS array; a non-system project with a bad model
+    // keeps its last-good EVENTS array; a non-system workflow with a bad model
     // yields [] for this call only.
     return key === "system" ? EVENTS : [];
   }

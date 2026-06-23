@@ -52,10 +52,10 @@ async function resolveBinding(commandName: string): Promise<Binding> {
   const entity = ont.entity(event.aggregateRoot);
   if (!entity) throw new DomainError(`command "${commandName}" aggregate "${event.aggregateRoot}" is not a known entity`);
   const table = store.tableFor(entity);
-  // Lazily create the projection table in the ACTIVE project's namespace if it
-  // doesn't exist yet. Each project's data plane is built on demand (idempotent),
-  // so a fresh project — which has no system-style model "apply" path — gets its
-  // tables on first write. The system project's tables already exist from apply,
+  // Lazily create the projection table in the ACTIVE workflow's namespace if it
+  // doesn't exist yet. Each workflow's data plane is built on demand (idempotent),
+  // so a fresh workflow — which has no system-style model "apply" path — gets its
+  // tables on first write. The system workflow's tables already exist from apply,
   // so this is a no-op for the demo.
   await store.ensureTable(entity);
   return { ont, event, entity, table };

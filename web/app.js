@@ -121,6 +121,14 @@ const state = {
   orgMap: null,         // /org/mappings result (dialog data)
   orgMapBusy: false,
   orgMapErr: null,
+  // create-workflow modal — the model is mandatory at creation (link or upload/paste)
+  newWfUrl: "",
+  newWfText: "",
+  // model & versions ("Inspect model") dialog
+  modelInspectOpen: false,
+  modelStatus: null,    // GET /v1/workflow/model/status → { versions, current, total, currentVersion, sourceUrl }
+  modelContent: null,   // GET /v1/workflow/model/content → raw current workflow.json
+  modelBusy: false,     // a restore/reload is in flight
 };
 
 // --- Tenant auth/session (localStorage-backed) ------------------------------
@@ -538,7 +546,9 @@ async function loadRegistryStatus() {
 // (link, or uploaded/pasted workflow.json) and rebuilds this workflow's data.
 function workflowModelControls() {
   if (!state.me) return "";
-  return `<button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this workflow's model with a Qlerify model">⚙ Set model</button>`;
+  return `
+    <button id="btn-model-inspect" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Browse this workflow's model versions — reload, view, and restore">👁 Model &amp; versions</button>
+    <button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this workflow's model with a Qlerify model">⚙ Set model</button>`;
 }
 
 function workflowModelDialog() {
@@ -618,6 +628,200 @@ function bindWorkflowModel() {
       render();
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Inspect model — version history, reload, restore, and the source link, all in
+// one dialog (ported from the pre-multi-tenant build, rewired to the per-workflow
+// /v1/workflow/model/* endpoints).
+// ---------------------------------------------------------------------------
+
+// Compact display form of a workflow URL — keep the tail recognizable (so two
+// workflows are still distinguishable) while hiding the long opaque ids.
+function shortWorkflowUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1] || "";
+    const shortId = last.length > 12 ? `${last.slice(0, 8)}…${last.slice(-4)}` : last;
+    return `${u.host}/…/${shortId}`;
+  } catch {
+    return url.length > 36 ? `${url.slice(0, 18)}…${url.slice(-12)}` : url;
+  }
+}
+
+// Short, human-readable form of a version's ISO timestamp, e.g. "Jun 14, 13:45".
+function formatVersionDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso).slice(0, 16).replace("T", " ");
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// Sidebar listing every stored version (newest first), each with a Restore
+// action; the current version is highlighted instead.
+function modelVersionSidebar() {
+  const s = state.modelStatus;
+  if (!s) return `<aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto p-3 text-[11px] text-stone-400">Loading versions…</aside>`;
+  const versions = s.versions || [];
+  if (versions.length === 0) {
+    return `<aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto p-3 text-[11px] text-stone-400 leading-relaxed">No saved versions yet.</aside>`;
+  }
+  const rows = versions
+    .map((v, i) => {
+      const isCurrent = i === s.current;
+      const sourceCls = v.source === "initial"
+        ? "bg-stone-100 text-stone-500"
+        : v.source === "restore"
+          ? "bg-violet-100 text-violet-700"
+          : "bg-sky-100 text-sky-700";
+      const events = v.summary ? (v.summary.events ?? 0) : 0;
+      let srcLine;
+      if (v.sourceUrl) {
+        const label = v.sourceName || shortWorkflowUrl(v.sourceUrl);
+        const monoCls = v.sourceName ? "" : "mono ";
+        const tip = v.sourceName ? `${v.sourceName} — ${v.sourceUrl}` : v.sourceUrl;
+        srcLine = `<a href="${escapeHtml(v.sourceUrl)}" target="_blank" rel="noopener" class="block text-[10px] ${monoCls}text-sky-700 hover:text-sky-900 truncate mt-0.5" title="Fetched from ${escapeHtml(tip)}">${escapeHtml(label)} ↗</a>`;
+      } else {
+        srcLine = `<div class="text-[10px] text-stone-300 italic mt-0.5">uploaded / pasted</div>`;
+      }
+      return `
+        <li class="px-2.5 py-2 rounded-md border ${isCurrent ? "border-amber-300 bg-amber-50" : "border-transparent hover:bg-stone-50"} flex items-start gap-2">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5">
+              <span class="text-[12px] font-semibold tabular-nums">v${i + 1}</span>
+              <span class="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded ${sourceCls}">${escapeHtml(v.source)}</span>
+            </div>
+            <div class="text-[10px] text-stone-500 tabular-nums mt-0.5">${escapeHtml(formatVersionDate(v.savedAt))}</div>
+            <div class="text-[10px] text-stone-400 tabular-nums">${events} events</div>
+            ${srcLine}
+          </div>
+          ${isCurrent
+            ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-200 text-amber-900 shrink-0 mt-0.5">current</span>`
+            : `<button data-restore-id="${escapeHtml(v.id)}" ${state.modelBusy ? "disabled" : ""} class="model-restore-btn text-[10px] px-2 py-1 rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 shrink-0 mt-0.5" title="Restore this version">Restore</button>`}
+        </li>`;
+    })
+    .reverse()
+    .join("");
+  return `
+    <aside class="w-56 shrink-0 border-r border-stone-200 bg-white overflow-auto">
+      <div class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-widest text-stone-500 font-semibold sticky top-0 bg-white">Versions</div>
+      <ul class="px-2 pb-3 flex flex-col gap-1">${rows}</ul>
+    </aside>`;
+}
+
+// Inspect-model dialog: version sidebar + reload/replace + the source link and a
+// read-only view of the current workflow.json, all in one place.
+function modelInspectDialog() {
+  if (!state.modelInspectOpen) return "";
+  const s = state.modelStatus;
+  const total = s ? s.total : 0;
+  const current = s ? s.current : -1;
+  const events = s && s.currentVersion && s.currentVersion.summary ? (s.currentVersion.summary.events ?? 0) : 0;
+  const versionLabel = total > 0 ? `v${current + 1}/${total}${s && s.currentVersion ? ` · ${events} events` : ""}` : "not yet versioned";
+  const reloadUrl = s ? s.sourceUrl : null;
+  const wfName = (state.me?.workflows || []).find((w) => w.id === state.me?.workflowId)?.name || "";
+  const content = state.modelContent;
+  const body = content == null
+    ? `<div class="text-stone-500 text-sm p-6">Loading model…</div>`
+    : `<pre class="mono text-[12px] leading-relaxed whitespace-pre p-4 overflow-auto">${escapeHtml(content)}</pre>`;
+  const sizeKb = content ? Math.round(content.length / 1024) : 0;
+  return `
+    <div id="model-inspect-backdrop" class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6">
+      <div class="bg-white rounded-lg shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col" role="dialog" aria-modal="true">
+        <div class="px-5 py-3 border-b border-stone-200 flex flex-col gap-2.5">
+          <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify model</div>
+              <div class="text-[12px] text-stone-600 tabular-nums truncate">${escapeHtml(versionLabel)}${wfName ? ` · ${escapeHtml(wfName)}` : ""}</div>
+            </div>
+            ${content ? `<span class="text-[11px] text-stone-400 tabular-nums shrink-0">${sizeKb} KB</span>` : ""}
+            <button id="model-inspect-close" class="text-stone-400 hover:text-stone-700 text-lg leading-none shrink-0" title="Close">×</button>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button id="btn-model-reload" ${state.modelBusy || !reloadUrl ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="${reloadUrl ? "Re-pull the latest model from the source link, then rebuild this workflow" : "No source link — this model was uploaded or pasted. Use Replace to re-point it."}">${state.modelBusy ? "⏳ Working…" : "⤓ Reload"}</button>
+            <button id="btn-model-replace" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Replace this workflow's model — change the link, or upload/paste a new workflow.json">✎ Replace</button>
+            <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
+            ${reloadUrl
+              ? `<a href="${escapeHtml(reloadUrl)}" target="_blank" rel="noopener" class="min-w-0 max-w-xs text-[12px] mono text-sky-700 hover:text-sky-900 underline decoration-dotted truncate" title="${escapeHtml(reloadUrl)}">${escapeHtml(shortWorkflowUrl(reloadUrl))} ↗</a>`
+              : `<span class="text-[12px] text-stone-400 italic">uploaded / pasted — no link</span>`}
+          </div>
+        </div>
+        <div class="flex-1 flex min-h-0">
+          ${modelVersionSidebar()}
+          <div class="flex-1 overflow-auto bg-stone-50">${body}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// Pull the version list + current model body for the dialog. Best-effort — a
+// failed leg leaves the previous content rather than blanking the dialog.
+async function refreshModelInspect() {
+  const [status, content] = await Promise.allSettled([
+    api("/v1/workflow/model/status"),
+    api("/v1/workflow/model/content"),
+  ]);
+  if (status.status === "fulfilled") state.modelStatus = status.value;
+  if (content.status === "fulfilled") state.modelContent = content.value.content || "";
+  render();
+}
+
+async function openModelInspect() {
+  state.modelInspectOpen = true; state.modelBusy = false;
+  state.modelStatus = null; state.modelContent = null;
+  render();
+  await refreshModelInspect();
+}
+
+function closeModelInspect() { state.modelInspectOpen = false; render(); }
+
+// Re-pull the latest model from the current version's stored link, then rebuild
+// this workflow. Disabled in the UI when there is no link to pull from.
+async function reloadWorkflowModel() {
+  if (state.modelBusy) return;
+  state.modelBusy = true; render();
+  try {
+    await api("/v1/workflow/model/reload", { method: "POST", body: "{}" });
+    state.modelMsg = { ok: true, text: "Reloaded the latest model from the source link — rebuilt this workflow." };
+    await refreshModelInspect();
+    await ensureMe();
+    onHashChange();
+  } catch (e) {
+    state.modelMsg = { ok: false, text: (e && e.message) ? e.message : "Reload failed." };
+  } finally {
+    state.modelBusy = false; render();
+    setTimeout(() => { state.modelMsg = null; render(); }, 3000);
+  }
+}
+
+// Restore a stored version: re-applies it as a NEW current version + rebuilds.
+async function restoreWorkflowVersion(versionId) {
+  if (state.modelBusy || !versionId) return;
+  state.modelBusy = true; render();
+  try {
+    await api("/v1/workflow/model/restore", { method: "POST", body: JSON.stringify({ versionId }) });
+    state.modelMsg = { ok: true, text: "Restored that version — rebuilt this workflow." };
+    await refreshModelInspect();
+    await ensureMe();
+    onHashChange();
+  } catch (e) {
+    state.modelMsg = { ok: false, text: (e && e.message) ? e.message : "Restore failed." };
+  } finally {
+    state.modelBusy = false; render();
+    setTimeout(() => { state.modelMsg = null; render(); }, 3000);
+  }
+}
+
+function bindModelInspect() {
+  document.getElementById("btn-model-inspect")?.addEventListener("click", openModelInspect);
+  document.getElementById("model-inspect-close")?.addEventListener("click", closeModelInspect);
+  document.getElementById("model-inspect-backdrop")?.addEventListener("click", (e) => { if (e.target && e.target.id === "model-inspect-backdrop") closeModelInspect(); });
+  document.getElementById("btn-model-reload")?.addEventListener("click", reloadWorkflowModel);
+  // Replace hands off to the Set-model dialog (change link / upload / paste), so
+  // close Inspect rather than stacking the two modals.
+  document.getElementById("btn-model-replace")?.addEventListener("click", () => { state.modelInspectOpen = false; state.projModelOpen = true; state.projModelErr = null; render(); });
+  document.querySelectorAll(".model-restore-btn").forEach((btn) => btn.addEventListener("click", () => restoreWorkflowVersion(btn.getAttribute("data-restore-id"))));
 }
 
 // Persistent banner shown when the loaded Qlerify model doesn't match the
@@ -871,6 +1075,7 @@ function dashboardView() {
 
 function bindDashboard() {
   bindWorkflowModel();
+  bindModelInspect();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
@@ -2445,7 +2650,7 @@ function render() {
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
   // user) so the whole app reads as a multi-tenant console.
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${newOrgDialog()}${newWfDialog()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${modelInspectDialog()}${newOrgDialog()}${newWfDialog()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -2777,23 +2982,35 @@ function bindTenantBar() {
     }
   };
   // Create-workflow dialog. A new workflow lands in the org's first workspace
-  // (the same default the empty-org view uses) and starts model-less, so we
-  // switch straight into it — the dashboard then prompts "Set this workflow's
-  // model". Mirrors createOrg's open/busy/err state pattern.
+  // (the same default the empty-org view uses). The model is MANDATORY and sent
+  // with the create call — the server creates workflow + model atomically (and
+  // rolls the workflow back if the model is bad), so we only switch into it on
+  // success. Mirrors createOrg's open/busy/err state pattern.
   const createWorkflow = async () => {
     if (state.newWfBusy) return;
     const name = (document.getElementById("new-wf-name")?.value || state.newWfName || "").trim();
     if (!name) { state.newWfErr = "Workflow name is required"; render(); return; }
+    const url = (document.getElementById("new-wf-url")?.value || state.newWfUrl || "").trim();
+    const text = (document.getElementById("new-wf-text")?.value || state.newWfText || "").trim();
+    let modelPayload;
+    if (url) {
+      modelPayload = { sourceUrl: url }; // primary: pull from the Qlerify modeller
+    } else if (text) {
+      try { JSON.parse(text); } catch (_e) { state.newWfErr = "The pasted/uploaded model isn't valid JSON."; render(); return; }
+      modelPayload = { workflow: text }; // secondary: uploaded / pasted workflow.json
+    } else {
+      state.newWfErr = "A model is required — paste a Qlerify link (or upload/paste a workflow.json under Advanced)."; render(); return;
+    }
     state.newWfBusy = true; state.newWfErr = null; render();
     try {
       const wss = await api("/v1/workspaces");
       const workspaceId = (wss[0] || {}).id;
       if (!workspaceId) throw new Error("This org has no workspace — create one in Org Admin first.");
-      const wf = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+      const wf = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId, ...modelPayload }) });
       AUTH.setWorkflow(wf.id); // switch straight into the brand-new workflow
-      state.newWfOpen = false; state.newWfBusy = false; state.newWfName = "";
+      state.newWfOpen = false; state.newWfBusy = false; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
       state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new workflow
-      navigate("#"); // model-less new workflow → the "set model" screen
+      navigate("#"); // a workflow now always has a model → straight to its dashboard
     } catch (e) {
       state.newWfBusy = false;
       state.newWfErr = (e && e.message) ? e.message : "Failed to create the workflow.";
@@ -2814,7 +3031,7 @@ function bindTenantBar() {
   }));
   const openCreateWorkflow = () => {
     state.wfMenuOpen = false;
-    state.newWfOpen = true; state.newWfErr = null; state.newWfName = "";
+    state.newWfOpen = true; state.newWfErr = null; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
     render();
     setTimeout(() => document.getElementById("new-wf-name")?.focus(), 30);
   };
@@ -2822,7 +3039,23 @@ function bindTenantBar() {
   document.getElementById("wf-empty-create")?.addEventListener("click", openCreateWorkflow);
   document.getElementById("new-wf-cancel")?.addEventListener("click", () => { state.newWfOpen = false; render(); });
   document.getElementById("new-wf-name")?.addEventListener("input", (e) => { state.newWfName = e.target.value; });
+  // Enter in the name field submits; in the URL field it also submits (mirrors the single-line feel).
   document.getElementById("new-wf-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") createWorkflow(); });
+  document.getElementById("new-wf-url")?.addEventListener("input", (e) => { state.newWfUrl = e.target.value; });
+  document.getElementById("new-wf-url")?.addEventListener("keydown", (e) => { if (e.key === "Enter") createWorkflow(); });
+  // Don't re-render on file load (it would collapse the <details>); fill the textarea directly.
+  document.getElementById("new-wf-file")?.addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      state.newWfText = String(r.result || "");
+      const ta = document.getElementById("new-wf-text");
+      if (ta) ta.value = state.newWfText;
+    };
+    r.readAsText(f);
+  });
+  document.getElementById("new-wf-text")?.addEventListener("input", (e) => { state.newWfText = e.target.value; });
   document.getElementById("new-wf-create")?.addEventListener("click", createWorkflow);
 
   // --- Organisation menu (avatar dropdown: switch / admin / create) ---------
@@ -2892,22 +3125,37 @@ function newOrgDialog() {
 }
 
 // Self-service create-workflow modal, opened from the workflow switcher's
-// "Create new workflow" row (or the empty-org "+ Create workflow" trigger).
-// Mirrors newOrgDialog()'s open/busy/err state pattern.
+// "Create new workflow" row (or the empty-org "Create your first workflow"
+// trigger). A model is MANDATORY at creation — the workflow and its model are
+// created together (server-side atomic), so an empty, model-less workflow can
+// never exist. Mirrors newOrgDialog()'s open/busy/err state pattern.
 function newWfDialog() {
   if (!state.newWfOpen) return "";
   const err = state.newWfErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.newWfErr)}</div>` : "";
   return `
     <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col max-h-[88vh]">
         <div class="px-5 py-4 border-b border-stone-200">
           <div class="text-lg font-semibold">Create workflow</div>
-          <div class="text-sm text-stone-500 mt-0.5">A new workflow starts empty — once created, point it at your own Qlerify model to generate its data. Nothing is preloaded.</div>
+          <div class="text-sm text-stone-500 mt-0.5">Name it and point it at a Qlerify model — they're created together. A workflow is its model, so there's no empty state to fill in later.</div>
         </div>
-        <div class="p-5">
+        <div class="p-5 overflow-auto flex-1">
           ${err}
           <label class="block text-sm font-medium text-stone-700 mb-1">Workflow name</label>
           <input id="new-wf-name" value="${escapeHtml(state.newWfName || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="Q3 Forecast" />
+          <label class="block text-sm font-medium text-stone-700 mb-1 mt-4">Qlerify model link</label>
+          <input id="new-wf-url" type="url" value="${escapeHtml(state.newWfUrl || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="https://app.qlerify.com/workflow/&lt;projectId&gt;/&lt;workflowId&gt;" />
+          <div class="text-xs text-stone-500 mt-1">Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.</div>
+          <details class="mt-4">
+            <summary class="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">Advanced — upload or paste a workflow.json instead</summary>
+            <div class="mt-3">
+              <div class="mb-2 flex items-center gap-2">
+                <input id="new-wf-file" type="file" accept=".json,application/json" class="text-sm" />
+                <span class="text-xs text-stone-400">— or paste below —</span>
+              </div>
+              <textarea id="new-wf-text" class="w-full h-40 rounded-md border border-stone-300 p-2 text-xs mono" placeholder='{ "boundedContext": "...", "domainEvents": { ... } }'>${escapeHtml(state.newWfText || "")}</textarea>
+            </div>
+          </details>
         </div>
         <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
           <button id="new-wf-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
@@ -2926,35 +3174,24 @@ function emptyOrgView() {
       <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
         <div class="text-3xl mb-2">📁</div>
         <div class="text-lg font-semibold text-stone-900">No workflows yet</div>
-        <div class="text-sm text-stone-500 mt-1 mb-5">This organization is empty. Create your first workflow, then point it at your own Qlerify model — nothing is preloaded.</div>
+        <div class="text-sm text-stone-500 mt-1 mb-5">This organization is empty. Create your first workflow — you'll point it at your own Qlerify model as part of creating it.</div>
         <div class="text-left">
-          <label class="block text-xs text-stone-500 mb-1">Workflow name</label>
-          <input id="empty-proj-name" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" placeholder="Q3 Forecast" />
-          <button id="empty-proj-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create workflow</button>
-          <div id="empty-proj-err" class="text-xs text-rose-600 mt-2"></div>
+          <button id="empty-proj-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create your first workflow</button>
           <div class="text-[11px] text-stone-400 mt-3">You can also manage workflows from <a href="#admin" class="underline">Org Admin</a>.</div>
         </div>
       </div>
     </main>`;
 }
 
+// Opening the create dialog (which now collects the mandatory model) is the only
+// create path — the empty-org button just opens it. The dialog itself is mounted
+// globally (it's in wrap()), and its handlers are bound by bindTenantBar().
 function bindEmptyOrg() {
-  const create = async () => {
-    const errEl = document.getElementById("empty-proj-err");
-    const name = document.getElementById("empty-proj-name").value.trim();
-    if (!name) { errEl.textContent = "Workflow name is required"; return; }
-    try {
-      const wss = await api("/v1/workspaces");
-      const workspaceId = (wss[0] || {}).id;
-      if (!workspaceId) { errEl.textContent = "This org has no workspace — create one in Org Admin first."; return; }
-      const proj = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
-      AUTH.setWorkflow(proj.id); // switch straight into the brand-new workflow
-      await ensureMe();
-      navigate("#");
-    } catch (e) { errEl.textContent = e.message; }
-  };
-  document.getElementById("empty-proj-create")?.addEventListener("click", create);
-  document.getElementById("empty-proj-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  document.getElementById("empty-proj-create")?.addEventListener("click", () => {
+    state.newWfOpen = true; state.newWfErr = null; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
+    render();
+    setTimeout(() => document.getElementById("new-wf-name")?.focus(), 30);
+  });
 }
 
 // Signed in but not a member of any organisation yet → create the first one (you

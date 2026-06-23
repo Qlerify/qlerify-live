@@ -26,13 +26,15 @@ import {
   ensureIdentity,
   updateOrganization,
 } from "../provisioning/index.js";
-import { requireIdentity, requireTenant } from "../tenancy/context.js";
-import { setActiveWorkflowModel } from "../../twin/apply.js";
+import { requireIdentity, requireTenant, runWithTenant } from "../tenancy/context.js";
+import { applyWorkflowModel } from "../../twin/apply.js";
 import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
 import {
   createVersion,
   currentContent,
   getOntologyById,
+  getVersionContent,
+  getWorkflowOntology,
   listOntologies,
   listVersions,
 } from "../ontology-store/ontology-store.js";
@@ -79,6 +81,40 @@ function fail(reply: any, err: unknown) {
   const status = typeof (err as any)?.status === "number" ? (err as any).status : 500;
   const code = (err as any)?.code ?? "INTERNAL";
   return reply.code(status).send({ error: code, message: (err as Error).message });
+}
+
+/** A Qlerify link couldn't be pulled — distinct from a bad/invalid model (400) so
+ * the client can tell "your link/network failed" from "your model is wrong". */
+class FetchError extends Error {
+  readonly code = "FETCH_FAILED";
+  readonly status = 502;
+}
+
+interface ModelInputBody {
+  workflow?: string;
+  overlay?: string | null;
+  sourceUrl?: string;
+}
+
+/** Resolve the workflow.json text for a model-setting request: pull from a Qlerify
+ * modeller link (sourceUrl) when given, else use the uploaded/pasted workflow text.
+ * Throws FetchError (→502) on a bad/unreachable link, DomainError (→400) when no
+ * model is provided at all. The returned sourceUrl (null for upload/paste) is
+ * recorded on the version so a later "reload" can re-pull. */
+async function resolveModelInput(body: ModelInputBody): Promise<{ workflow: string; overlay: string | null; sourceUrl: string | null }> {
+  const sourceUrl = body.sourceUrl && body.sourceUrl.trim() ? body.sourceUrl.trim() : null;
+  let workflow = body.workflow;
+  if (sourceUrl) {
+    try {
+      workflow = await fetchSpecificationFromUrl(sourceUrl);
+    } catch (e: any) {
+      throw new FetchError(e?.message ?? String(e));
+    }
+  }
+  if (typeof workflow !== "string" || !workflow.trim()) {
+    throw new DomainError("Provide a Qlerify model link, or upload/paste a workflow.json");
+  }
+  return { workflow, overlay: body.overlay ?? null, sourceUrl };
 }
 
 export function registerControlRoutes(app: FastifyInstance) {
@@ -498,13 +534,32 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
+  // Create a workflow WITH its model in one atomic step — an empty, model-less
+  // workflow can never exist. The model is resolved first (a bad link fails before
+  // anything is created); the workflow row is then created and the model applied to
+  // it (bound via runWithTenant since the new workflow isn't the active one). If the
+  // model is invalid, the just-created workflow is rolled back so no orphan remains.
   app.post("/v1/workflows", async (req, reply) => {
     try {
       const ctx = requireTenant();
-      const body = (req.body ?? {}) as { name?: string; workspaceId?: string };
+      const body = (req.body ?? {}) as { name?: string; workspaceId?: string } & ModelInputBody;
       if (!body.name || !body.workspaceId) throw new DomainError("name and workspaceId are required");
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+
+      // Resolve (and, for a link, fetch) the model BEFORE creating anything — a bad
+      // link/network 502s here and leaves no workflow behind.
+      const { workflow, overlay, sourceUrl } = await resolveModelInput(body);
+
       const proj = await createWorkflow(ctx.organizationId, body.workspaceId, body.name, ctx.principal.id);
+      try {
+        await runWithTenant({ ...ctx, workflowId: proj.id }, () =>
+          applyWorkflowModel(workflow, overlay, { source: "set", sourceUrl }),
+        );
+      } catch (applyErr) {
+        // Atomicity: a model that won't load must not leave a model-less workflow.
+        await deleteWorkflow(ctx.organizationId, proj.id, ctx.principal.id).catch(() => {});
+        throw applyErr;
+      }
       return reply.code(201).send({ id: proj.id, name: proj.name, workspaceId: proj.workspaceId });
     } catch (err) {
       return fail(reply, err);
@@ -526,28 +581,115 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
-  // Set the ACTIVE (non-system) workflow's own model from a Qlerify workflow.json.
-  // Stores a new version + rebuilds ONLY this workflow's data plane (system + other
-  // workflows untouched). Org-admin gated.
+  // Re-point the ACTIVE (non-system) workflow at a model (link, or uploaded/pasted
+  // workflow.json) — e.g. to change the link. Stores a new version + rebuilds ONLY
+  // this workflow's data plane (system + other workflows untouched). Org-admin gated.
   app.put("/v1/workflow/model", async (req, reply) => {
     try {
       const ctx = requireTenant();
-      const body = (req.body ?? {}) as { workflow?: string; overlay?: string | null; sourceUrl?: string };
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
-      // Primary path: a Qlerify modeller link → pull the latest model via MCP.
-      let workflow = body.workflow;
-      if (body.sourceUrl && body.sourceUrl.trim()) {
-        try {
-          workflow = await fetchSpecificationFromUrl(body.sourceUrl.trim());
-        } catch (e: any) {
-          return reply.code(502).send({ error: "FETCH_FAILED", message: e?.message ?? String(e) });
-        }
+      const { workflow, overlay, sourceUrl } = await resolveModelInput((req.body ?? {}) as ModelInputBody);
+      const result = await applyWorkflowModel(workflow, overlay, { source: "set", sourceUrl });
+      return { ok: true, ...result };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Version history for the ACTIVE workflow's model: the list (oldest→newest) plus
+  // which one is current and the effective reload link. Shape mirrors what the
+  // Inspect-model dialog's version sidebar renders. Empty when no model yet.
+  app.get("/v1/workflow/model/status", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      if (!ctx.workflowId) return { versions: [], current: -1, total: 0, currentVersion: null, sourceUrl: null };
+      const ont = await getWorkflowOntology(ctx.organizationId, ctx.workflowId);
+      if (!ont) return { versions: [], current: -1, total: 0, currentVersion: null, sourceUrl: null };
+      const rows = await listVersions(ctx.organizationId, ont.id);
+      const versions = rows.map((v) => ({
+        id: v.id,
+        seq: v.seq,
+        source: v.source,
+        sourceUrl: v.sourceUrl,
+        sourceName: v.sourceName,
+        savedAt: v.createdAt,
+        summary: v.summaryJson ? JSON.parse(v.summaryJson) : { events: 0, roles: 0, boundedContexts: 0 },
+      }));
+      const current = versions.findIndex((v) => v.id === ont.currentVersionId);
+      const currentVersion = current >= 0 ? versions[current] : null;
+      // The reload source is the current version's link (the model the workflow is
+      // pointed at right now); null when it came from an upload/paste.
+      return { versions, current, total: versions.length, currentVersion, sourceUrl: currentVersion?.sourceUrl ?? null };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // The active workflow's CURRENT model body (workflow.json text) — for the
+  // Inspect dialog's read-only viewer. 404 when the workflow has no model yet.
+  app.get("/v1/workflow/model/content", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      if (!ctx.workflowId) return reply.code(404).send({ error: "NOT_FOUND", message: "no active workflow" });
+      const ont = await getWorkflowOntology(ctx.organizationId, ctx.workflowId);
+      if (!ont) return reply.code(404).send({ error: "NOT_FOUND", message: "this workflow has no model yet" });
+      const content = await currentContent(ctx.organizationId, ont.id);
+      if (!content) return reply.code(404).send({ error: "NOT_FOUND", message: "no version content" });
+      return { content: content.workflow, overlay: content.overlay };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Restore a stored version: re-apply its exact content as a NEW current version
+  // (source "restore", carrying its original link forward) and rebuild this
+  // workflow's data plane. History stays linear — restore never rewrites the past.
+  app.post("/v1/workflow/model/restore", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const body = (req.body ?? {}) as { versionId?: string };
+      if (!body.versionId) throw new DomainError("versionId is required");
+      if (!ctx.workflowId) throw new DomainError("Select a workflow first.");
+      const ont = await getWorkflowOntology(ctx.organizationId, ctx.workflowId);
+      if (!ont) return reply.code(404).send({ error: "NOT_FOUND", message: "this workflow has no model yet" });
+      // The version must belong to THIS workflow's ontology (deny cross-workflow ids).
+      const row = await prisma.platOntologyVersion.findFirst({
+        where: { id: body.versionId, organizationId: ctx.organizationId, ontologyId: ont.id },
+        select: { id: true, sourceUrl: true },
+      });
+      if (!row) return reply.code(404).send({ error: "NOT_FOUND", message: "version not found for this workflow" });
+      const content = await getVersionContent(ctx.organizationId, row.id);
+      if (!content) return reply.code(404).send({ error: "NOT_FOUND", message: "version content missing" });
+      const result = await applyWorkflowModel(content.workflow, content.overlay, { source: "restore", sourceUrl: row.sourceUrl });
+      return { ok: true, ...result };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Reload: re-pull the latest model from the current version's stored Qlerify link
+  // and apply it as a new version (source "fetch"). Unavailable (409) when the
+  // current model came from an upload/paste, since there's no link to re-pull.
+  app.post("/v1/workflow/model/reload", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      if (!ctx.workflowId) throw new DomainError("Select a workflow first.");
+      const ont = await getWorkflowOntology(ctx.organizationId, ctx.workflowId);
+      if (!ont?.currentVersionId) return reply.code(404).send({ error: "NOT_FOUND", message: "this workflow has no model yet" });
+      const cur = await prisma.platOntologyVersion.findFirst({
+        where: { id: ont.currentVersionId, organizationId: ctx.organizationId },
+        select: { sourceUrl: true },
+      });
+      if (!cur?.sourceUrl) throw new DomainError("This model has no source link to reload — it was uploaded or pasted. Re-point it via Set model.");
+      let workflow: string;
+      try {
+        workflow = await fetchSpecificationFromUrl(cur.sourceUrl);
+      } catch (e: any) {
+        throw new FetchError(e?.message ?? String(e));
       }
-      // Secondary path: pasted / uploaded workflow.json text.
-      if (typeof workflow !== "string" || !workflow.trim()) {
-        throw new DomainError("Provide a Qlerify model link, or upload/paste a workflow.json");
-      }
-      const result = await setActiveWorkflowModel(workflow, body.overlay ?? null);
+      const result = await applyWorkflowModel(workflow, null, { source: "fetch", sourceUrl: cur.sourceUrl });
       return { ok: true, ...result };
     } catch (err) {
       return fail(reply, err);

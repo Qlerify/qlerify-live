@@ -121,7 +121,7 @@ export async function createVersion(
   ontologyId: string,
   workflowBytes: string,
   overlayBytes: string | null,
-  opts: { source?: string; createdBy?: string | null } = {},
+  opts: { source?: string; createdBy?: string | null; sourceUrl?: string | null; sourceName?: string | null } = {},
 ): Promise<CreateVersionResult> {
   // Store the bodies (exact bytes) and build the per-version manifest.
   const workflowHash = cas.put(organizationId, workflowBytes);
@@ -165,6 +165,8 @@ export async function createVersion(
       contentSize: Buffer.byteLength(workflowBytes),
       source: opts.source ?? "edit",
       summaryJson: JSON.stringify(summary),
+      sourceUrl: opts.sourceUrl ?? null,
+      sourceName: opts.sourceName ?? null,
       createdBy: opts.createdBy ?? null,
     },
   });
@@ -248,6 +250,15 @@ export async function listVersions(organizationId: string, ontologyId: string) {
   return prisma.platOntologyVersion.findMany({
     where: { organizationId, ontologyId },
     orderBy: { seq: "asc" },
-    select: { id: true, seq: true, manifestHash: true, contentSize: true, source: true, summaryJson: true, createdBy: true, createdAt: true },
+    select: { id: true, seq: true, manifestHash: true, contentSize: true, source: true, summaryJson: true, sourceUrl: true, sourceName: true, createdBy: true, createdAt: true },
+  });
+}
+
+/** The workflow's "workflow" ontology id + current version pointer, or null when
+ * the workflow has no model yet. Used by the status/restore/reload endpoints. */
+export async function getWorkflowOntology(organizationId: string, workflowId: string) {
+  return prisma.platOntology.findFirst({
+    where: { organizationId, workflowId, name: "workflow" },
+    select: { id: true, currentVersionId: true },
   });
 }

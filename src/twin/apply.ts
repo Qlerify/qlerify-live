@@ -16,14 +16,41 @@ import { createVersion, ensureOntologyResource } from "../platform/ontology-stor
 import { getOntology, loadOntologyFromStrings, setWorkflowModel } from "../ontology/model.js";
 import { applyModelTables } from "./projection-store.js";
 
+/** A short, human label for a version's source link: the model's primary bounded
+ * context name. Lets the version sidebar show "OrderManagement ↗" instead of an
+ * opaque url. Best-effort — null when the json doesn't parse or names nothing. */
+function boundedContextLabel(workflowJson: string): string | null {
+  try {
+    const spec = JSON.parse(workflowJson);
+    const bc = spec?.boundedContext;
+    return typeof bc === "string" && bc.trim() ? bc.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ApplyModelOpts {
+  /** Provenance recorded on the version row: set | fetch | restore | edit. */
+  source?: string;
+  /** The Qlerify link this content was pulled from (null for upload/paste). The
+   * latest version's sourceUrl is what "reload" re-fetches. */
+  sourceUrl?: string | null;
+}
+
 /**
- * Set the ACTIVE (non-system) workflow's own model from a provided Qlerify export.
- * Stores it as a new version of the workflow's ontology (CAS) and rebuilds ONLY
- * this workflow's data plane — its own gen__p<workflow>_ tables + its own EventLog.
- * The system context and every OTHER workflow are untouched (everything here is
- * workflow-scoped via the ALS context).
+ * Apply a Qlerify model to the workflow bound in the CURRENT context. Validates
+ * the model, stores it as a new version of the workflow's ontology (CAS), makes it
+ * live for the request, and drops/recreates ONLY this workflow's projection tables
+ * + clears its own run history. Everything is workflow-scoped via the ALS context,
+ * so callers target a specific workflow by binding it first (runWithTenant) — used
+ * both by PUT /v1/workflow/model (active workflow) and by workflow creation (the
+ * just-created workflow). The system context and every OTHER workflow are untouched.
  */
-export async function setActiveWorkflowModel(workflow: string, overlay: string | null): Promise<{ versionId: string; seq: number; changed: boolean }> {
+export async function applyWorkflowModel(
+  workflow: string,
+  overlay: string | null,
+  opts: ApplyModelOpts = {},
+): Promise<{ versionId: string; seq: number; changed: boolean }> {
   const ctx = requireTenant();
   if (isSystemWorkflow() || !ctx.workflowId) {
     throw new DomainError("Setting a workflow model applies to a real (non-system) workflow — create or select one first.");
@@ -46,7 +73,13 @@ export async function setActiveWorkflowModel(workflow: string, overlay: string |
     const r = await ensureOntologyResource({ organizationId: ctx.organizationId, workflowId: ctx.workflowId, workspaceId: proj?.workspaceId ?? null, environmentId: null, name: "workflow", ownerId: ctx.principal.id });
     ont = { id: r.ontologyId };
   }
-  const v = await createVersion(ctx.organizationId, ont.id, workflow, overlay, { source: "set", createdBy: ctx.principal.id });
+  const sourceUrl = opts.sourceUrl ?? null;
+  const v = await createVersion(ctx.organizationId, ont.id, workflow, overlay, {
+    source: opts.source ?? "set",
+    createdBy: ctx.principal.id,
+    sourceUrl,
+    sourceName: sourceUrl ? boundedContextLabel(workflow) : null,
+  });
 
   // Make the new model live for THIS request, then rebuild the workflow's data
   // plane for it: drop the workflow's old projection tables, create the new

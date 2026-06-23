@@ -116,10 +116,11 @@ const state = {
 };
 
 // --- Tenant auth/session (localStorage-backed) ------------------------------
-// No token ⇒ requests go out header-less ⇒ the server resolves the system tenant
-// (the demo keeps working until someone logs in). A token (from /v1/auth/login)
-// is sent as a bearer; the chosen org is sent as X-Org-Id (which only SELECTS
-// among the identity's orgs — the server derives the canonical org_id).
+// Every request must authenticate: with no token the server replies 401 and the
+// api() wrapper redirects to the login screen (there is no header-less demo). A
+// token (from /v1/auth/login) is sent as a bearer; the chosen org is sent as
+// X-Org-Id (which only SELECTS among the identity's orgs — the server derives the
+// canonical org_id).
 const AUTH = {
   token: () => localStorage.getItem("ql.token") || "",
   org: () => localStorage.getItem("ql.org") || "",
@@ -2164,7 +2165,7 @@ function render() {
 // ===========================================================================
 
 /** Best-effort load of the current tenant context for the top bar. Never throws:
- * the demo runs header-less as the system tenant before anyone signs in. */
+ * with no valid session, whoami 401s and api() redirects to the login screen. */
 async function ensureMe() {
   try {
     state.me = await api("/v1/whoami");
@@ -2174,8 +2175,9 @@ async function ensureMe() {
     // A stale/invalid org selector (e.g. an org that was deleted, left behind in
     // localStorage) makes whoami fail with a membership AUTH_ERROR — which would
     // otherwise 403 every request and lock the user out. Drop the selector and
-    // retry once header-less so they land on their default org. The backend stays
-    // strict (a non-member selector is always denied); recovery is client-side.
+    // retry once (the token is still attached) so they land on their default org.
+    // The backend stays strict (a non-member selector is always denied); recovery
+    // is client-side.
     if (AUTH.org() && isOrgSelectorErr(e)) {
       AUTH.setOrg(null); // also clears the selected workflow
       try {
@@ -2508,7 +2510,6 @@ function loginView() {
         <label class="block text-xs font-medium text-stone-600 mb-1">Password</label>
         <input id="login-password" type="password" autocomplete="current-password" class="w-full mb-4 rounded-md border border-stone-300 px-3 py-2 text-sm" />
         <button class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Sign in</button>
-        <div class="text-[11px] text-stone-400 mt-3">Or run as the <b>system</b> tenant without signing in — <a href="#" id="login-skip" class="underline">continue as system</a>.</div>
       </form>
     </div>`;
 }
@@ -2530,9 +2531,6 @@ function bindLogin() {
       state.loginError = "Invalid username or password.";
       render();
     }
-  });
-  document.getElementById("login-skip")?.addEventListener("click", (e) => {
-    e.preventDefault(); AUTH.clear(); state.me = null; navigate("#");
   });
 }
 

@@ -13,7 +13,9 @@
 //      A credentialed or superuser identity can NEVER be impersonated this way —
 //      it must present a real session token. This closes the "one env var = a
 //      forgeable god-token" hole the red-team flagged.
-//   3. No credentials ⇒ the seeded SYSTEM identity (the demo path).
+//   3. No credentials ⇒ REJECTED. There is no header-less demo default: every
+//      request must authenticate. The SYSTEM org remains control-plane plumbing
+//      (superuser home, non-request fallback, audit anchor) — never a login.
 //
 // Platform admin (superuser, §10): may SELECT an org it is not a member of
 // (break-glass); the request is flagged actingAsPlatformAdmin and audited at
@@ -22,7 +24,7 @@
 
 import { prisma } from "../../db.js";
 import { AuthError, UnauthenticatedError } from "../../errors.js";
-import { SYSTEM_ORG_ID, SYSTEM_SUBJECT } from "../ids.js";
+import { SYSTEM_ORG_ID } from "../ids.js";
 import type { TenantContext } from "../types.js";
 import { resolveSession } from "./sessions.js";
 
@@ -79,14 +81,15 @@ async function resolveIdentity(headers: AuthnHeaders): Promise<{ identity: Ident
     return { identity, subject: identity.subject };
   }
 
-  // (3) X-Identity-Subject dev shim, or header-less ⇒ system.
-  const sub = header(headers, "x-identity-subject") ?? SYSTEM_SUBJECT;
+  // (3) X-Identity-Subject dev shim (non-privileged identities only). No
+  // credentials at all ⇒ reject: there is no header-less demo default — every
+  // request must authenticate (org → workspace → workflow starts at sign-in).
+  const sub = header(headers, "x-identity-subject");
+  if (!sub) throw new UnauthenticatedError("authentication required");
   const identity = await prisma.platIdentity.findUnique({ where: { subject: sub } });
   if (!identity) throw new UnauthenticatedError(`unknown identity subject: ${sub}`);
   if (identity.status !== "active") throw new UnauthenticatedError(`identity "${sub}" is not active`);
-  if (sub !== SYSTEM_SUBJECT && !(await devSubjectAllowed(identity))) {
-    throw new UnauthenticatedError("this account requires sign-in");
-  }
+  if (!(await devSubjectAllowed(identity))) throw new UnauthenticatedError("this account requires sign-in");
   return { identity, subject: sub };
 }
 

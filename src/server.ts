@@ -28,15 +28,17 @@ export async function buildServer() {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
   }
 
-  // Multi-tenant control plane: seed the system tenant BEFORE serving so the
-  // demo's header-less requests can resolve to it, then bind a tenant context to
-  // every request (org_id derived from identity, never from client input).
+  // Multi-tenant control plane: seed the system tenant (control-plane plumbing —
+  // superuser home, non-request fallback, audit anchor) BEFORE serving, then bind
+  // a tenant context to every request (org_id derived from identity, never from
+  // client input). Requests must authenticate — there is no header-less demo; the
+  // static web shell is the only public surface so the login screen can load.
   try {
     await seedSystemOrg();
   } catch (err) {
     app.log.error({ err }, "system-org seed failed — tenant resolution will reject requests until fixed");
   }
-  registerTenantPlugin(app);
+  registerTenantPlugin(app, webRoot);
 
   // Uniform error mapping — a safety net for routes that let a handled error
   // bubble (e.g. GET query routes with no local try/catch). Keeps NoActiveWorkflow

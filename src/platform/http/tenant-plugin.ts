@@ -13,10 +13,14 @@
 //                        reliable (enterWith in the async onRequest hook is lost
 //                        across the POST body-parse hop).
 //
-// The existing demo's header-less requests authenticate as the seeded system
-// identity (no TENANCY=off bypass); that common context is cached so static
-// assets and demo calls don't pay three DB round-trips each.
+// Auth is DENY-BY-DEFAULT: every request must authenticate. The only public
+// paths are (a) the /v1/auth/* endpoints (they run their own credential check)
+// and (b) the static web shell (index.html, app.js, …) — the browser must load
+// it to render the login screen. A request with no credentials is rejected with
+// 401; there is no header-less single-tenant demo default.
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { isHandledError } from "../../errors.js";
 import { resolveTenantContext, type AuthnHeaders } from "../authn/index.js";
@@ -24,29 +28,31 @@ import { ensureWorkflowModelLoaded } from "../ontology-store/ontology-store.js";
 import { enterTenant } from "../tenancy/context.js";
 import type { TenantContext } from "../types.js";
 
-let cachedSystemCtx: TenantContext | undefined;
-
-function hasCredentials(h: AuthnHeaders): boolean {
-  // X-Workflow-Id counts: a request that selects a workflow must go through full
-  // resolution (and workflow-model loading), not the cached system context.
-  return !!(h.authorization || h["x-identity-subject"] || h["x-org-id"] || h["x-org-slug"] || h["x-workflow-id"]);
+/** Public paths that skip tenant resolution. Deny-by-default: a new API route is
+ * auth-gated automatically; only the auth endpoints and real static-shell files
+ * are exempt. (Exempting a *missing* static file would be an availability bug,
+ * not a security hole — every API path stays protected regardless.) */
+function isPublicPath(req: FastifyRequest, webRoot: string | undefined): boolean {
+  const url = (req.url || "").split("?")[0];
+  // Auth endpoints must stay reachable even with a stale/expired/garbage bearer
+  // token: they run their own credential check and never read requireTenant().
+  if (url.startsWith("/v1/auth/")) return true;
+  // The static web shell is public so the browser can load it and render the
+  // login screen; every data fetch it then makes is auth-gated and 401s until
+  // sign-in (the api() wrapper redirects to #login on a 401).
+  if (!webRoot) return false;
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  const rel = url === "/" ? "index.html" : url.replace(/^\/+/, "");
+  if (!rel || rel.includes("..")) return false;
+  return existsSync(join(webRoot, rel));
 }
 
-export function registerTenantPlugin(app: FastifyInstance) {
+export function registerTenantPlugin(app: FastifyInstance, webRoot?: string) {
   app.addHook("onRequest", async (req: FastifyRequest, reply) => {
-    // Auth endpoints must stay reachable even with a stale/expired/garbage bearer
-    // token in the request: they run their own credential check and never read
-    // requireTenant(). Skipping resolution here is what prevents an expired
-    // session from locking a user out of /v1/auth/login.
-    if ((req.url || "").startsWith("/v1/auth/")) return;
+    if (isPublicPath(req, webRoot)) return;
     const headers = req.headers as AuthnHeaders;
     try {
-      if (!hasCredentials(headers) && cachedSystemCtx) {
-        (req as any).tenant = cachedSystemCtx;
-        return;
-      }
       const ctx = await resolveTenantContext(headers);
-      if (!hasCredentials(headers)) cachedSystemCtx = ctx;
       (req as any).tenant = ctx;
       // Bind the active workflow's model BEFORE the handler so the synchronous
       // getOntology() resolves the right model. A workflow with no model yet loads
@@ -71,9 +77,4 @@ export function registerTenantPlugin(app: FastifyInstance) {
     if (ctx) enterTenant(ctx);
     done();
   });
-}
-
-/** Test-only: drop the cached system context (e.g. after re-seeding). */
-export function _resetTenantCache(): void {
-  cachedSystemCtx = undefined;
 }

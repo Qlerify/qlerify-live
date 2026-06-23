@@ -2106,7 +2106,7 @@ function render() {
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
   // user) so the whole app reads as a multi-tenant console.
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${newOrgDialog()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${newOrgDialog()}${newWfDialog()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -2306,6 +2306,46 @@ function orgMenuPanel() {
     </div>`;
 }
 
+// A single, uniform monochrome glyph shared by every workflow row and the
+// switcher trigger. Unlike orgAvatar (per-org colour identity), workflows
+// deliberately get NO per-item colour: the org owns the one colour identity in
+// the tenant bar, and a uniform glyph keeps the nested workflow list reading as
+// a clean set. Inherits its colour from the surrounding text via currentColor.
+function workflowGlyph(cls) {
+  return `<svg viewBox="0 0 20 20" fill="none" aria-hidden="true" class="shrink-0 ${cls}"><rect x="2.5" y="3" width="7" height="5" rx="1.3" stroke="currentColor" stroke-width="1.4"/><rect x="10.5" y="12" width="7" height="5" rx="1.3" stroke="currentColor" stroke-width="1.4"/><path d="M6 8v3a1.5 1.5 0 0 0 1.5 1.5H10.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+// The workflow switcher dropdown. A stripped-down sibling of orgMenuPanel():
+// no header block, no "current" row, no admin shortcut — just the switchable
+// list (uniform glyph + name, a check on the active one) and a create-new row.
+// Anchored under the tenant-bar workflow trigger; a transparent backdrop closes
+// it on any outside click.
+function workflowMenuPanel() {
+  const workflows = state.me?.workflows || [];
+  const curId = state.me?.workflowId || "";
+  const check = `<svg viewBox="0 0 20 20" fill="none" class="h-4 w-4 text-stone-900 shrink-0"><path d="M5 10.5l3.5 3.5L15 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const list = workflows.map((w) => {
+    const active = w.id === curId;
+    return `
+    <button role="menuitem" data-wf-pick="${escapeHtml(w.id)}" class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-stone-100 text-left ${active ? "bg-stone-100" : ""}">
+      ${workflowGlyph("h-5 w-5 text-stone-400")}
+      <span class="flex-1 text-sm truncate ${active ? "text-stone-900 font-medium" : "text-stone-800"}">${escapeHtml(w.name)}</span>
+      ${active ? check : ""}
+    </button>`;
+  }).join("") || `<div class="px-2 py-2 text-sm text-stone-400">No workflows.</div>`;
+  return `
+    <div id="wf-menu-backdrop" class="fixed inset-0 z-40"></div>
+    <div id="wf-menu" role="menu" aria-label="Workflows" class="absolute left-0 top-full mt-1.5 z-50 w-64 rounded-xl border border-stone-200 bg-white shadow-xl text-stone-900 overflow-hidden">
+      <div class="p-2">
+        <div class="max-h-72 overflow-auto">${list}</div>
+      </div>
+      <button role="menuitem" id="wf-menu-create" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
+        <span class="inline-flex items-center justify-center h-7 w-7 rounded-md border border-stone-300 text-stone-500 text-lg leading-none">+</span>
+        <span class="text-sm font-medium text-stone-800">Create new workflow</span>
+      </button>
+    </div>`;
+}
+
 // The Qlerify diamond mark (from the app's favicon.svg), inlined so it inherits
 // the surrounding text colour via currentColor — white on the dark tenant bar,
 // brand green on the light login card.
@@ -2325,10 +2365,15 @@ function tenantBar() {
   const emptyOrg = workflows.length === 0;
   const projName = (workflows.find((p) => p.id === curProj) || {}).name || (emptyOrg ? "No workflow" : "Default");
   const projControl = emptyOrg
-    ? `<a href="#" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no workflows yet">+ Create workflow</a>`
-    : workflows.length > 1
-    ? `<select id="proj-switch" class="text-sm rounded border border-stone-700 bg-stone-800 text-stone-100 px-2 py-0.5">${workflows.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === curProj ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select>`
-    : `<a href="#" class="text-sm text-stone-100 hover:text-white">${escapeHtml(projName)}</a>`;
+    ? `<button id="wf-empty-create" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no workflows yet">+ Create workflow</button>`
+    : `<div class="relative" id="wf-menu-wrap">
+          <button id="wf-menu-btn" aria-haspopup="menu" aria-expanded="${state.wfMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1.5 pr-1.5 py-0.5" title="Workflow menu — switch or create">
+            ${workflowGlyph("h-4 w-4 text-stone-400")}
+            <span class="text-sm font-medium text-stone-100 max-w-[220px] truncate">${escapeHtml(projName)}</span>
+            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          ${state.wfMenuOpen ? workflowMenuPanel() : ""}
+        </div>`;
   return `
     <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
       <div class="px-6 py-1.5 flex items-center gap-3">
@@ -2357,11 +2402,6 @@ function tenantBar() {
 }
 
 function bindTenantBar() {
-  document.getElementById("proj-switch")?.addEventListener("change", async (e) => {
-    AUTH.setWorkflow(e.target.value);
-    await ensureMe();
-    onHashChange();
-  });
   document.getElementById("btn-logout")?.addEventListener("click", async () => {
     try { await api("/v1/auth/logout", { method: "POST", body: "{}" }); } catch (_e) { /* ignore */ }
     AUTH.clear();
@@ -2391,6 +2431,55 @@ function bindTenantBar() {
       render();
     }
   };
+  // Create-workflow dialog. A new workflow lands in the org's first workspace
+  // (the same default the empty-org view uses) and starts model-less, so we
+  // switch straight into it — the dashboard then prompts "Set this workflow's
+  // model". Mirrors createOrg's open/busy/err state pattern.
+  const createWorkflow = async () => {
+    if (state.newWfBusy) return;
+    const name = (document.getElementById("new-wf-name")?.value || state.newWfName || "").trim();
+    if (!name) { state.newWfErr = "Workflow name is required"; render(); return; }
+    state.newWfBusy = true; state.newWfErr = null; render();
+    try {
+      const wss = await api("/v1/workspaces");
+      const workspaceId = (wss[0] || {}).id;
+      if (!workspaceId) throw new Error("This org has no workspace — create one in Org Admin first.");
+      const wf = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId }) });
+      AUTH.setWorkflow(wf.id); // switch straight into the brand-new workflow
+      state.newWfOpen = false; state.newWfBusy = false; state.newWfName = "";
+      state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new workflow
+      navigate("#"); // model-less new workflow → the "set model" screen
+    } catch (e) {
+      state.newWfBusy = false;
+      state.newWfErr = (e && e.message) ? e.message : "Failed to create the workflow.";
+      render();
+    }
+  };
+  // --- Workflow menu (switcher dropdown: switch / create) -------------------
+  const dismissWfMenu = () => { state.wfMenuOpen = false; render(); document.getElementById("wf-menu-btn")?.focus(); };
+  document.getElementById("wf-menu-btn")?.addEventListener("click", () => { state.wfMenuOpen = !state.wfMenuOpen; render(); });
+  document.getElementById("wf-menu-backdrop")?.addEventListener("click", dismissWfMenu);
+  document.querySelectorAll("[data-wf-pick]").forEach((el) => el.addEventListener("click", async () => {
+    const id = el.getAttribute("data-wf-pick");
+    state.wfMenuOpen = false;
+    if (id === (state.me?.workflowId || "")) { render(); return; } // already the current workflow — just close
+    AUTH.setWorkflow(id);
+    await ensureMe();
+    onHashChange(); // reloads the current view for the newly selected workflow
+  }));
+  const openCreateWorkflow = () => {
+    state.wfMenuOpen = false;
+    state.newWfOpen = true; state.newWfErr = null; state.newWfName = "";
+    render();
+    setTimeout(() => document.getElementById("new-wf-name")?.focus(), 30);
+  };
+  document.getElementById("wf-menu-create")?.addEventListener("click", openCreateWorkflow);
+  document.getElementById("wf-empty-create")?.addEventListener("click", openCreateWorkflow);
+  document.getElementById("new-wf-cancel")?.addEventListener("click", () => { state.newWfOpen = false; render(); });
+  document.getElementById("new-wf-name")?.addEventListener("input", (e) => { state.newWfName = e.target.value; });
+  document.getElementById("new-wf-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") createWorkflow(); });
+  document.getElementById("new-wf-create")?.addEventListener("click", createWorkflow);
+
   // --- Organisation menu (avatar dropdown: switch / admin / create) ---------
   // Dismiss without acting (Escape / outside-click): close and return focus to
   // the trigger so a keyboard user isn't dropped onto <body> by the re-render.
@@ -2416,10 +2505,14 @@ function bindTenantBar() {
     render();
     setTimeout(() => document.getElementById("new-org-name")?.focus(), 30);
   });
-  // Close the menu on Escape — bound once for the app's lifetime.
+  // Close whichever switcher menu is open on Escape — bound once for the app's lifetime.
   if (!bindTenantBar._escBound) {
     bindTenantBar._escBound = true;
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.orgMenuOpen) dismissOrgMenu(); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (state.orgMenuOpen) dismissOrgMenu();
+      else if (state.wfMenuOpen) dismissWfMenu();
+    });
   }
   document.getElementById("new-org-cancel")?.addEventListener("click", () => { state.newOrgOpen = false; render(); });
   document.getElementById("new-org-name")?.addEventListener("input", (e) => { state.newOrgName = e.target.value; });
@@ -2448,6 +2541,32 @@ function newOrgDialog() {
         <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
           <button id="new-org-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
           <button id="new-org-create" ${state.newOrgBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.newOrgBusy ? "Creating…" : "Create organization"}</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// Self-service create-workflow modal, opened from the workflow switcher's
+// "Create new workflow" row (or the empty-org "+ Create workflow" trigger).
+// Mirrors newOrgDialog()'s open/busy/err state pattern.
+function newWfDialog() {
+  if (!state.newWfOpen) return "";
+  const err = state.newWfErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.newWfErr)}</div>` : "";
+  return `
+    <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-md flex flex-col">
+        <div class="px-5 py-4 border-b border-stone-200">
+          <div class="text-lg font-semibold">Create workflow</div>
+          <div class="text-sm text-stone-500 mt-0.5">A new workflow starts empty — once created, point it at your own Qlerify model to generate its data. Nothing is preloaded.</div>
+        </div>
+        <div class="p-5">
+          ${err}
+          <label class="block text-sm font-medium text-stone-700 mb-1">Workflow name</label>
+          <input id="new-wf-name" value="${escapeHtml(state.newWfName || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="Q3 Forecast" />
+        </div>
+        <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
+          <button id="new-wf-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
+          <button id="new-wf-create" ${state.newWfBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.newWfBusy ? "Creating…" : "Create workflow"}</button>
         </div>
       </div>
     </div>`;

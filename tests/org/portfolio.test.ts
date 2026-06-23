@@ -325,4 +325,32 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
     expect(row.kind).toBe("predicted");
     expect(row.predictedFinish).toBeTruthy();
   });
+
+  it("sums days-first value at risk (overdue + slip + over-run)", async () => {
+    // over-run alone (no commitment mapped)
+    await setWorkflowMapping(org2, wf3, "commitDate", null);
+    let p = await computePortfolio(org2);
+    expect(p.valueAtRisk.hasCommitData).toBe(false);
+    expect(p.valueAtRisk.overrunDays).toBe(3); // aRisk runs 5d vs a 2d p85
+    expect(p.valueAtRisk.slipDays).toBe(0);
+    expect(p.valueAtRisk.totalDays).toBe(3);
+
+    // with a due date mapped, projected slip is added on top
+    await setWorkflowMapping(org2, wf3, "commitDate", "dueDate");
+    p = await computePortfolio(org2);
+    expect(p.valueAtRisk.hasCommitData).toBe(true);
+    expect(p.valueAtRisk.overdueDays).toBe(0);
+    expect(p.valueAtRisk.slipDays).toBe(1); // pLate slips ~1d
+    expect(p.valueAtRisk.overrunDays).toBe(3);
+    expect(p.valueAtRisk.totalDays).toBe(4);
+    expect(p.valueAtRisk.byWorkflow[0]).toMatchObject({ workflowId: wf3, totalDays: 4 });
+  });
+
+  it("exposes a connector-freshness preview built from the org's real source systems", async () => {
+    const p = await computePortfolio(org2);
+    expect(p.connectorFreshness.preview).toBe(true); // static until real lastPullAt wiring
+    expect(p.connectorFreshness.sources.some((s) => s.name === "Sales")).toBe(true);
+    expect(p.connectorFreshness.sources[0]).toHaveProperty("slaMinutes");
+    expect(p.connectorFreshness.sources[0]).toHaveProperty("status");
+  });
 });

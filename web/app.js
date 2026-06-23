@@ -1255,6 +1255,66 @@ function orgBottleneckRow(b) {
     </button>`;
 }
 
+// --- Value at risk (days-first cost-of-delay) ---
+function orgValueAtRiskPanel(o) {
+  const v = o.valueAtRisk;
+  if (!v) return "";
+  const stats = `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      ${orgMiniStat("Days at risk", v.totalDays, v.totalDays > 0 ? "text-rose-700" : "text-stone-900")}
+      ${orgMiniStat("Overdue", v.overdueDays, "text-rose-700")}
+      ${orgMiniStat("Projected slip", v.slipDays, "text-amber-700")}
+      ${orgMiniStat("Over-run", v.overrunDays, "text-stone-700")}
+    </div>`;
+  const note = !v.hasCommitData
+    ? `<div class="mt-3 text-xs text-stone-500">Overdue & projected-slip days need a commitment date — <button data-org-map-open class="underline font-medium">map one</button>. Over-run days come from the derived baseline.</div>`
+    : "";
+  const max = Math.max(1, ...(v.byWorkflow || []).map((w) => w.totalDays));
+  const bars = (v.byWorkflow || []).length
+    ? `<div class="mt-3 space-y-2">${v.byWorkflow.map((w) => `
+        <button data-wf-go="${w.workflowId}" class="w-full text-left">
+          <div class="flex justify-between text-xs"><span class="text-stone-700 truncate">${escapeHtml(w.workflowName)}</span><span class="font-medium text-stone-700 tabular-nums">${w.totalDays}d</span></div>
+          <div class="mt-0.5 h-2 bg-stone-100 rounded overflow-hidden flex">
+            <div class="bg-rose-500" style="width:${(w.overdueDays / max) * 100}%" title="${w.overdueDays}d overdue"></div>
+            <div class="bg-amber-400" style="width:${(w.slipDays / max) * 100}%" title="${w.slipDays}d projected slip"></div>
+            <div class="bg-stone-400" style="width:${(w.overrunDays / max) * 100}%" title="${w.overrunDays}d over-run"></div>
+          </div>
+        </button>`).join("")}
+        <div class="flex gap-3 pt-1 text-[10px] text-stone-500"><span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-rose-500"></span>overdue</span><span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-amber-400"></span>slip</span><span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-stone-400"></span>over-run</span></div>
+      </div>`
+    : `<div class="mt-3 text-sm text-stone-400">No days at risk. 🎉</div>`;
+  return panelShell("Value at risk", "Cost of delay, in days", `${stats}${note}${bars}`);
+}
+
+// --- Connector freshness strip (PREVIEW: static placeholder until real wiring) ---
+function orgFreshnessPanel(o) {
+  const f = o.connectorFreshness;
+  if (!f) return "";
+  const badge = f.preview ? `<span class="text-[10px] uppercase font-semibold px-1.5 py-px rounded bg-amber-100 text-amber-800" title="Sample data — not yet wired to live connectors">preview</span>` : "";
+  const chips = (f.sources || []).map((s) => {
+    const tone = s.status === "ok" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : s.status === "stale" ? "bg-rose-50 text-rose-700 border-rose-200"
+      : "bg-stone-50 text-stone-500 border-stone-200";
+    const dot = s.status === "ok" ? "bg-emerald-500" : s.status === "stale" ? "bg-rose-500" : "bg-stone-400";
+    return `<button data-sys class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border ${tone} text-xs" title="SLA ${s.slaMinutes}m · ${s.status}">
+      <span class="inline-block w-1.5 h-1.5 rounded-full ${dot}"></span>
+      <span class="font-medium">${escapeHtml(s.name)}</span>
+      <span class="opacity-70">${escapeHtml(s.lastEventAgo)}</span>
+    </button>`;
+  }).join("");
+  return `
+    <section class="rounded-lg border border-stone-200 bg-white overflow-hidden">
+      <div class="px-4 py-3 border-b border-stone-100 flex items-center gap-2">
+        <div class="flex-1"><div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold">Connector freshness</div><div class="text-sm font-semibold text-stone-800">Source-system sync health</div></div>
+        ${badge}
+      </div>
+      <div class="p-4">
+        <div class="flex flex-wrap gap-2">${chips}</div>
+        ${f.note ? `<div class="mt-3 text-xs text-stone-500">${escapeHtml(f.note)}</div>` : ""}
+      </div>
+    </section>`;
+}
+
 function orgView() {
   const o = state.org;
   const head = (right) => `
@@ -1302,9 +1362,13 @@ function orgView() {
   return head(right) + `
     <main class="flex-1 overflow-auto p-6">
       ${band}
-      <div class="mt-6">${orgTimelinessPanel(o)}</div>
+      <div class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-3">
+        ${orgTimelinessPanel(o)}
+        ${orgValueAtRiskPanel(o)}
+      </div>
       ${grid}
       ${feeds}
+      <div class="mt-6">${orgFreshnessPanel(o)}</div>
     </main>
     <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
       <span>Organisation portfolio · computed live from the event log across all workflows.</span>
@@ -1319,6 +1383,7 @@ function bindOrg() {
     const [wf, demand] = (el.getAttribute("data-ex-go") || "").split("|");
     orgGotoWorkflow(wf, `#demand/${demand}`);
   }));
+  document.querySelectorAll("[data-sys]").forEach((el) => el.addEventListener("click", () => navigate("#bcs")));
   document.querySelectorAll("[data-org-map-open]").forEach((el) => el.addEventListener("click", openOrgMap));
   bindOrgMap();
 }

@@ -283,6 +283,30 @@ export interface PortfolioResult {
   bottlenecks: Bottleneck[];
   capabilities: CapabilityStatus[];
   timeliness: TimelinessPanel | null;
+  valueAtRisk: ValueAtRisk;
+  connectorFreshness: ConnectorFreshness;
+}
+
+/** Days-first cost-of-delay: exposure measured in DAYS (the unit we actually
+ * have), before any € rate table exists. overdue/slip need the commitDate
+ * mapping; overrun needs only the derived baseline. */
+export interface ValueAtRisk {
+  overdueDays: number; // Σ days already past due across open commitments
+  slipDays: number; // Σ projected days late for not-yet-overdue commitments
+  overrunDays: number; // Σ business days at-risk instances run beyond their own 85th pct
+  totalDays: number;
+  hasCommitData: boolean; // a due date is mapped somewhere (else overdue/slip read 0)
+  byWorkflow: { workflowId: string; workflowName: string; overdueDays: number; slipDays: number; overrunDays: number; totalDays: number }[];
+}
+
+/** Connector freshness / health. PREVIEW: currently STATIC sample data — there is
+ * no real per-pull `lastPullAt` writer yet (AdapterConfig.lastPullAt is interface-
+ * only). The shape is the contract a real wiring will fill: swap `sources` to read
+ * now − lastPullAt per source + healthcheck, and flip `preview` to false. */
+export interface ConnectorFreshness {
+  preview: boolean;
+  note: string;
+  sources: { name: string; lastEventAgo: string; slaMinutes: number; status: "ok" | "stale" | "unknown" }[];
 }
 
 export interface WorkflowCard {
@@ -304,6 +328,7 @@ export interface WorkflowCard {
   cycleIndex: number | null; // actual÷expected cycle time, P50 over completed (null until a baseline exists)
   expectedDays: number | null; // derived end-to-end expected duration, in days
   atRisk: number; // open instances past this workflow's 85th-percentile duration
+  atRiskDays: number; // Σ business days those at-risk instances run beyond the 85th pct
 }
 
 export interface ExceptionRow {
@@ -341,6 +366,9 @@ export interface TimelinessPanel {
   onTime: number;
   scorable: number;
   unscorable: number;
+  overdueDays: number; // Σ days past due over ALL overdue (not just displayed rows)
+  slipDays: number; // Σ projected slip days over ALL predicted-late
+  daysByWorkflow: { workflowId: string; overdueDays: number; slipDays: number }[];
   rows: {
     workflowId: string; workflowName: string; demandId: string; dueDate: string;
     kind: "overdue" | "predicted"; days: number; predictedFinish?: string;
@@ -458,7 +486,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     const bl = baselines.get(wf.id);
     const insts = [...(byWf.get(wf.id)?.values() ?? [])];
 
-    let active = 0, completed = 0, rework = 0, softFail = 0, real = 0, evTotal = 0, clean = 0, atRisk = 0;
+    let active = 0, completed = 0, rework = 0, softFail = 0, real = 0, evTotal = 0, clean = 0, atRisk = 0, atRiskMs = 0;
     const series = new Map<string, number>();
     const roleQueue = new Map<string, number>();
     const cycleIdxs: number[] = [];
@@ -488,7 +516,10 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
           roleQueue.set(role, (roleQueue.get(role) ?? 0) + 1);
         }
         // at-risk: business time elapsed already exceeds this workflow's own 85th-percentile completion.
-        if (bl && bl.p85 != null && st.firstBiz && st.lastBiz && st.lastBiz.getTime() - st.firstBiz.getTime() > bl.p85) atRisk++;
+        if (bl && bl.p85 != null && st.firstBiz && st.lastBiz) {
+          const over = st.lastBiz.getTime() - st.firstBiz.getTime() - bl.p85;
+          if (over > 0) { atRisk++; atRiskMs += over; }
+        }
       }
     }
 
@@ -516,6 +547,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       cycleIndex,
       expectedDays: bl && bl.expectedTotal > 0 ? Math.round((bl.expectedTotal / MS_DAY) * 10) / 10 : null,
       atRisk,
+      atRiskDays: Math.round(atRiskMs / MS_DAY),
     });
 
     orgActive += active; orgCompleted += completed; orgTotal += insts.length;
@@ -586,6 +618,28 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
 
   const timeliness = await computeTimeliness(orgId, modelledWf, mappings, byWf, loaded, baselines, now);
 
+  // ---- Days-first cost-of-delay (overdue + projected slip + at-risk over-run) ----
+  const slipByWf = new Map((timeliness?.daysByWorkflow ?? []).map((d) => [d.workflowId, d]));
+  const varByWf = cards
+    .map((c) => {
+      const td = slipByWf.get(c.id);
+      const overdueDays = td?.overdueDays ?? 0, slipDays = td?.slipDays ?? 0, overrunDays = c.atRiskDays;
+      return { workflowId: c.id, workflowName: c.name, overdueDays, slipDays, overrunDays, totalDays: overdueDays + slipDays + overrunDays };
+    })
+    .filter((v) => v.totalDays > 0)
+    .sort((a, b) => b.totalDays - a.totalDays);
+  const valueAtRisk: ValueAtRisk = {
+    overdueDays: timeliness?.overdueDays ?? 0,
+    slipDays: timeliness?.slipDays ?? 0,
+    overrunDays: cards.reduce((s, c) => s + c.atRiskDays, 0),
+    totalDays: (timeliness?.overdueDays ?? 0) + (timeliness?.slipDays ?? 0) + cards.reduce((s, c) => s + c.atRiskDays, 0),
+    hasCommitData: timeliness != null,
+    byWorkflow: varByWf,
+  };
+
+  // ---- Connector freshness (PREVIEW: static placeholder until real lastPullAt wiring) ----
+  const connectorFreshness = buildConnectorFreshness(loaded);
+
   return {
     generatedAt: now.toISOString(),
     org: { id: orgId },
@@ -609,6 +663,34 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     bottlenecks: [...bnMap.values()].sort((a, b) => b.waiting - a.waiting).slice(0, 8),
     capabilities,
     timeliness,
+    valueAtRisk,
+    connectorFreshness,
+  };
+}
+
+// PREVIEW connector-freshness data. The source NAMES are real (the org's bounded
+// contexts, from the loaded models), but the freshness / SLA / status values are
+// STATIC samples — there is no per-pull lastPullAt writer yet. When the adapter
+// layer starts stamping lastPullAt + healthchecks, replace the sample assignment
+// with `now − lastPullAt` per source and set preview=false. Kept deliberately so
+// the panel (and this gap) is never forgotten.
+const FRESHNESS_SAMPLES: { lastEventAgo: string; slaMinutes: number; status: "ok" | "stale" | "unknown" }[] = [
+  { lastEventAgo: "2m", slaMinutes: 15, status: "ok" },
+  { lastEventAgo: "9m", slaMinutes: 15, status: "ok" },
+  { lastEventAgo: "47m", slaMinutes: 60, status: "ok" },
+  { lastEventAgo: "3h", slaMinutes: 120, status: "stale" },
+  { lastEventAgo: "26m", slaMinutes: 30, status: "ok" },
+  { lastEventAgo: "—", slaMinutes: 60, status: "unknown" },
+];
+
+function buildConnectorFreshness(loaded: Map<string, { ont: Ontology; order: OrderInfo }>): ConnectorFreshness {
+  const names = new Set<string>();
+  for (const { ont } of loaded.values()) for (const bc of ont.boundedContexts) names.add(bc);
+  const list = names.size ? [...names].sort() : ["SAP", "Helix", "PRIM", "MES", "Test", "Logistics"];
+  return {
+    preview: true,
+    note: "Preview — sample values. Connector freshness/health will read each adapter's real lastPullAt + healthcheck once the ingest layer is wired.",
+    sources: list.map((name, i) => ({ name, ...FRESHNESS_SAMPLES[i % FRESHNESS_SAMPLES.length] })),
   };
 }
 
@@ -648,8 +730,13 @@ async function computeTimeliness(
     if (d) dueByInstance.set(`${r.workflowId}|${r.demandId}`, d);
   }
 
-  let overdue = 0, predictedLate = 0, onTime = 0, scorable = 0, unscorable = 0;
+  let overdue = 0, predictedLate = 0, onTime = 0, scorable = 0, unscorable = 0, overdueDays = 0, slipDays = 0;
   const rows: TimelinessPanel["rows"] = [];
+  const dayAcc = new Map<string, { overdueDays: number; slipDays: number }>();
+  const bump = (wfId: string, k: "overdueDays" | "slipDays", d: number) => {
+    const cur = dayAcc.get(wfId) ?? { overdueDays: 0, slipDays: 0 };
+    cur[k] += d; dayAcc.set(wfId, cur);
+  };
   const nameById = new Map(scope.map((s) => [s.id, s.name]));
   for (const s of scope) {
     const order = loaded.get(s.id)?.order;
@@ -661,8 +748,9 @@ async function computeTimeliness(
       scorable++;
       const base = { workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, demandId: st.demandId, dueDate: due.toISOString().slice(0, 10) };
       if (due.getTime() < now.getTime()) {
-        overdue++;
-        rows.push({ ...base, kind: "overdue", days: daysBetween(due, now) });
+        const d = daysBetween(due, now);
+        overdue++; overdueDays += d; bump(s.id, "overdueDays", d);
+        rows.push({ ...base, kind: "overdue", days: d });
         continue;
       }
       // Not yet overdue — project a finish from where it is now + the remaining
@@ -670,8 +758,9 @@ async function computeTimeliness(
       // date is a predicted miss the leader can still act on.
       const predicted = projectFinish(st, order, bl);
       if (predicted && predicted.getTime() > due.getTime()) {
-        predictedLate++;
-        rows.push({ ...base, kind: "predicted", days: daysBetween(due, predicted), predictedFinish: predicted.toISOString().slice(0, 10) });
+        const d = daysBetween(due, predicted);
+        predictedLate++; slipDays += d; bump(s.id, "slipDays", d);
+        rows.push({ ...base, kind: "predicted", days: d, predictedFinish: predicted.toISOString().slice(0, 10) });
       } else onTime++;
     }
   }
@@ -680,6 +769,8 @@ async function computeTimeliness(
   return {
     scopeWorkflows: scope,
     overdue, predictedLate, onTime, scorable, unscorable,
+    overdueDays, slipDays,
+    daysByWorkflow: [...dayAcc.entries()].map(([workflowId, v]) => ({ workflowId, ...v })),
     // Overdue first, then biggest projected slip.
     rows: rows.sort((a, b) => (a.kind === b.kind ? b.days - a.days : a.kind === "overdue" ? -1 : 1)).slice(0, 12),
     partial: unmapped.length ? { unmapped } : null,

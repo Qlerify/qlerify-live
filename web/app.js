@@ -2861,6 +2861,44 @@ function orgAvatar(org, sizeCls, textCls) {
   return `<span class="inline-flex items-center justify-center rounded-md font-semibold shrink-0 ${bg} ${fg} ${sizeCls} ${textCls}">${escapeHtml(orgInitials(org?.name || org?.slug))}</span>`;
 }
 
+// The signed-in user's avatar. Deliberately a *circle* (orgs use rounded
+// squares) so person-vs-organisation reads at a glance, on a neutral stone
+// tile. A superuser gets an amber ring so the elevated identity is legible on
+// the avatar itself even with the account menu closed.
+function userAvatar(subject, isSuper, sizeCls = "h-6 w-6", textCls = "text-[11px]") {
+  const ring = isSuper ? " ring-2 ring-amber-400/80" : "";
+  return `<span class="inline-flex items-center justify-center rounded-full font-semibold shrink-0 bg-stone-600 text-stone-50 ${sizeCls} ${textCls}${ring}">${escapeHtml(orgInitials(subject))}</span>`;
+}
+
+// The account dropdown: identity (name + role), a deliberate "you are elevated"
+// note for superusers, and Sign out. Anchored under the tenant-bar avatar
+// button on the RIGHT edge (right-0), with a transparent full-screen backdrop
+// that closes it on any outside click — same idiom as orgMenuPanel().
+function accountMenuPanel() {
+  const me = state.me;
+  const subject = me?.subject || "system";
+  const isAdmin = !!me?.isPlatformAdmin;
+  const roleLine = isAdmin ? "Platform superuser" : "Member";
+  return `
+    <div id="acct-menu-backdrop" class="fixed inset-0 z-40"></div>
+    <div id="acct-menu" role="menu" aria-label="Account" class="absolute right-0 top-full mt-1.5 z-50 w-64 rounded-xl border border-stone-200 bg-white shadow-xl text-stone-900 overflow-hidden">
+      <div class="p-3">
+        <div class="flex items-center gap-3">
+          ${userAvatar(subject, isAdmin, "h-10 w-10", "text-sm")}
+          <div class="min-w-0">
+            <div class="font-semibold text-stone-900 truncate">${escapeHtml(subject)}</div>
+            <div class="text-xs ${isAdmin ? "text-amber-600 font-medium" : "text-stone-500"} truncate">${roleLine}</div>
+          </div>
+        </div>
+        ${isAdmin ? `<div class="mt-3 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2 text-[12px] leading-snug text-amber-800"><span class="shrink-0">⚡</span><span>You can act across every organization. Every cross-tenant action is audited.</span></div>` : ""}
+      </div>
+      <button role="menuitem" id="acct-menu-logout" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
+        <svg viewBox="0 0 20 20" fill="none" class="h-5 w-5 text-stone-500 shrink-0"><path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3H15a1.5 1.5 0 0 1 1.5 1.5v11A1.5 1.5 0 0 1 15 17H9.5A1.5 1.5 0 0 1 8 15.5V14M11 10H3m0 0l2.5-2.5M3 10l2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="text-sm font-medium text-stone-800">Sign out</span>
+      </button>
+    </div>`;
+}
+
 // Best-effort member count for the current org's menu-header subtitle. The
 // /v1/members read is org-admin gated, so a non-admin simply gets the slug
 // fallback — we mark the org as "attempted" up front to avoid refetch storms.
@@ -3001,7 +3039,6 @@ function tenantBar() {
           </button>
           ${state.orgMenuOpen ? orgMenuPanel() : ""}
         </div>
-        ${isAdmin ? `<span class="text-[10px] uppercase font-bold px-1.5 py-px rounded bg-amber-500 text-stone-900" title="Platform superadmin — can switch into any organization (every cross-tenant act is audited)">SUPERUSER</span>` : ""}
         <span class="text-stone-600">›</span>
         <span class="text-stone-500 text-xs uppercase tracking-wide">Workflow</span>
         ${projControl}
@@ -3010,14 +3047,27 @@ function tenantBar() {
         <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
         <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
         <span class="text-stone-600">·</span>
-        <span class="text-stone-400" title="Signed in as">${escapeHtml(subject)}</span>
-        <button id="btn-logout" class="px-2 py-0.5 rounded hover:bg-stone-800 text-stone-500 hover:text-stone-200" title="Sign out">Sign out</button>
+        <div class="relative" id="acct-menu-wrap">
+          <button id="acct-menu-btn" aria-haspopup="menu" aria-expanded="${state.acctMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Account — signed in as ${escapeHtml(subject)}">
+            ${isAdmin ? `<span class="text-[10px] uppercase font-bold tracking-wide px-1.5 py-px rounded bg-amber-500 text-stone-900" title="You are signed in as a platform superuser — you can act across every organization, and every cross-tenant action is audited">Superuser</span>` : ""}
+            ${userAvatar(subject, isAdmin)}
+            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          ${state.acctMenuOpen ? accountMenuPanel() : ""}
+        </div>
       </div>
     </div>`;
 }
 
 function bindTenantBar() {
-  document.getElementById("btn-logout")?.addEventListener("click", async () => {
+  // --- Account menu (avatar dropdown: identity + sign out) ------------------
+  // Dismiss without acting (Escape / outside-click): close and return focus to
+  // the trigger so a keyboard user isn't dropped onto <body> by the re-render.
+  const dismissAcctMenu = () => { state.acctMenuOpen = false; render(); document.getElementById("acct-menu-btn")?.focus(); };
+  document.getElementById("acct-menu-btn")?.addEventListener("click", () => { state.acctMenuOpen = !state.acctMenuOpen; render(); });
+  document.getElementById("acct-menu-backdrop")?.addEventListener("click", dismissAcctMenu);
+  document.getElementById("acct-menu-logout")?.addEventListener("click", async () => {
+    state.acctMenuOpen = false;
     try { await api("/v1/auth/logout", { method: "POST", body: "{}" }); } catch (_e) { /* ignore */ }
     AUTH.clear();
     state.me = null; state.orgs = [];
@@ -3155,6 +3205,7 @@ function bindTenantBar() {
       if (e.key !== "Escape") return;
       if (state.orgMenuOpen) dismissOrgMenu();
       else if (state.wfMenuOpen) dismissWfMenu();
+      else if (state.acctMenuOpen) dismissAcctMenu();
     });
   }
   document.getElementById("new-org-cancel")?.addEventListener("click", () => { state.newOrgOpen = false; render(); });

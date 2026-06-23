@@ -965,24 +965,29 @@ function orgTimelinessPanel(o) {
         <button data-org-map-open class="shrink-0 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Map attributes →</button>
       </div>`);
   }
-  const t = o.timeliness || { overdue: 0, onTime: 0, scorable: 0, rows: [], partial: null };
+  const t = o.timeliness || { overdue: 0, predictedLate: 0, onTime: 0, scorable: 0, rows: [], partial: null };
   const partialNote = t.partial
     ? `<div class="mb-3 flex items-center gap-1.5 flex-wrap text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">⚠ ${t.partial.unmapped.length} workflow${t.partial.unmapped.length === 1 ? "" : "s"} not mapped yet — <button data-org-map-open class="underline font-medium">map ${t.partial.unmapped.length === 1 ? "it" : "them"}</button> to include their commitments.</div>`
     : "";
-  const rows = (t.rows || []).map((r) => `
+  const rows = (t.rows || []).map((r) => {
+    const late = r.kind === "overdue";
+    const sub = late ? `due ${escapeHtml(r.dueDate)}` : `due ${escapeHtml(r.dueDate)} · projected ${escapeHtml(r.predictedFinish || "—")}`;
+    return `
     <button data-ex-go="${r.workflowId}|${r.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
-      <span class="inline-block w-2 h-2 rounded-full bg-rose-500 shrink-0"></span>
-      <div class="flex-1 min-w-0"><div class="text-sm text-stone-800 truncate">${escapeHtml(r.workflowName)} · ${escapeHtml(r.demandId.slice(0, 12))}…</div><div class="text-[11px] text-stone-500">due ${escapeHtml(r.dueDate)}</div></div>
-      <span class="text-[11px] font-medium text-rose-700 tabular-nums shrink-0">${r.overdueDays}d late</span>
-    </button>`).join("");
-  return panelShell("Timeliness", "Overdue & on-time commitments", `
+      <span class="inline-block w-2 h-2 rounded-full ${late ? "bg-rose-500" : "bg-amber-400"} shrink-0"></span>
+      <div class="flex-1 min-w-0"><div class="text-sm text-stone-800 truncate">${escapeHtml(r.workflowName)} · ${escapeHtml(r.demandId.slice(0, 12))}…</div><div class="text-[11px] text-stone-500">${sub}</div></div>
+      <span class="text-[11px] font-medium ${late ? "text-rose-700" : "text-amber-700"} tabular-nums shrink-0">${late ? r.days + "d late" : "~" + r.days + "d slip"}</span>
+    </button>`;
+  }).join("");
+  return panelShell("Timeliness", "Overdue, predicted-late & on-time commitments", `
     ${partialNote}
-    <div class="grid grid-cols-3 gap-3">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
       ${orgMiniStat("Overdue", t.overdue, "text-rose-700")}
+      ${orgMiniStat("Predicted late", t.predictedLate ?? 0, "text-amber-700")}
       ${orgMiniStat("On time", t.onTime, "text-emerald-700")}
       ${orgMiniStat("Scorable", t.scorable, "text-stone-700")}
     </div>
-    ${rows ? `<div class="mt-3 divide-y divide-stone-100 rounded-md border border-stone-200 overflow-hidden">${rows}</div>` : `<div class="mt-3 text-sm text-stone-400">No overdue commitments. 🎉</div>`}
+    ${rows ? `<div class="mt-3 divide-y divide-stone-100 rounded-md border border-stone-200 overflow-hidden">${rows}</div>` : `<div class="mt-3 text-sm text-stone-400">No overdue or predicted-late commitments. 🎉</div>`}
   `);
 }
 
@@ -995,8 +1000,11 @@ function orgCard(w) {
     </button>`;
   }
   const role = w.topRoleQueue, oldest = w.oldestActive;
-  const chips = (w.reworkCount || w.softFailCount)
-    ? `<div class="flex gap-1.5 pt-1">${w.reworkCount ? `<span class="px-1.5 py-px rounded bg-rose-100 text-rose-700 text-[11px]">${w.reworkCount} rework</span>` : ""}${w.softFailCount ? `<span class="px-1.5 py-px rounded bg-stone-200 text-stone-600 text-[11px]">${w.softFailCount} soft-fail</span>` : ""}</div>`
+  const chips = (w.atRisk || w.reworkCount || w.softFailCount)
+    ? `<div class="flex gap-1.5 pt-1 flex-wrap">${w.atRisk ? `<span class="px-1.5 py-px rounded bg-rose-200 text-rose-800 text-[11px] font-medium">${w.atRisk} at risk</span>` : ""}${w.reworkCount ? `<span class="px-1.5 py-px rounded bg-rose-100 text-rose-700 text-[11px]">${w.reworkCount} rework</span>` : ""}${w.softFailCount ? `<span class="px-1.5 py-px rounded bg-stone-200 text-stone-600 text-[11px]">${w.softFailCount} soft-fail</span>` : ""}</div>`
+    : "";
+  const cycleLine = w.cycleIndex != null
+    ? `<div class="flex justify-between gap-2"><span class="text-stone-500">Cycle time</span><span class="font-medium ${w.cycleIndex > 1.2 ? "text-amber-700" : "text-stone-700"}">${w.cycleIndex}× vs plan${w.expectedDays != null ? ` · ~${w.expectedDays}d` : ""}</span></div>`
     : "";
   return `
     <button data-wf-go="${w.id}" class="text-left rounded-lg border border-stone-200 bg-white p-4 hover:border-amber-300 hover:shadow-sm transition">
@@ -1011,6 +1019,7 @@ function orgCard(w) {
       </div>
       <div class="mt-3 space-y-1 text-xs text-stone-600">
         ${role ? `<div class="flex justify-between gap-2"><span class="text-stone-500">Top queue</span><span class="font-medium truncate">${escapeHtml(role.role)} · ${role.count}</span></div>` : ""}
+        ${cycleLine}
         ${oldest ? `<div class="flex justify-between gap-2"><span class="text-stone-500">Oldest active</span><span class="font-medium truncate">${escapeHtml(oldest.stepName)} · ${oldest.ageDays}d</span></div>` : ""}
         ${chips}
       </div>
@@ -1019,7 +1028,7 @@ function orgCard(w) {
 }
 
 function orgExceptionRow(x) {
-  const dot = { overdue: "bg-rose-500", rework: "bg-rose-400", soft_fail: "bg-stone-400", aging: "bg-amber-400" }[x.kind] || "bg-stone-400";
+  const dot = { at_risk: "bg-rose-600", overdue: "bg-rose-500", rework: "bg-rose-400", soft_fail: "bg-stone-400", aging: "bg-amber-400" }[x.kind] || "bg-stone-400";
   return `
     <button data-ex-go="${x.workflowId}|${x.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
       <span class="inline-block w-2 h-2 rounded-full ${dot} shrink-0"></span>
@@ -1065,9 +1074,11 @@ function orgView() {
     <button data-org-map-open class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Map workflow attributes to dashboard capabilities">⚙ Map attributes</button>
     ${assistantBtn}`;
   const flowTone = ns.flowRatio != null && ns.flowRatio < 1 ? "text-amber-700" : "text-stone-900";
+  const atRiskTone = ns.atRisk > 0 ? "text-rose-700" : "text-stone-900";
   const band = `
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
       ${orgTile("Active instances", ns.activeInstances, `${ns.totalInstances} total · ${ns.completedInstances} done`)}
+      ${orgTile("At risk", ns.atRisk, ns.cycleIndex != null ? `cycle ${ns.cycleIndex}× vs plan` : "beyond own history", { tone: atRiskTone })}
       ${orgTile("Throughput · 8 wk", ns.completedRecent, "completed", { spark: orgSpark(ns.throughputSeries) })}
       ${orgTile("Flow ratio", ns.flowRatio != null ? ns.flowRatio + "×" : "—", "completed ÷ started", { tone: flowTone })}
       ${orgTile("Twin trust", ns.twinTrust.pct + "%", `${ns.twinTrust.real}/${ns.twinTrust.total} events real`)}

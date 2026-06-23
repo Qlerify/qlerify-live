@@ -189,8 +189,10 @@ interface InstanceState {
   demandId: string;
   firstAt: Date; // occurredAt of earliest event
   lastAt: Date; // occurredAt of latest event
-  firstBiz: Date | null;
+  firstBiz: Date | null; // earliest businessAt (business "started")
+  lastBiz: Date | null; // latest businessAt (business "as of")
   termBiz: Date | null; // businessAt of the terminal event, if reached
+  bizByRef: Map<string, Date>; // last businessAt seen per step (for gap baselines)
   firedRefs: Set<string>;
   refCounts: Map<string, number>;
   realEvents: number;
@@ -198,6 +200,64 @@ interface InstanceState {
   softFails: number;
   done: boolean;
   currentRef: string | null; // next unfired step's $ref (null if complete)
+}
+
+/** Derived expected-duration baseline for one workflow: the rolling P50 of the
+ * businessAt gap per step, the implied total expected duration, and the 85th
+ * percentile of completed end-to-end durations (the "aging vs own history" band).
+ * All times in ms. Pure aggregation over data that already exists — this is the
+ * keystone the research flagged: it unlocks cycle-time index, at-risk, and
+ * commitment confidence simultaneously, with no new capture. */
+interface WfBaseline {
+  base: Map<string, number>; // eventRef → P50 ms to leave that step
+  expectedTotal: number; // Σ base over all transitions
+  p85: number | null; // 85th-percentile completed duration, or null (<1 completion)
+}
+
+const MS_DAY = 86_400_000;
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+function percentile(xs: number[], p: number): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const idx = Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1));
+  return s[idx];
+}
+
+/** Build the derived baseline for one workflow from its instances' businessAt
+ * gaps. Censored-aware: every observed transition contributes, whether or not the
+ * instance has finished, so survivorship bias is bounded. */
+function computeBaseline(order: OrderInfo, insts: InstanceState[]): WfBaseline {
+  const gaps = new Map<string, number[]>();
+  for (const st of insts) {
+    for (let j = 0; j < order.refs.length - 1; j++) {
+      const da = st.bizByRef.get(order.refs[j]);
+      const db = st.bizByRef.get(order.refs[j + 1]);
+      if (da && db) {
+        const g = db.getTime() - da.getTime();
+        if (g > 0) (gaps.get(order.refs[j]) ?? gaps.set(order.refs[j], []).get(order.refs[j])!).push(g);
+      }
+    }
+  }
+  const base = new Map<string, number>();
+  let expectedTotal = 0;
+  for (let j = 0; j < order.refs.length - 1; j++) {
+    const v = median(gaps.get(order.refs[j]) ?? []);
+    base.set(order.refs[j], v);
+    expectedTotal += v;
+  }
+  const durs: number[] = [];
+  for (const st of insts) {
+    if (!st.done || !st.firstBiz) continue;
+    const last = order.terminal ? st.bizByRef.get(order.terminal) : st.lastBiz;
+    if (last && last.getTime() > st.firstBiz.getTime()) durs.push(last.getTime() - st.firstBiz.getTime());
+  }
+  return { base, expectedTotal, p85: durs.length ? percentile(durs, 85) : null };
 }
 
 export interface PortfolioResult {
@@ -214,6 +274,8 @@ export interface PortfolioResult {
     flowRatio: number | null; // completed ÷ started over the window; <1 = backlog grows
     twinTrust: { real: number; total: number; pct: number };
     conformance: { clean: number; total: number; pct: number };
+    atRisk: number; // open instances running beyond their workflow's own history
+    cycleIndex: number | null; // org median actual÷expected cycle time (1.0 = on baseline)
     workflowCount: number;
     modelledCount: number;
   };
@@ -239,10 +301,13 @@ export interface WorkflowCard {
   twinTrust: { real: number; total: number; pct: number };
   oldestActive: { demandId: string; ageDays: number; stepName: string } | null;
   topRoleQueue: { role: string; count: number } | null;
+  cycleIndex: number | null; // actual÷expected cycle time, P50 over completed (null until a baseline exists)
+  expectedDays: number | null; // derived end-to-end expected duration, in days
+  atRisk: number; // open instances past this workflow's 85th-percentile duration
 }
 
 export interface ExceptionRow {
-  kind: "overdue" | "rework" | "soft_fail" | "aging";
+  kind: "overdue" | "at_risk" | "rework" | "soft_fail" | "aging";
   severity: number;
   workflowId: string;
   workflowName: string;
@@ -272,10 +337,14 @@ export interface CapabilityStatus extends CapabilityDef {
 export interface TimelinessPanel {
   scopeWorkflows: { id: string; name: string; field: string }[];
   overdue: number;
+  predictedLate: number; // not yet overdue, but the baseline projects a miss
   onTime: number;
   scorable: number;
   unscorable: number;
-  rows: { workflowId: string; workflowName: string; demandId: string; dueDate: string; overdueDays: number }[];
+  rows: {
+    workflowId: string; workflowName: string; demandId: string; dueDate: string;
+    kind: "overdue" | "predicted"; days: number; predictedFinish?: string;
+  }[];
   partial: { unmapped: { id: string; name: string }[] } | null;
 }
 
@@ -330,14 +399,19 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     let st = insts.get(e.demandId);
     if (!st) {
       st = {
-        demandId: e.demandId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: e.businessAt,
-        termBiz: null, firedRefs: new Set(), refCounts: new Map(), realEvents: 0, totalEvents: 0,
-        softFails: 0, done: false, currentRef: null,
+        demandId: e.demandId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: null, lastBiz: null,
+        termBiz: null, bizByRef: new Map(), firedRefs: new Set(), refCounts: new Map(), realEvents: 0,
+        totalEvents: 0, softFails: 0, done: false, currentRef: null,
       };
       insts.set(e.demandId, st);
     }
-    if (e.occurredAt < st.firstAt) { st.firstAt = e.occurredAt; st.firstBiz = e.businessAt; }
+    if (e.occurredAt < st.firstAt) st.firstAt = e.occurredAt;
     if (e.occurredAt > st.lastAt) st.lastAt = e.occurredAt;
+    if (e.businessAt) {
+      st.bizByRef.set(e.eventRef, e.businessAt); // last write per step wins (matches latest state)
+      if (!st.firstBiz || e.businessAt < st.firstBiz) st.firstBiz = e.businessAt;
+      if (!st.lastBiz || e.businessAt > st.lastBiz) st.lastBiz = e.businessAt;
+    }
     st.totalEvents++;
     if (e.provenance === "recorded" || e.provenance === "live") st.realEvents++;
     if (e.aggregateId === "") st.softFails++; // soft-fail marker: twin couldn't synthesize the step
@@ -361,22 +435,33 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     }
   }
 
+  // Derived per-workflow baseline (the keystone): P50 step gaps + expected total
+  // + the 85th-percentile completed-duration band that "at-risk" measures against.
+  const baselines = new Map<string, WfBaseline>();
+  for (const wf of workflows) {
+    const order = loaded.get(wf.id)?.order;
+    if (order) baselines.set(wf.id, computeBaseline(order, [...(byWf.get(wf.id)?.values() ?? [])]));
+  }
+
   const mappings = await getOrgMappings(orgId);
 
   // ---- Per-workflow cards + org rollups ----
   const cards: WorkflowCard[] = [];
-  let orgActive = 0, orgTotal = 0, orgCompleted = 0, orgReal = 0, orgEvents = 0, orgClean = 0, orgStarted = 0;
+  let orgActive = 0, orgTotal = 0, orgCompleted = 0, orgReal = 0, orgEvents = 0, orgClean = 0, orgStarted = 0, orgAtRisk = 0;
   const orgSeries = new Map<string, number>();
+  const orgCycleIdxs: number[] = [];
 
   for (const wf of workflows) {
     const has = loaded.has(wf.id);
     const order = loaded.get(wf.id)?.order;
     const ont = loaded.get(wf.id)?.ont;
+    const bl = baselines.get(wf.id);
     const insts = [...(byWf.get(wf.id)?.values() ?? [])];
 
-    let active = 0, completed = 0, rework = 0, softFail = 0, real = 0, evTotal = 0, clean = 0;
+    let active = 0, completed = 0, rework = 0, softFail = 0, real = 0, evTotal = 0, clean = 0, atRisk = 0;
     const series = new Map<string, number>();
     const roleQueue = new Map<string, number>();
+    const cycleIdxs: number[] = [];
     let oldest: WorkflowCard["oldestActive"] = null;
 
     for (const st of insts) {
@@ -388,6 +473,11 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       if (st.done) {
         completed++;
         if (st.termBiz) series.set(isoWeekKey(st.termBiz), (series.get(isoWeekKey(st.termBiz)) ?? 0) + 1);
+        // cycle-time index: actual end-to-end ÷ derived expected.
+        if (bl && bl.expectedTotal > 0 && st.firstBiz) {
+          const last = order?.terminal ? st.bizByRef.get(order.terminal) : st.lastBiz;
+          if (last && last.getTime() > st.firstBiz.getTime()) cycleIdxs.push((last.getTime() - st.firstBiz.getTime()) / bl.expectedTotal);
+        }
       } else {
         active++;
         const ageDays = daysBetween(st.firstAt, now);
@@ -397,6 +487,8 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
           const role = ont.eventByRef(st.currentRef)?.role ?? "—";
           roleQueue.set(role, (roleQueue.get(role) ?? 0) + 1);
         }
+        // at-risk: business time elapsed already exceeds this workflow's own 85th-percentile completion.
+        if (bl && bl.p85 != null && st.firstBiz && st.lastBiz && st.lastBiz.getTime() - st.firstBiz.getTime() > bl.p85) atRisk++;
       }
     }
 
@@ -410,6 +502,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     }
 
     const topRole = [...roleQueue.entries()].sort((a, b) => b[1] - a[1])[0];
+    const cycleIndex = cycleIdxs.length ? Math.round(median(cycleIdxs) * 100) / 100 : null;
     cards.push({
       id: wf.id, name: wf.name, workspaceId: wf.workspaceId, hasModel: has,
       totalSteps: order?.total ?? 0,
@@ -420,10 +513,14 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       twinTrust: { real, total: evTotal, pct: pct(real, evTotal) },
       oldestActive: oldest,
       topRoleQueue: topRole ? { role: topRole[0], count: topRole[1] } : null,
+      cycleIndex,
+      expectedDays: bl && bl.expectedTotal > 0 ? Math.round((bl.expectedTotal / MS_DAY) * 10) / 10 : null,
+      atRisk,
     });
 
     orgActive += active; orgCompleted += completed; orgTotal += insts.length;
-    orgReal += real; orgEvents += evTotal; orgClean += clean; orgStarted += startedRecent;
+    orgReal += real; orgEvents += evTotal; orgClean += clean; orgStarted += startedRecent; orgAtRisk += atRisk;
+    if (cycleIndex != null) orgCycleIdxs.push(cycleIndex);
     for (const [w, c] of series) orgSeries.set(w, (orgSeries.get(w) ?? 0) + c);
   }
 
@@ -435,10 +532,17 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
   const AGING_DAYS = 3;
   for (const wf of workflows) {
     const ont = loaded.get(wf.id)?.ont;
+    const bl = baselines.get(wf.id);
     for (const st of byWf.get(wf.id)?.values() ?? []) {
       const ageDays = daysBetween(st.lastAt, now);
       if (st.done) continue;
-      if ([...st.refCounts.values()].some((n) => n > 1)) {
+      const overP85 = bl && bl.p85 != null && st.firstBiz && st.lastBiz && st.lastBiz.getTime() - st.firstBiz.getTime() > bl.p85;
+      if (overP85) {
+        const overBy = Math.round((st.lastBiz!.getTime() - st.firstBiz!.getTime() - bl!.p85!) / MS_DAY);
+        const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
+        exceptions.push({ kind: "at_risk", severity: 4, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+          title: "At risk", detail: `${overBy}d beyond the usual time, stuck at "${stepName}"`, ageDays });
+      } else if ([...st.refCounts.values()].some((n) => n > 1)) {
         const loops = Math.max(...st.refCounts.values()) - 1;
         exceptions.push({ kind: "rework", severity: 3, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
           title: "Rework loop", detail: `a step repeated ${loops}× — work kicked back`, ageDays });
@@ -480,7 +584,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     return { ...cap, state, modelledCount: modelledWf.length, mappedCount: mapped.length, unmapped };
   });
 
-  const timeliness = await computeTimeliness(orgId, modelledWf, mappings, byWf, loaded, now);
+  const timeliness = await computeTimeliness(orgId, modelledWf, mappings, byWf, loaded, baselines, now);
 
   return {
     generatedAt: now.toISOString(),
@@ -496,6 +600,8 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       flowRatio: orgStarted > 0 ? Math.round((completedRecent / orgStarted) * 100) / 100 : null,
       twinTrust: { real: orgReal, total: orgEvents, pct: pct(orgReal, orgEvents) },
       conformance: { clean: orgClean, total: orgEvents, pct: pct(orgClean, orgEvents) },
+      atRisk: orgAtRisk,
+      cycleIndex: orgCycleIdxs.length ? Math.round(median(orgCycleIdxs) * 100) / 100 : null,
       workflowCount: workflows.length,
       modelledCount: modelledWf.length,
     },
@@ -515,6 +621,7 @@ async function computeTimeliness(
   mappings: OrgMappings,
   byWf: Map<string, Map<string, InstanceState>>,
   loaded: Map<string, { ont: Ontology; order: OrderInfo }>,
+  baselines: Map<string, WfBaseline>,
   now: Date,
 ): Promise<TimelinessPanel | null> {
   const scope = modelledWf
@@ -541,21 +648,30 @@ async function computeTimeliness(
     if (d) dueByInstance.set(`${r.workflowId}|${r.demandId}`, d);
   }
 
-  let overdue = 0, onTime = 0, scorable = 0, unscorable = 0;
+  let overdue = 0, predictedLate = 0, onTime = 0, scorable = 0, unscorable = 0;
   const rows: TimelinessPanel["rows"] = [];
   const nameById = new Map(scope.map((s) => [s.id, s.name]));
   for (const s of scope) {
+    const order = loaded.get(s.id)?.order;
+    const bl = baselines.get(s.id);
     for (const st of byWf.get(s.id)?.values() ?? []) {
       if (st.done) continue; // open commitments only
       const due = dueByInstance.get(`${s.id}|${st.demandId}`);
       if (!due) { unscorable++; continue; }
       scorable++;
+      const base = { workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, demandId: st.demandId, dueDate: due.toISOString().slice(0, 10) };
       if (due.getTime() < now.getTime()) {
         overdue++;
-        rows.push({
-          workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, demandId: st.demandId,
-          dueDate: due.toISOString().slice(0, 10), overdueDays: daysBetween(due, now),
-        });
+        rows.push({ ...base, kind: "overdue", days: daysBetween(due, now) });
+        continue;
+      }
+      // Not yet overdue — project a finish from where it is now + the remaining
+      // expected step durations (the derived baseline). A projection past the due
+      // date is a predicted miss the leader can still act on.
+      const predicted = projectFinish(st, order, bl);
+      if (predicted && predicted.getTime() > due.getTime()) {
+        predictedLate++;
+        rows.push({ ...base, kind: "predicted", days: daysBetween(due, predicted), predictedFinish: predicted.toISOString().slice(0, 10) });
       } else onTime++;
     }
   }
@@ -563,10 +679,22 @@ async function computeTimeliness(
   const unmapped = modelledWf.filter((w) => !mappings[w.id]?.commitDate).map((w) => ({ id: w.id, name: w.name }));
   return {
     scopeWorkflows: scope,
-    overdue, onTime, scorable, unscorable,
-    rows: rows.sort((a, b) => b.overdueDays - a.overdueDays).slice(0, 12),
+    overdue, predictedLate, onTime, scorable, unscorable,
+    // Overdue first, then biggest projected slip.
+    rows: rows.sort((a, b) => (a.kind === b.kind ? b.days - a.days : a.kind === "overdue" ? -1 : 1)).slice(0, 12),
     partial: unmapped.length ? { unmapped } : null,
   };
+}
+
+/** Project an open instance's finish: its latest business time + the sum of the
+ * derived baseline durations for the steps it still has to traverse. Null when
+ * there's no baseline or business anchor yet (so we never invent a prediction). */
+function projectFinish(st: InstanceState, order: OrderInfo | undefined, bl: WfBaseline | undefined): Date | null {
+  if (!order || !bl || !st.lastBiz) return null;
+  const curIdx = st.currentRef ? order.indexByRef.get(st.currentRef) ?? order.refs.length : order.refs.length;
+  let remaining = 0;
+  for (let j = Math.max(0, curIdx - 1); j < order.refs.length - 1; j++) remaining += bl.base.get(order.refs[j]) ?? 0;
+  return new Date(st.lastBiz.getTime() + remaining);
 }
 
 // ---------------------------------------------------------------------------

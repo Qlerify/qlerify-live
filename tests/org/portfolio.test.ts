@@ -231,3 +231,98 @@ describe("capability gating + attribute mapping", () => {
     expect(p.timeliness).toBeNull();
   });
 });
+
+// A SECOND org with SPREAD businessAt, so the derived P50 baseline is meaningful:
+// it powers Cycle-Time Index, At-Risk (beyond own 85th-percentile), and predicted
+// lateness. Kept in its own org so the assertions above (all-businessAt-equal) are
+// unaffected.
+describe("derived baseline → cycle index, at-risk, predicted lateness", () => {
+  const ca2 = newId(), org2 = newId(), ws2 = newId(), wf3 = newId();
+  const sub2 = `od2-${SFX}`;
+  let bob: string;
+  const D0 = new Date(now.getTime() - 20 * DAY);
+  const at = (base: Date, days: number) => new Date(base.getTime() + days * DAY);
+  // instances: completed baseline pair, an at-risk open one, a predicted-late open one, an on-time open one
+  const c1 = newId(), c2 = newId(), aRisk = newId(), pLate = newId(), onT = newId();
+
+  async function ev2(demandId: string, key: string, businessAt: Date, opts: { payload?: Record<string, unknown> } = {}) {
+    await prisma.eventLog.create({
+      data: {
+        id: newId(), eventName: key, eventRef: REF(key), boundedContext: "Sales", aggregateRoot: "Demand",
+        aggregateId: newId(), demandId, role: ROLE[key] ?? "Planner", payload: JSON.stringify(opts.payload ?? {}),
+        occurredAt: now, businessAt, provenance: "live", organizationId: org2, workflowId: wf3,
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    await prisma.platCustomerAccount.create({ data: { id: ca2, name: `CA2 ${SFX}` } });
+    await prisma.platOrganization.create({ data: { id: org2, customerAccountId: ca2, name: `Org2 ${SFX}`, slug: `org2-${SFX}` } });
+    const env = await prisma.platEnvironment.create({ data: { id: newId(), organizationId: org2, name: "development", region: "local" } });
+    await prisma.platWorkspace.create({ data: { id: ws2, organizationId: org2, environmentId: env.id, name: "Default" } });
+    bob = (await prisma.platIdentity.create({ data: { id: newId(), subject: sub2 } })).id;
+    await prisma.platOrgMembership.create({ data: { id: newId(), identityId: bob, organizationId: org2 } });
+    await prisma.platWorkflow.create({ data: { id: wf3, organizationId: org2, workspaceId: ws2, name: "Customer Implementation" } });
+    const { ontologyId } = await ensureOntologyResource({ organizationId: org2, workflowId: wf3, workspaceId: ws2, name: "workflow", ownerId: bob });
+    await createVersion(org2, ontologyId, MODEL, null, { source: "initial" });
+
+    // Two completed instances, ~1 business-day per step ⇒ baseline 1d/step, expected 2d, p85 = 2d.
+    for (const c of [c1, c2]) {
+      await ev2(c, "DemandCreated", D0);
+      await ev2(c, "DemandPlanned", at(D0, 1));
+      await ev2(c, "DemandDelivered", at(D0, 2));
+    }
+    // At-risk: open, already 5 business-days in (> the 2d p85), no commitment.
+    await ev2(aRisk, "DemandCreated", D0);
+    await ev2(aRisk, "DemandPlanned", at(D0, 5));
+    // Predicted-late: just started; commitment 1 day out, but ~2 expected days remain.
+    await ev2(pLate, "DemandCreated", now, { payload: { dueDate: at(now, 1).toISOString().slice(0, 10) } });
+    // On-time: just started; commitment 10 days out.
+    await ev2(onT, "DemandCreated", now, { payload: { dueDate: at(now, 10).toISOString().slice(0, 10) } });
+  });
+
+  afterAll(async () => {
+    await setMeta(`orgdash:mappings:${org2}`, "{}");
+    await prisma.eventLog.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platOntologyBranch.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platOntologyVersion.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platOntology.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platResource.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platWorkflow.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platWorkspace.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platEnvironment.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platOrgMembership.deleteMany({ where: { organizationId: org2 } });
+    await prisma.platIdentity.deleteMany({ where: { id: bob } });
+    await prisma.platOrganization.deleteMany({ where: { id: org2 } });
+    await prisma.platCustomerAccount.deleteMany({ where: { id: ca2 } });
+  });
+
+  it("computes a cycle-time index of ~1.0 from the derived baseline", async () => {
+    const p = await computePortfolio(org2);
+    const card = p.workflows.find((w) => w.id === wf3)!;
+    expect(card.expectedDays).toBe(2);
+    expect(card.cycleIndex).toBeCloseTo(1.0, 2);
+    expect(p.northStar.cycleIndex).toBeCloseTo(1.0, 2);
+  });
+
+  it("flags an at-risk instance running beyond the workflow's own 85th percentile", async () => {
+    const p = await computePortfolio(org2);
+    expect(p.workflows.find((w) => w.id === wf3)!.atRisk).toBe(1);
+    expect(p.northStar.atRisk).toBe(1);
+    const ex = p.exceptions.find((x) => x.kind === "at_risk")!;
+    expect(ex.demandId).toBe(aRisk);
+    expect(ex.severity).toBe(4); // ranks above rework/soft-fail/aging
+  });
+
+  it("predicts lateness for an open commitment the baseline projects to miss", async () => {
+    await setWorkflowMapping(org2, wf3, "commitDate", "dueDate");
+    const p = await computePortfolio(org2);
+    const t = p.timeliness!;
+    expect(t.overdue).toBe(0); // nothing past due yet
+    expect(t.predictedLate).toBe(1); // pLate: due in 1d, ~2d of work remains
+    expect(t.onTime).toBe(1); // onT: due in 10d
+    const row = t.rows.find((r) => r.demandId === pLate)!;
+    expect(row.kind).toBe("predicted");
+    expect(row.predictedFinish).toBeTruthy();
+  });
+});

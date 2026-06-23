@@ -10,7 +10,11 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  // Use an absolute path via DATABASE_URL (set in .env). A relative `file:./dev.db`
+  // resolves differently for the Prisma CLI (relative to this schema → prisma/dev.db)
+  // vs. the generated client at runtime (relative to node_modules/.prisma/client/),
+  // which silently splits writes/reads across two different .db files.
+  url      = env("DATABASE_URL")
 }
 
 // ---------------------------------------------------------------------------

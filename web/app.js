@@ -3030,7 +3030,7 @@ function tenantBar() {
     <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
       <div class="px-6 py-1.5 flex items-center gap-3">
         <span class="flex items-center gap-1.5 text-stone-100">${qlerifyMark("h-4 w-4")}<span class="font-semibold tracking-tight">Qlerify<span class="text-amber-400">·</span>Live</span></span>
-        <span class="text-stone-600">›</span>
+        <span class="text-stone-500">›</span>
         <div class="relative" id="org-menu-wrap">
           <button id="org-menu-btn" aria-haspopup="menu" aria-expanded="${state.orgMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Organisation menu — switch, create, or manage">
             ${orgAvatar(curOrg, "h-6 w-6", "text-[11px]")}
@@ -3039,14 +3039,13 @@ function tenantBar() {
           </button>
           ${state.orgMenuOpen ? orgMenuPanel() : ""}
         </div>
-        <span class="text-stone-600">›</span>
-        <span class="text-stone-500 text-xs uppercase tracking-wide">Workflow</span>
+        <span class="text-stone-500">›</span>
         ${projControl}
         <div class="flex-1"></div>
         <a href="#org" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "org" ? "bg-stone-800 text-white" : ""}" title="Organisation portfolio — every workflow at a glance">▣ Portfolio</a>
         <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
         <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
-        <span class="text-stone-600">·</span>
+        <span class="text-stone-500">·</span>
         <div class="relative" id="acct-menu-wrap">
           <button id="acct-menu-btn" aria-haspopup="menu" aria-expanded="${state.acctMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Account — signed in as ${escapeHtml(subject)}">
             ${isAdmin ? `<span class="text-[10px] uppercase font-bold tracking-wide px-1.5 py-px rounded bg-amber-500 text-stone-900" title="You are signed in as a platform superuser — you can act across every organization, and every cross-tenant action is audited">Superuser</span>` : ""}
@@ -3411,7 +3410,7 @@ function bindLogin() {
       AUTH.setSession(r.token);
       AUTH.setOrg((r.organizations || [])[0]?.id || "");
       state.me = null;
-      navigate("#");
+      navigate("#org"); // land on the portfolio control tower after login
     } catch (_err) {
       state.loginError = "Invalid username or password.";
       render();

@@ -26,7 +26,7 @@ import { isHandledError } from "../../errors.js";
 import { resolveTenantContext, type AuthnHeaders } from "../authn/index.js";
 import { ensureWorkflowModelLoaded } from "../ontology-store/ontology-store.js";
 import { enterTenant } from "../tenancy/context.js";
-import type { TenantContext } from "../types.js";
+import type { RequestContext } from "../types.js";
 
 /** Public paths that skip tenant resolution. Deny-by-default: a new API route is
  * auth-gated automatically; only the auth endpoints and real static-shell files
@@ -58,7 +58,7 @@ export function registerTenantPlugin(app: FastifyInstance, webRoot?: string) {
       // getOntology() resolves the right model. A workflow with no model yet loads
       // nothing → getOntology() throws ModelNotLoadedError and the UI prompts to
       // set one. With no active workflow (empty org) there is nothing to load.
-      if (ctx.workflowId) {
+      if (ctx.organizationId && ctx.workflowId) {
         await ensureWorkflowModelLoaded(ctx.organizationId, ctx.workflowId);
       }
     } catch (err) {
@@ -73,7 +73,7 @@ export function registerTenantPlugin(app: FastifyInstance, webRoot?: string) {
   // Bind the resolved context for the handler's async context. Sync + last hook
   // before the handler ⇒ enterWith propagates reliably (no async hop in between).
   app.addHook("preHandler", (req: FastifyRequest, _reply, done) => {
-    const ctx = (req as any).tenant as TenantContext | undefined;
+    const ctx = (req as any).tenant as RequestContext | undefined;
     if (ctx) enterTenant(ctx);
     done();
   });

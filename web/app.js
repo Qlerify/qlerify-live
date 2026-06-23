@@ -677,6 +677,11 @@ async function onHashChange() {
   // login screen now instead of flashing a frame of header-less content.
   if (location.hash === "#login") { state.view = "login"; render(); return; }
 
+  // Authenticated but not a member of any organisation yet (a fresh superadmin, or
+  // a user whose last membership was removed) → the create-first-organisation
+  // screen. Distinct from an org that merely has zero workflows (empty-org below).
+  if (state.me && !state.me.organizationId) { state.view = "no-org"; render(); return; }
+
   // Empty org (a fresh org, or its last workflow was deleted): the data plane fails
   // closed, so don't fetch it — show the "create your first workflow" state. Admin
   // stays reachable so the user can manage the org and create a workflow there too.
@@ -2109,6 +2114,12 @@ function render() {
     return;
   }
 
+  if (state.view === "no-org") {
+    root.innerHTML = noOrgView();
+    bindNoOrg();
+    return;
+  }
+
   if (state.view === "detail") {
     root.innerHTML = wrap(detailView());
     bindTenantBar();
@@ -2192,10 +2203,14 @@ async function ensureMe() {
 }
 
 // True when an error is a stale/invalid X-Org-Id rejection (not a member, or the
-// org no longer exists) — the recoverable case ensureMe() retries past.
+// org no longer exists) — the recoverable case ensureMe() retries past. The match
+// runs against api()'s raw error text (`<status> <path>: <json-body>`), so the
+// server's quotes around the org id arrive JSON-ESCAPED (organization \"x\" not
+// found). Don't anchor on literal quotes — just require the "organization … not
+// found" phrase; over-matching here is safe (we only drop a selector and retry).
 function isOrgSelectorErr(e) {
   return !!e && typeof e.message === "string" &&
-    /not a member of organization|organization "[^"]*" not found/i.test(e.message);
+    /not a member of organization|organization\b.*?not found/i.test(e.message);
 }
 
 function currentOrgName() {
@@ -2476,6 +2491,59 @@ function bindEmptyOrg() {
   };
   document.getElementById("empty-proj-create")?.addEventListener("click", create);
   document.getElementById("empty-proj-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+}
+
+// Signed in but not a member of any organisation yet → create the first one (you
+// become its owner). Distinct from emptyOrgView, which is for an org that exists
+// but has no workflows. A platform admin who can see existing orgs also gets a
+// list to open one (break-glass).
+function noOrgView() {
+  const err = state.newOrgErr ? `<div class="text-xs text-rose-600 mt-2">${escapeHtml(state.newOrgErr)}</div>` : "";
+  const orgs = state.me?.organizations || [];
+  const switchList = orgs.length ? `
+        <div class="mt-5 pt-5 border-t border-stone-200 text-left">
+          <div class="text-xs text-stone-500 mb-2">Or open an existing organisation</div>
+          <div class="space-y-1">
+            ${orgs.map((o) => `<button data-org="${escapeHtml(o.id)}" class="firstorg-switch w-full text-left px-3 py-2 rounded-md border border-stone-200 hover:bg-stone-50 text-sm">${escapeHtml(o.name || o.slug)}</button>`).join("")}
+          </div>
+        </div>` : "";
+  return `
+    <main class="flex-1 flex items-center justify-center p-8">
+      <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
+        <div class="text-3xl mb-2">🏢</div>
+        <div class="text-lg font-semibold text-stone-900">Create your first organisation</div>
+        <div class="text-sm text-stone-500 mt-1 mb-5">You're signed in but not a member of any organisation yet. Create one to get started — you'll be its owner, and can add a workspace and workflow next.</div>
+        <div class="text-left">
+          <label class="block text-xs text-stone-500 mb-1">Organisation name</label>
+          <input id="firstorg-name" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" placeholder="Acme Corp" />
+          <button id="firstorg-create" class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Create organisation</button>
+          ${err}
+        </div>
+        ${switchList}
+      </div>
+    </main>`;
+}
+
+function bindNoOrg() {
+  const create = async () => {
+    const name = (document.getElementById("firstorg-name")?.value || "").trim();
+    if (!name) { state.newOrgErr = "Organisation name is required"; render(); return; }
+    state.newOrgErr = null;
+    try {
+      const org = await api("/v1/organizations", { method: "POST", body: JSON.stringify({ name }) });
+      AUTH.setOrg(org.id);   // land in the brand-new org (you're its owner)
+      state.me = null;       // force a fresh whoami for the new context
+      navigate("#");
+    } catch (e) {
+      state.newOrgErr = (e && e.message) ? e.message : "Failed to create the organisation.";
+      render();
+    }
+  };
+  document.getElementById("firstorg-create")?.addEventListener("click", create);
+  document.getElementById("firstorg-name")?.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  document.querySelectorAll(".firstorg-switch").forEach((b) => b.addEventListener("click", () => {
+    AUTH.setOrg(b.getAttribute("data-org")); state.me = null; navigate("#");
+  }));
 }
 
 // A workflow exists but has no model yet (freshly created — nothing is preloaded).

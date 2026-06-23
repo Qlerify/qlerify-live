@@ -1,11 +1,11 @@
 // Provisioning & lifecycle (spec §10 Provisioning Orchestrator, pooled-only).
 //
 // Two jobs:
-//  1. seedSystemOrg() — idempotent boot seed. Creates the SYSTEM tenant (org +
-//     identity + superuser) so header-less requests have somewhere to resolve to.
-//     It seeds NO workflow and NO model: there is no preset/demo content anymore.
-//     A header-less / freshly-provisioned org lands on the empty-org screen until
-//     a user creates a workflow and points it at their own Qlerify model.
+//  1. seedPlatform() — idempotent boot seed. Ensures the built-in roles and the
+//     superuser (a global platform-admin identity, member of NO org), and removes
+//     a legacy seeded system org left by older builds. There is no system
+//     organization: a fresh install has ZERO orgs, and the superuser signs in and
+//     creates the first one.
 //  2. createOrganization()/createEnvironment()/… — provision a NEW tenant:
 //     org + registry row (pooled, local stack) + dev/prod environments + a
 //     default workspace (but ZERO workflows) + an owner role assignment, audited.
@@ -23,18 +23,7 @@ import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
 import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
 import { hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
-import {
-  SYSTEM_CUSTOMER_ACCOUNT_ID,
-  SYSTEM_ENV_ID,
-  SYSTEM_IDENTITY_ID,
-  SYSTEM_ORG_ID,
-  SYSTEM_WORKFLOW_ID,
-  SYSTEM_STACK_ID,
-  SYSTEM_SUBJECT,
-  SYSTEM_WORKSPACE_ID,
-  newId,
-  slugify,
-} from "../ids.js";
+import { SYSTEM_ORG_ID, SYSTEM_STACK_ID, SYSTEM_WORKFLOW_ID, newId, slugify } from "../ids.js";
 import type { BuiltinRoleKey, PrincipalType, ScopeType } from "../types.js";
 
 const BUILTIN_ROLES: BuiltinRoleKey[] = ["owner", "editor", "viewer", "deployer", "org_admin"];
@@ -291,14 +280,12 @@ export async function createOrganization(p: CreateOrgParams, actorPrincipalId?: 
 }
 
 /** Rename an organization. Only the display name changes — the slug is a stable
- * routing/lookup handle and is deliberately left untouched. The system org is
- * refused. */
+ * routing/lookup handle and is deliberately left untouched. */
 export async function updateOrganization(
   organizationId: string,
   patch: { name?: string },
   actorPrincipalId?: string | null,
 ) {
-  if (organizationId === SYSTEM_ORG_ID) throw new DomainError("The system organization cannot be renamed.");
   const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
   if (!org) throw new DomainError("organization not found");
   const name = (patch.name ?? "").trim();
@@ -327,16 +314,12 @@ export async function updateOrganization(
  * audit chain) in FK-safe order, ending with the org row itself; then (3) drop the
  * org's dedicated customer account if no sibling org shares it.
  *
- * The SYSTEM org is refused (defense-in-depth) — it is the header-less resolution
- * home and must always exist. The deletion is audited under the SYSTEM stream
- * because the org's own audit chain is removed in the cascade. */
+ * The deletion is audited under the platform stream (SYSTEM_ORG_ID — a sentinel,
+ * not a row) because the org's own audit chain is removed in the cascade. */
 export async function deleteOrganization(
   organizationId: string,
   actorPrincipalId: string,
 ): Promise<{ id: string; deletedWorkflows: number; droppedTables: number }> {
-  if (organizationId === SYSTEM_ORG_ID) {
-    throw new DomainError("The system organization cannot be deleted.");
-  }
   const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
   if (!org) throw new DomainError("organization not found");
 
@@ -379,9 +362,8 @@ export async function deleteOrganization(
     prisma.platOrganization.deleteMany({ where: { id: organizationId } }),
   ]);
 
-  // (3) The org's dedicated customer account — only if no other org references it,
-  // and never the shared SYSTEM account.
-  if (org.customerAccountId !== SYSTEM_CUSTOMER_ACCOUNT_ID) {
+  // (3) The org's dedicated customer account — only if no other org references it.
+  {
     const siblings = await prisma.platOrganization.count({ where: { customerAccountId: org.customerAccountId } });
     if (siblings === 0) await prisma.platCustomerAccount.deleteMany({ where: { id: org.customerAccountId } });
   }
@@ -404,80 +386,59 @@ export async function lookupTenant(organizationId: string) {
   return prisma.platTenantRegistry.findUnique({ where: { organizationId } });
 }
 
-let systemSeeded = false;
+let platformSeeded = false;
 
-/** Idempotent: create the system tenant (org + identity + superuser) so
- * header-less requests resolve somewhere. Seeds NO workflow and NO model — the
- * system org starts empty. Safe to call on every boot. */
-export async function seedSystemOrg(): Promise<void> {
-  if (systemSeeded) return;
+/** Idempotent boot seed. Ensures the built-in roles + the superuser, and removes
+ * any legacy seeded system org from older builds. There is NO system org: a fresh
+ * install starts with zero orgs and the superuser creates the first one. Safe to
+ * call on every boot. */
+export async function seedPlatform(): Promise<void> {
+  if (platformSeeded) return;
   await ensureBuiltinRoles();
-
-  await prisma.platCustomerAccount.upsert({
-    where: { id: SYSTEM_CUSTOMER_ACCOUNT_ID },
-    update: {},
-    create: { id: SYSTEM_CUSTOMER_ACCOUNT_ID, name: "System" },
-  });
-  await prisma.platOrganization.upsert({
-    where: { id: SYSTEM_ORG_ID },
-    update: {},
-    create: { id: SYSTEM_ORG_ID, customerAccountId: SYSTEM_CUSTOMER_ACCOUNT_ID, name: "System", slug: "system", homeRegion: "local" },
-  });
-  await prisma.platStack.upsert({
-    where: { stackId: SYSTEM_STACK_ID },
-    update: {},
-    create: { stackId: SYSTEM_STACK_ID, region: "local", mode: "pooled", endpoints: "{}", status: "active" },
-  });
-  await prisma.platTenantRegistry.upsert({
-    where: { organizationId: SYSTEM_ORG_ID },
-    update: {},
-    create: { organizationId: SYSTEM_ORG_ID, customerAccountId: SYSTEM_CUSTOMER_ACCOUNT_ID, tenancyMode: "pooled", homeRegion: "local", stackId: SYSTEM_STACK_ID, status: "active" },
-  });
-  await prisma.platEnvironment.upsert({
-    where: { id: SYSTEM_ENV_ID },
-    update: {},
-    create: { id: SYSTEM_ENV_ID, organizationId: SYSTEM_ORG_ID, name: "development", region: "local" },
-  });
-  // production env (no fixed id needed)
-  if (!(await prisma.platEnvironment.findFirst({ where: { organizationId: SYSTEM_ORG_ID, name: "production" } }))) {
-    await prisma.platEnvironment.create({ data: { id: newId(), organizationId: SYSTEM_ORG_ID, name: "production", region: "local" } });
-  }
-  await prisma.platWorkspace.upsert({
-    where: { id: SYSTEM_WORKSPACE_ID },
-    update: {},
-    create: { id: SYSTEM_WORKSPACE_ID, organizationId: SYSTEM_ORG_ID, environmentId: SYSTEM_ENV_ID, name: "Default" },
-  });
-  // No system workflow and no model are seeded — the system org starts empty, like
-  // any freshly provisioned org, and lands on the empty-org screen.
-
-  // The system identity header-less requests authenticate as, + its membership +
-  // owner grant.
-  await prisma.platIdentity.upsert({
-    where: { subject: SYSTEM_SUBJECT },
-    update: {},
-    create: { id: SYSTEM_IDENTITY_ID, subject: SYSTEM_SUBJECT, primaryEmail: null, status: "active" },
-  });
-  await addMembership(SYSTEM_IDENTITY_ID, SYSTEM_ORG_ID);
-  await assignRole({
-    organizationId: SYSTEM_ORG_ID,
-    principalId: SYSTEM_IDENTITY_ID,
-    principalType: "identity",
-    roleKey: "owner",
-    scopeType: "organization",
-    scopeId: SYSTEM_ORG_ID,
-    grantedBy: SYSTEM_IDENTITY_ID,
-  });
-
+  await removeLegacySystemOrg();
   await seedSuperuser();
-  systemSeeded = true;
+  platformSeeded = true;
+}
+
+/** One-time removal of the retired system org (the fixed SYSTEM_ORG_ID) seeded by
+ * older builds. It never held workflows or business data, so this just drops its
+ * control-plane rows + the legacy "system" identity. Its audit events are LEFT in
+ * place — SYSTEM_ORG_ID is now the platform audit stream, so the chain stays
+ * intact. Idempotent: a no-op once the org is gone. */
+async function removeLegacySystemOrg(): Promise<void> {
+  const org = await prisma.platOrganization.findUnique({ where: { id: SYSTEM_ORG_ID } });
+  if (org) {
+    await prisma.$transaction([
+      prisma.platRoleAssignment.deleteMany({ where: { organizationId: SYSTEM_ORG_ID } }),
+      prisma.platOrgMembership.deleteMany({ where: { organizationId: SYSTEM_ORG_ID } }),
+      prisma.platWorkspace.deleteMany({ where: { organizationId: SYSTEM_ORG_ID } }),
+      prisma.platEnvironment.deleteMany({ where: { organizationId: SYSTEM_ORG_ID } }),
+      prisma.platTenantRegistry.deleteMany({ where: { organizationId: SYSTEM_ORG_ID } }),
+      prisma.platOrganization.deleteMany({ where: { id: SYSTEM_ORG_ID } }),
+    ]);
+    // The shared system customer account, if now unreferenced.
+    if ((await prisma.platOrganization.count({ where: { customerAccountId: org.customerAccountId } })) === 0) {
+      await prisma.platCustomerAccount.deleteMany({ where: { id: org.customerAccountId } });
+    }
+  }
+  // The legacy passwordless "system" identity + any dangling grants/memberships —
+  // independent of the org row, since an earlier boot may have removed the org but
+  // left the identity behind.
+  const sys = await prisma.platIdentity.findUnique({ where: { subject: "system" } });
+  if (sys) {
+    await prisma.platRoleAssignment.deleteMany({ where: { principalId: sys.id } });
+    await prisma.platOrgMembership.deleteMany({ where: { identityId: sys.id } });
+    await prisma.platIdentity.deleteMany({ where: { id: sys.id } });
+  }
 }
 
 export const SUPERADMIN_SUBJECT = "superadmin";
 
-/** Seed the superuser: a global platform-admin identity with a password, a
- * membership + owner role in the system org (its home), and credentials written
- * to a gitignored file for the operator. Password = SUPERADMIN_PASSWORD env, else
- * a default (change it). Re-applied each boot so the env override takes effect. */
+/** Seed the superuser: a global platform-admin identity with a password and NO org
+ * membership — it is platform-scoped, not a tenant member (it reaches orgs via
+ * break-glass, and owns the orgs it creates). Credentials are written to a
+ * gitignored file for the operator. Password = SUPERADMIN_PASSWORD env, else a
+ * default (change it). Re-applied each boot so the env override takes effect. */
 async function seedSuperuser(): Promise<void> {
   const password = process.env.SUPERADMIN_PASSWORD || "superadmin";
   const identity = await prisma.platIdentity.upsert({
@@ -489,16 +450,6 @@ async function seedSuperuser(): Promise<void> {
     where: { identityId: identity.id },
     update: {},
     create: { identityId: identity.id },
-  });
-  await addMembership(identity.id, SYSTEM_ORG_ID);
-  await assignRole({
-    organizationId: SYSTEM_ORG_ID,
-    principalId: identity.id,
-    principalType: "identity",
-    roleKey: "owner",
-    scopeType: "organization",
-    scopeId: SYSTEM_ORG_ID,
-    grantedBy: identity.id,
   });
   try {
     writeFileSync(

@@ -16,7 +16,6 @@
 import { prisma } from "../db.js";
 import type { Ontology, EntitySchema } from "../ontology/model.js";
 import { currentOrgId, currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
-import { SYSTEM_ORG_ID } from "../platform/ids.js";
 
 // Physical table prefix that isolates raw-SQL projections from Prisma tables.
 const TABLE_PREFIX = "gen_";
@@ -71,14 +70,10 @@ async function hasOrgColumn(table: string): Promise<boolean> {
 }
 
 /** SQL fragment + params scoping a query to the current org. Empty for a legacy
- * table without the column. The system org also sees null-org (legacy) rows. */
+ * table without the column. */
 async function orgFilterSql(table: string): Promise<{ clause: string; params: unknown[] }> {
   if (!(await hasOrgColumn(table))) return { clause: "", params: [] };
-  const org = currentOrgId();
-  if (org === SYSTEM_ORG_ID) {
-    return { clause: `(${ident("organization_id")} = ? OR ${ident("organization_id")} IS NULL)`, params: [SYSTEM_ORG_ID] };
-  }
-  return { clause: `${ident("organization_id")} = ?`, params: [org] };
+  return { clause: `${ident("organization_id")} = ?`, params: [currentOrgId()] };
 }
 
 function sqliteType(dataType?: string): string {

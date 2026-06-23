@@ -24,8 +24,7 @@
 
 import { prisma } from "../../db.js";
 import { AuthError, UnauthenticatedError } from "../../errors.js";
-import { SYSTEM_ORG_ID } from "../ids.js";
-import type { TenantContext } from "../types.js";
+import type { RequestContext } from "../types.js";
 import { resolveSession } from "./sessions.js";
 
 export interface AuthnHeaders {
@@ -93,8 +92,13 @@ async function resolveIdentity(headers: AuthnHeaders): Promise<{ identity: Ident
   return { identity, subject: sub };
 }
 
-/** Resolve request headers into the tenant context, or throw AuthError. */
-export async function resolveTenantContext(headers: AuthnHeaders): Promise<TenantContext> {
+/** Resolve request headers into the request context, or throw on an auth failure.
+ * Returns an ORG-bound context when the identity resolves to an organization, or
+ * an IDENTITY-ONLY context (no organizationId) when the authenticated caller is a
+ * member of no org and selected none — from which the only meaningful action is
+ * creating their first org. There is no system-org default: org-scoped routes
+ * fail closed on an identity-only context (requireTenant throws). */
+export async function resolveTenantContext(headers: AuthnHeaders): Promise<RequestContext> {
   const { identity, subject } = await resolveIdentity(headers);
   const platformAdmin = await isPlatformAdmin(identity.id);
 
@@ -103,7 +107,14 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
   });
   const selector = header(headers, "x-org-id") ?? header(headers, "x-org-slug");
 
-  let organizationId: string;
+  const base: RequestContext = {
+    principal: { id: identity.id, type: "identity" },
+    identityId: identity.id,
+    subject,
+    isPlatformAdmin: platformAdmin,
+  };
+
+  let organizationId: string | undefined;
   let actingAsPlatformAdmin = false;
 
   if (selector) {
@@ -124,16 +135,16 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
       // Fail CLOSED: the canonical org is never taken from a non-member selector.
       // A stale/invalid X-Org-Id (e.g. a deleted org left in the client's
       // localStorage) is recovered CLIENT-side — the UI drops it and retries
-      // header-less (see ensureMe()) — so this explicit denial can't lock anyone out.
+      // without the selector (see ensureMe()) — so this denial can't lock anyone out.
       throw new AuthError(`identity "${subject}" is not a member of organization "${selector}"`);
     }
   } else if (memberships.length === 1) {
     organizationId = memberships[0].organizationId;
-  } else if (memberships.some((m) => m.organizationId === SYSTEM_ORG_ID)) {
-    organizationId = SYSTEM_ORG_ID; // home-org default keeps the system identity stable
   } else if (memberships.length === 0) {
-    if (platformAdmin) organizationId = SYSTEM_ORG_ID; // superuser with no memberships → system home
-    else throw new AuthError(`identity "${subject}" has no active organization membership`);
+    // Authenticated but in no org yet (a fresh superadmin, a self-service caller,
+    // or a user whose last membership was removed). Identity-only context: the
+    // caller can create their first org; every org-scoped route fails closed.
+    return base;
   } else {
     throw new AuthError(`identity "${subject}" belongs to multiple organizations — specify X-Org-Id`);
   }
@@ -146,7 +157,6 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
   // id). An invalid / cross-org / stale selector falls back to the org's "Default"
   // workflow rather than failing the request — the client never gets a workflow it
   // didn't legitimately select, but a stale picker value can't lock anyone out.
-  // The system org is treated like any other org here (no special demo workflow).
   const workflowSelector = header(headers, "x-workflow-id");
   let workflowId: string | undefined;
   if (workflowSelector) {
@@ -166,12 +176,9 @@ export async function resolveTenantContext(headers: AuthnHeaders): Promise<Tenan
   }
 
   return {
+    ...base,
     organizationId: org.id, // canonical — the membership/org row, not the raw header
-    principal: { id: identity.id, type: "identity" },
-    identityId: identity.id,
-    subject,
     workflowId,
-    isPlatformAdmin: platformAdmin,
     ...(actingAsPlatformAdmin ? { actingAsPlatformAdmin: true } : {}),
   };
 }

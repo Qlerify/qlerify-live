@@ -1,13 +1,15 @@
-// No-preset contract (2026-06-22): the preset "Operations Day" demo was removed.
-// A freshly provisioned org — and the seeded SYSTEM org — start with ZERO
-// workflows and NO model. The system context resolves to an EMPTY ontology
-// (graceful-empty), never a preloaded demo. This locks the decision so the
-// preset can't quietly come back. See [[remove-preset-workflow]].
+// No system org / no preset (2026-06-23). The single-tenant demo AND its system
+// organization were removed. The boot seed (seedPlatform) creates the built-in
+// roles + the superuser only — NO system org, NO system identity, NO preset
+// workflow/model. A fresh install has ZERO orgs; the superuser creates the first.
+// The off-request "system context" still resolves to an EMPTY ontology (no demo).
+// This locks the decision so neither the system org nor a preset can come back.
+// See [[canonical-flow-no-demo]].
 
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "../../src/db.js";
-import { SYSTEM_ORG_ID, SYSTEM_WORKFLOW_ID } from "../../src/platform/ids.js";
-import { createOrganization, seedSystemOrg } from "../../src/platform/provisioning/index.js";
+import { SYSTEM_ORG_ID } from "../../src/platform/ids.js";
+import { createOrganization, seedPlatform } from "../../src/platform/provisioning/index.js";
 import { getOntology, emptyOntology } from "../../src/ontology/model.js";
 
 const created: { orgId: string; customerAccountId: string }[] = [];
@@ -23,17 +25,15 @@ afterAll(async () => {
   }
 });
 
-describe("no preset workflow/model (the demo was removed)", () => {
-  it("seedSystemOrg() seeds NO system workflow and NO system model", async () => {
-    await seedSystemOrg();
-    // The old byte-identical demo workflow must not exist as a row.
-    expect(await prisma.platWorkflow.findUnique({ where: { id: SYSTEM_WORKFLOW_ID } })).toBeNull();
-    // No model was folded into an org-level (workflowId=null) system ontology.
-    expect(await prisma.platOntology.count({ where: { organizationId: SYSTEM_ORG_ID, workflowId: null } })).toBe(0);
+describe("no system org, no preset (the demo and its system tenant were removed)", () => {
+  it("seedPlatform() creates NO system org and NO system identity", async () => {
+    await seedPlatform();
+    expect(await prisma.platOrganization.findUnique({ where: { id: SYSTEM_ORG_ID } })).toBeNull();
+    expect(await prisma.platIdentity.findUnique({ where: { subject: "system" } })).toBeNull();
   });
 
-  it("the system context resolves to an EMPTY ontology — no preloaded demo", () => {
-    // No ALS store → system context → empty model (no workflow.json on disk).
+  it("the off-request system context resolves to an EMPTY ontology — no preloaded demo", () => {
+    // No ALS store → off-request system context → empty model (no workflow.json on disk).
     const o = getOntology();
     expect(o.events.length).toBe(0);
     expect(o.roles.length).toBe(0);

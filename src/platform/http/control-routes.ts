@@ -26,7 +26,7 @@ import {
   ensureIdentity,
   updateOrganization,
 } from "../provisioning/index.js";
-import { requireTenant } from "../tenancy/context.js";
+import { requireIdentity, requireTenant } from "../tenancy/context.js";
 import { setActiveWorkflowModel } from "../../twin/apply.js";
 import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
 import {
@@ -36,14 +36,14 @@ import {
   listOntologies,
   listVersions,
 } from "../ontology-store/ontology-store.js";
-import type { PrincipalType, ScopeType, TenantContext } from "../types.js";
+import type { PrincipalType, RequestContext, ScopeType, TenantContext } from "../types.js";
 
 // --- Shared helpers ----------------------------------------------------------
 
 /** Orgs the caller may see in the switcher: their member orgs, or ALL orgs for a
  * platform admin (org names are low-sensitivity control-plane metadata; a
  * non-admin is strictly membership-scoped so there is no cross-tenant oracle). */
-async function accessibleOrgs(ctx: TenantContext) {
+async function accessibleOrgs(ctx: RequestContext) {
   const cols = { id: true, name: true, slug: true, homeRegion: true, status: true } as const;
   if (ctx.isPlatformAdmin) {
     return prisma.platOrganization.findMany({ select: cols, orderBy: { createdAt: "asc" } });
@@ -86,18 +86,26 @@ export function registerControlRoutes(app: FastifyInstance) {
   // bar reads this once to render the whole shell.
   app.get("/v1/whoami", async (req, reply) => {
     try {
-      const ctx = requireTenant();
-      return {
-        organizationId: ctx.organizationId,
+      const ctx = requireIdentity();
+      const common = {
         principal: ctx.principal,
         subject: ctx.subject,
         isPlatformAdmin: !!ctx.isPlatformAdmin,
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
         organizations: await accessibleOrgs(ctx),
-        workflowId: ctx.workflowId ?? null,
-        isSystemWorkflow: ctx.workflowId === SYSTEM_WORKFLOW_ID, // always false now (no system workflow row); kept for client compat
+        isSystemWorkflow: false, // no system workflow exists; kept for client compat
         systemWorkflowId: SYSTEM_WORKFLOW_ID, // sentinel; no real workflow carries it
-
+      };
+      // Authenticated but not a member of any org yet (fresh superadmin, or a user
+      // whose last membership was removed) → the shell shows "create your first
+      // organisation". No org-scoped data is available.
+      if (!ctx.organizationId) {
+        return { ...common, organizationId: null, workflowId: null, workflows: [] };
+      }
+      return {
+        ...common,
+        organizationId: ctx.organizationId,
+        workflowId: ctx.workflowId ?? null,
         // The org's workflows, readable by any member (for the breadcrumb picker).
         workflows: await prisma.platWorkflow.findMany({
           where: { organizationId: ctx.organizationId },
@@ -153,7 +161,7 @@ export function registerControlRoutes(app: FastifyInstance) {
   // Self-service provisioning: the caller becomes owner of the new org.
   app.post("/v1/organizations", async (req, reply) => {
     try {
-      const ctx = requireTenant();
+      const ctx = requireIdentity();
       const body = (req.body ?? {}) as { name?: string; homeRegion?: string };
       if (!body.name) throw new DomainError("name is required");
       const org = await createOrganization({ name: body.name, homeRegion: body.homeRegion, ownerIdentityId: ctx.identityId }, ctx.principal.id);

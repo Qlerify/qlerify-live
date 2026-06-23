@@ -14,7 +14,7 @@ import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
 import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
 import { registerControlRoutes } from "./platform/http/control-routes.js";
-import { seedSystemOrg } from "./platform/provisioning/index.js";
+import { seedPlatform } from "./platform/provisioning/index.js";
 import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,15 +28,17 @@ export async function buildServer() {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
   }
 
-  // Multi-tenant control plane: seed the system tenant (control-plane plumbing —
-  // superuser home, non-request fallback, audit anchor) BEFORE serving, then bind
-  // a tenant context to every request (org_id derived from identity, never from
-  // client input). Requests must authenticate — there is no header-less demo; the
-  // static web shell is the only public surface so the login screen can load.
+  // Multi-tenant control plane: seed platform basics (built-in roles + the
+  // superuser; remove any legacy system org) BEFORE serving, then bind a tenant
+  // context to every request (org_id derived from identity, never from client
+  // input). Requests must authenticate — there is no header-less demo and no
+  // system org; the static web shell is the only public surface so the login
+  // screen can load. A fresh install has zero orgs: the superuser signs in and
+  // creates the first one.
   try {
-    await seedSystemOrg();
+    await seedPlatform();
   } catch (err) {
-    app.log.error({ err }, "system-org seed failed — tenant resolution will reject requests until fixed");
+    app.log.error({ err }, "platform seed failed — sign-in/provisioning may be unavailable until fixed");
   }
   registerTenantPlugin(app, webRoot);
 

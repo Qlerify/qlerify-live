@@ -113,6 +113,14 @@ const state = {
   registryError: null,
   // toast message (e.g. after setting a workflow's model)
   modelMsg: null,
+  // organisation portfolio dashboard (#org) — the tier above the per-workflow
+  // overview, spanning every workflow type in the org.
+  org: null,            // /org/portfolio result
+  orgBusy: false,
+  orgMapOpen: false,    // attribute-mapping dialog open?
+  orgMap: null,         // /org/mappings result (dialog data)
+  orgMapBusy: false,
+  orgMapErr: null,
 };
 
 // --- Tenant auth/session (localStorage-backed) ------------------------------
@@ -645,6 +653,7 @@ function parseHash() {
   let m;
   if (h.startsWith("#login")) return { view: "login" };
   if (h.startsWith("#admin")) return { view: "admin" };
+  if (h.startsWith("#org")) return { view: "org" };
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#bcs")) return { view: "bcs" };
   if ((m = h.match(/^#demand\/([\w-]+)/))) return { view: "detail", demandId: m[1] };
@@ -704,6 +713,12 @@ async function onHashChange() {
       await loadExplorer();
     } else if (r.view === "bc") {
       await loadBc(r.bc);
+    } else if (r.view === "org") {
+      await loadOrg();
+      // Poll every 5s so the portfolio reads as a live control tower.
+      dashboardTimer = setInterval(() => {
+        if (state.view === "org" && !state.orgBusy) loadOrg().catch(() => {});
+      }, 5000);
     } else {
       await loadDashboard();
       // Poll every 5s so "last activity" pills age in front of the audience.
@@ -863,6 +878,319 @@ function bindDashboard() {
   document.querySelectorAll("[data-delete]").forEach((el) => {
     el.addEventListener("click", (ev) => deleteDemand(el.dataset.delete, ev));
   });
+}
+
+// ===========================================================================
+// Organisation portfolio dashboard (#org) — the tier ABOVE the per-workflow
+// overview. Spans every workflow TYPE in the org. Built from /org/portfolio
+// (one cross-workflow aggregation over the event log). Capability-gating: panels
+// that need a mapped attribute (e.g. a commitment date) render ready / partial /
+// locked and link to the attribute-mapping dialog.
+// ===========================================================================
+
+async function loadOrg() {
+  state.orgBusy = true;
+  try {
+    state.org = await api("/org/portfolio");
+  } catch (e) {
+    state.org = { error: e.message };
+  } finally {
+    state.orgBusy = false;
+    render();
+  }
+}
+
+// Switch the active workflow (if needed) then navigate — the drill from a
+// portfolio tile into that workflow's overview or one of its instances.
+async function orgGotoWorkflow(workflowId, hash) {
+  if (workflowId && workflowId !== (state.me?.workflowId || "")) {
+    AUTH.setWorkflow(workflowId);
+    state.me = null;
+    await ensureMe();
+  }
+  navigate(hash || "#");
+}
+
+// --- North-star band helpers ---
+function orgTile(label, big, sub, opts = {}) {
+  return `
+    <div class="rounded-lg border border-stone-200 bg-white p-4">
+      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold">${escapeHtml(label)}</div>
+      <div class="mt-1 text-2xl font-semibold tabular-nums leading-none ${opts.tone || "text-stone-900"}">${escapeHtml(String(big))}</div>
+      ${sub ? `<div class="mt-1 text-xs text-stone-500">${escapeHtml(sub)}</div>` : ""}
+      ${opts.spark || ""}
+    </div>`;
+}
+function orgSpark(series) {
+  const max = Math.max(1, ...series.map((s) => s.count));
+  const bars = series.map((s) => {
+    const h = Math.max(2, Math.round((s.count / max) * 24));
+    return `<div class="flex-1 bg-amber-300/80 rounded-sm" style="height:${h}px" title="${escapeHtml(s.week)}: ${s.count}"></div>`;
+  }).join("");
+  return `<div class="mt-2 flex items-end gap-0.5 h-6">${bars}</div>`;
+}
+// Per-workflow twin-trust chip — colour follows the provenance ladder.
+function provTrustChip(tp) {
+  const mode = tp.pct >= 50 ? "live" : tp.pct > 0 ? "recorded" : "simulated";
+  const s = PROV_STYLE[mode] || PROV_STYLE.simulated;
+  return `<span class="text-[9px] font-semibold px-1 py-px rounded ${s.chip}" title="${tp.real}/${tp.total} events from a real source">${tp.pct}% real</span>`;
+}
+function panelShell(eyebrow, title, body) {
+  return `
+    <section class="rounded-lg border border-stone-200 bg-white overflow-hidden">
+      <div class="px-4 py-3 border-b border-stone-100">
+        <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold">${escapeHtml(eyebrow)}</div>
+        <div class="text-sm font-semibold text-stone-800">${escapeHtml(title)}</div>
+      </div>
+      <div class="p-4">${body}</div>
+    </section>`;
+}
+function orgMiniStat(label, value, tone) {
+  return `<div class="rounded-md border border-stone-200 bg-stone-50 p-3 text-center"><div class="text-xl font-semibold tabular-nums ${tone || "text-stone-900"}">${value}</div><div class="text-[10px] uppercase tracking-wide text-stone-500 mt-0.5">${escapeHtml(label)}</div></div>`;
+}
+
+// --- Timeliness panel: the capability-GATED demonstration. Renders locked /
+// partial / ready off the commitDate capability's mapping coverage. ---
+function orgTimelinessPanel(o) {
+  const cap = (o.capabilities || []).find((c) => c.key === "commitDate");
+  if (!cap) return "";
+  if (cap.state === "locked") {
+    return panelShell("Timeliness", "Overdue & on-time commitments", `
+      <div class="flex items-center gap-4 rounded-md border border-dashed border-stone-300 bg-stone-50 p-4">
+        <div class="text-2xl">🔒</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-stone-700">This panel needs a commitment / due date</div>
+          <div class="text-xs text-stone-500 mt-0.5">${escapeHtml(cap.description)}</div>
+        </div>
+        <button data-org-map-open class="shrink-0 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Map attributes →</button>
+      </div>`);
+  }
+  const t = o.timeliness || { overdue: 0, onTime: 0, scorable: 0, rows: [], partial: null };
+  const partialNote = t.partial
+    ? `<div class="mb-3 flex items-center gap-1.5 flex-wrap text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">⚠ ${t.partial.unmapped.length} workflow${t.partial.unmapped.length === 1 ? "" : "s"} not mapped yet — <button data-org-map-open class="underline font-medium">map ${t.partial.unmapped.length === 1 ? "it" : "them"}</button> to include their commitments.</div>`
+    : "";
+  const rows = (t.rows || []).map((r) => `
+    <button data-ex-go="${r.workflowId}|${r.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
+      <span class="inline-block w-2 h-2 rounded-full bg-rose-500 shrink-0"></span>
+      <div class="flex-1 min-w-0"><div class="text-sm text-stone-800 truncate">${escapeHtml(r.workflowName)} · ${escapeHtml(r.demandId.slice(0, 12))}…</div><div class="text-[11px] text-stone-500">due ${escapeHtml(r.dueDate)}</div></div>
+      <span class="text-[11px] font-medium text-rose-700 tabular-nums shrink-0">${r.overdueDays}d late</span>
+    </button>`).join("");
+  return panelShell("Timeliness", "Overdue & on-time commitments", `
+    ${partialNote}
+    <div class="grid grid-cols-3 gap-3">
+      ${orgMiniStat("Overdue", t.overdue, "text-rose-700")}
+      ${orgMiniStat("On time", t.onTime, "text-emerald-700")}
+      ${orgMiniStat("Scorable", t.scorable, "text-stone-700")}
+    </div>
+    ${rows ? `<div class="mt-3 divide-y divide-stone-100 rounded-md border border-stone-200 overflow-hidden">${rows}</div>` : `<div class="mt-3 text-sm text-stone-400">No overdue commitments. 🎉</div>`}
+  `);
+}
+
+// --- Portfolio grid card (one per workflow TYPE) ---
+function orgCard(w) {
+  if (!w.hasModel) {
+    return `<button data-wf-go="${w.id}" class="text-left rounded-lg border border-dashed border-stone-300 bg-stone-50 p-4 hover:border-stone-400 transition">
+      <div class="font-semibold text-stone-700 truncate">${escapeHtml(w.name)}</div>
+      <div class="text-xs text-stone-500 mt-1">No model yet — open to set one.</div>
+    </button>`;
+  }
+  const role = w.topRoleQueue, oldest = w.oldestActive;
+  const chips = (w.reworkCount || w.softFailCount)
+    ? `<div class="flex gap-1.5 pt-1">${w.reworkCount ? `<span class="px-1.5 py-px rounded bg-rose-100 text-rose-700 text-[11px]">${w.reworkCount} rework</span>` : ""}${w.softFailCount ? `<span class="px-1.5 py-px rounded bg-stone-200 text-stone-600 text-[11px]">${w.softFailCount} soft-fail</span>` : ""}</div>`
+    : "";
+  return `
+    <button data-wf-go="${w.id}" class="text-left rounded-lg border border-stone-200 bg-white p-4 hover:border-amber-300 hover:shadow-sm transition">
+      <div class="flex items-center justify-between gap-2">
+        <div class="font-semibold text-stone-900 truncate">${escapeHtml(w.name)}</div>
+        ${provTrustChip(w.twinTrust)}
+      </div>
+      <div class="mt-3 grid grid-cols-3 gap-2 text-center">
+        <div><div class="text-xl font-semibold text-stone-900 tabular-nums">${w.active}</div><div class="text-[10px] uppercase text-stone-500">active</div></div>
+        <div><div class="text-xl font-semibold text-stone-900 tabular-nums">${w.completed}</div><div class="text-[10px] uppercase text-stone-500">done</div></div>
+        <div><div class="text-xl font-semibold text-stone-900 tabular-nums">${w.throughputRecent}</div><div class="text-[10px] uppercase text-stone-500">8wk</div></div>
+      </div>
+      <div class="mt-3 space-y-1 text-xs text-stone-600">
+        ${role ? `<div class="flex justify-between gap-2"><span class="text-stone-500">Top queue</span><span class="font-medium truncate">${escapeHtml(role.role)} · ${role.count}</span></div>` : ""}
+        ${oldest ? `<div class="flex justify-between gap-2"><span class="text-stone-500">Oldest active</span><span class="font-medium truncate">${escapeHtml(oldest.stepName)} · ${oldest.ageDays}d</span></div>` : ""}
+        ${chips}
+      </div>
+      <div class="mt-2 text-[10px] text-stone-400">${w.totalSteps} steps</div>
+    </button>`;
+}
+
+function orgExceptionRow(x) {
+  const dot = { overdue: "bg-rose-500", rework: "bg-rose-400", soft_fail: "bg-stone-400", aging: "bg-amber-400" }[x.kind] || "bg-stone-400";
+  return `
+    <button data-ex-go="${x.workflowId}|${x.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
+      <span class="inline-block w-2 h-2 rounded-full ${dot} shrink-0"></span>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm text-stone-800 truncate"><span class="font-medium">${escapeHtml(x.title)}</span> — ${escapeHtml(x.detail)}</div>
+        <div class="text-[11px] text-stone-500 truncate">${escapeHtml(x.workflowName)} · ${escapeHtml(x.demandId.slice(0, 12))}…</div>
+      </div>
+      <span class="text-[11px] text-stone-400 tabular-nums shrink-0">${x.ageDays}d</span>
+    </button>`;
+}
+function orgBottleneckRow(b) {
+  return `
+    <button data-bn-go="${b.workflowId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
+      <div class="flex-1 min-w-0">
+        <div class="text-sm text-stone-800 truncate">${escapeHtml(b.stepName)} <span class="text-stone-400">· ${escapeHtml(b.boundedContext)}</span></div>
+        <div class="text-[11px] text-stone-500 truncate">${escapeHtml(b.workflowName)} · ${escapeHtml(b.role)}</div>
+      </div>
+      <span class="text-sm font-semibold text-stone-700 tabular-nums shrink-0">${b.waiting}</span>
+    </button>`;
+}
+
+function orgView() {
+  const o = state.org;
+  const head = (right) => `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4 flex items-center gap-6">
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify Live — Portfolio</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">Portfolio overview</div>
+          ${o && !o.error ? `<div class="text-xs text-stone-500 mt-0.5">${o.northStar.workflowCount} workflow type${o.northStar.workflowCount === 1 ? "" : "s"} · ${o.northStar.activeInstances} active · ${o.northStar.modelledCount} modelled</div>` : ""}
+        </div>
+        ${right}
+      </div>
+    </header>`;
+  const assistantBtn = `<button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>`;
+
+  if (!o || o.error) {
+    return head(assistantBtn) + `<main class="flex-1 p-6"><div class="text-sm ${o && o.error ? "text-rose-600" : "text-stone-400"}">${o && o.error ? escapeHtml(o.error) : "Loading portfolio…"}</div></main>` + orgMapDialog();
+  }
+  const ns = o.northStar;
+  const right = `
+    <span class="hidden sm:flex items-center gap-1.5 text-xs text-stone-500"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>live</span>
+    <button data-org-map-open class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Map workflow attributes to dashboard capabilities">⚙ Map attributes</button>
+    ${assistantBtn}`;
+  const flowTone = ns.flowRatio != null && ns.flowRatio < 1 ? "text-amber-700" : "text-stone-900";
+  const band = `
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+      ${orgTile("Active instances", ns.activeInstances, `${ns.totalInstances} total · ${ns.completedInstances} done`)}
+      ${orgTile("Throughput · 8 wk", ns.completedRecent, "completed", { spark: orgSpark(ns.throughputSeries) })}
+      ${orgTile("Flow ratio", ns.flowRatio != null ? ns.flowRatio + "×" : "—", "completed ÷ started", { tone: flowTone })}
+      ${orgTile("Twin trust", ns.twinTrust.pct + "%", `${ns.twinTrust.real}/${ns.twinTrust.total} events real`)}
+      ${orgTile("Data conformance", ns.conformance.pct + "%", `${ns.conformance.clean}/${ns.conformance.total} clean steps`)}
+    </div>`;
+  const grid = `
+    <section class="mt-6">
+      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold mb-2">Workflow types</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">${o.workflows.map(orgCard).join("")}</div>
+    </section>`;
+  const feeds = `
+    <section class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-3">
+      ${panelShell("Exceptions", "Cross-portfolio attention queue", o.exceptions.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${o.exceptions.map(orgExceptionRow).join("")}</div>` : `<div class="text-sm text-stone-400">Nothing needs attention. 🎉</div>`)}
+      ${panelShell("Bottlenecks", "Where work is waiting (by step)", o.bottlenecks.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${o.bottlenecks.map(orgBottleneckRow).join("")}</div>` : `<div class="text-sm text-stone-400">No active work in flight.</div>`)}
+    </section>`;
+  return head(right) + `
+    <main class="flex-1 overflow-auto p-6">
+      ${band}
+      <div class="mt-6">${orgTimelinessPanel(o)}</div>
+      ${grid}
+      ${feeds}
+    </main>
+    <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
+      <span>Organisation portfolio · computed live from the event log across all workflows.</span>
+      <span class="mx-2">·</span><span>updated ${escapeHtml(new Date(o.generatedAt).toLocaleTimeString())}</span>
+    </footer>` + orgMapDialog();
+}
+
+function bindOrg() {
+  document.querySelectorAll("[data-wf-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-wf-go"), "#")));
+  document.querySelectorAll("[data-bn-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-bn-go"), "#")));
+  document.querySelectorAll("[data-ex-go]").forEach((el) => el.addEventListener("click", () => {
+    const [wf, demand] = (el.getAttribute("data-ex-go") || "").split("|");
+    orgGotoWorkflow(wf, `#demand/${demand}`);
+  }));
+  document.querySelectorAll("[data-org-map-open]").forEach((el) => el.addEventListener("click", openOrgMap));
+  bindOrgMap();
+}
+
+// --- Attribute-mapping dialog (the heart of capability-gating) ---
+async function openOrgMap() {
+  state.orgMapOpen = true; state.orgMapErr = null; state.orgMap = null;
+  render();
+  try { state.orgMap = await api("/org/mappings"); }
+  catch (e) { state.orgMap = { error: e.message }; }
+  render();
+}
+
+async function orgSaveMapping(workflowId, capabilityKey, field) {
+  state.orgMapBusy = true; state.orgMapErr = null; render();
+  try {
+    const res = await api(`/org/mappings/${workflowId}`, { method: "PUT", body: JSON.stringify({ capabilityKey, field: field || null }) });
+    const wf = (state.orgMap?.workflows || []).find((w) => w.id === workflowId);
+    if (wf) wf.mapping = res.mapping || {};
+    await loadOrg(); // refresh the portfolio so gated panels update live
+  } catch (e) {
+    state.orgMapErr = /\b403\b/.test(e.message) ? "Only organisation admins can change attribute mappings." : e.message;
+  } finally {
+    state.orgMapBusy = false; render();
+  }
+}
+
+function orgMapBody(m) {
+  return (m.capabilities || []).map((cap) => {
+    const rows = (m.workflows || []).map((w) => {
+      if (!w.hasModel) {
+        return `<div class="flex items-center gap-3 py-2 border-t border-stone-100"><div class="flex-1 text-sm text-stone-500 truncate">${escapeHtml(w.name)}</div><div class="text-xs text-stone-400">no model yet</div></div>`;
+      }
+      const cur = w.mapping?.[cap.key] || "";
+      const opts = [`<option value="">— not mapped —</option>`].concat((w.fields || []).map((f) => {
+        const sel = f.name === cur ? "selected" : "";
+        const sug = (f.name === w.suggested && !cur) ? " (suggested)" : "";
+        return `<option value="${escapeHtml(f.name)}" ${sel}>${f.dateish ? "📅 " : ""}${escapeHtml(f.name)}${f.dataType ? ` · ${escapeHtml(f.dataType)}` : ""}${sug}</option>`;
+      })).join("");
+      const hint = !cur && w.suggested ? `<div class="text-[11px] text-stone-400 mt-0.5">suggested: ${escapeHtml(w.suggested)}</div>` : "";
+      return `
+        <div class="flex items-center gap-3 py-2 border-t border-stone-100">
+          <div class="flex-1 min-w-0"><div class="text-sm font-medium text-stone-800 truncate">${escapeHtml(w.name)}</div>${hint}</div>
+          <select data-map-select data-map-wf="${w.id}" data-map-cap="${cap.key}" ${state.orgMapBusy ? "disabled" : ""} class="rounded-md border border-stone-300 px-2 py-1.5 text-sm max-w-[260px]">${opts}</select>
+        </div>`;
+    }).join("");
+    return `
+      <div class="mb-5">
+        <div class="text-sm font-semibold text-stone-800">${escapeHtml(cap.label)}</div>
+        <div class="text-xs text-stone-500 mt-0.5 mb-1">${escapeHtml(cap.description)} <span class="text-stone-400">Unlocks: ${escapeHtml(cap.unlocks)}</span></div>
+        ${rows || `<div class="text-sm text-stone-400 py-2">No workflows.</div>`}
+      </div>`;
+  }).join("");
+}
+
+function orgMapDialog() {
+  if (!state.orgMapOpen) return "";
+  const m = state.orgMap;
+  const inner = !m ? `<div class="py-8 text-center text-sm text-stone-500">Loading…</div>`
+    : m.error ? `<div class="py-8 text-center text-sm text-rose-600">${escapeHtml(m.error)}</div>`
+    : orgMapBody(m);
+  const err = state.orgMapErr ? `<div class="px-5 py-2 text-sm text-rose-600 bg-rose-50 border-t border-rose-100">${escapeHtml(state.orgMapErr)}</div>` : "";
+  return `
+    <div data-org-map-close class="fixed inset-0 z-50 bg-black/40"></div>
+    <div class="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+      <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col pointer-events-auto">
+        <div class="px-5 py-4 border-b border-stone-200 flex items-start justify-between gap-4">
+          <div>
+            <div class="text-lg font-semibold">Map dashboard attributes</div>
+            <div class="text-sm text-stone-500 mt-0.5">Point each workflow's own fields at the attributes a dashboard panel needs. Panels light up as workflows are mapped; partially-mapped panels flag the rest. Admin only.</div>
+          </div>
+          <button data-org-map-close class="text-stone-400 hover:text-stone-700 text-xl leading-none">✕</button>
+        </div>
+        <div class="overflow-auto p-5 flex-1">${inner}</div>
+        ${err}
+        <div class="px-5 py-3 border-t border-stone-200 flex justify-end">
+          <button data-org-map-close class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Done</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindOrgMap() {
+  if (!state.orgMapOpen) return;
+  document.querySelectorAll("[data-org-map-close]").forEach((el) => el.addEventListener("click", () => { state.orgMapOpen = false; state.orgMapErr = null; render(); }));
+  document.querySelectorAll("[data-map-select]").forEach((el) => el.addEventListener("change", () => {
+    orgSaveMapping(el.getAttribute("data-map-wf"), el.getAttribute("data-map-cap"), el.value);
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,7 +2491,12 @@ function render() {
     root.innerHTML = wrap(bcWorkbenchView());
     bindTenantBar();
     bindBcWorkbench();
-    bindChat();  } else {
+    bindChat();  } else if (state.view === "org") {
+    root.innerHTML = wrap(orgView());
+    bindTenantBar();
+    bindOrg();
+    bindChat();
+  } else {
     root.innerHTML = wrap(dashboardView());
     bindTenantBar();
     bindDashboard();
@@ -2392,6 +2725,7 @@ function tenantBar() {
         <span class="text-stone-500 text-xs uppercase tracking-wide">Workflow</span>
         ${projControl}
         <div class="flex-1"></div>
+        <a href="#org" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "org" ? "bg-stone-800 text-white" : ""}" title="Organisation portfolio — every workflow at a glance">▣ Portfolio</a>
         <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
         <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
         <span class="text-stone-600">·</span>

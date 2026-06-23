@@ -1,0 +1,635 @@
+// Organisation-level portfolio dashboard — one tier ABOVE the per-workflow-type
+// overview. It spans EVERY workflow type in an organisation at once (hardware
+// production, base-station maintenance, customer implementation, …) and answers
+// the questions an ops leader acts on: how much live work, is it flowing or
+// piling up, where is time lost, what's the exception queue, how real is the twin.
+//
+// Two grounding rules make this work without disturbing the single-workflow data
+// plane:
+//   1. CROSS-WORKFLOW EVENTS come from ONE Prisma query over the append-only
+//      EventLog filtered by organizationId (indexed). No per-workflow context
+//      switch, no global-ontology swap.
+//   2. PER-WORKFLOW STEP STRUCTURE (linear order, terminal step, role/BC per
+//      step) is read by loading each workflow's model content LOCALLY via
+//      loadOntologyFromStrings() — a fresh Ontology object, never the process
+//      singleton getOntology() returns. So computing one workflow's shape can
+//      never corrupt the model bound to the live request.
+//
+// CAPABILITY-GATING: some panels need an attribute the model doesn't label on its
+// own (e.g. which payload field is the COMMITMENT/DUE date). Each such capability
+// is mapped PER WORKFLOW (admin action, persisted in _app_meta). A panel renders
+// ready / partial / locked from how many of the org's modelled workflows are
+// mapped — so the board is useful immediately and lights up as you map.
+
+import { prisma } from "../db.js";
+import { currentContent } from "../platform/ontology-store/ontology-store.js";
+import { loadOntologyFromStrings, type Ontology } from "../ontology/model.js";
+import { getMeta, setMeta } from "./projection-store.js";
+
+// ---------------------------------------------------------------------------
+// Capability registry — the data inputs panels can require. Derived capabilities
+// (auto-satisfied, e.g. the throughput/trust panels) are NOT listed here; only
+// the ones a human must MAP appear, because those are what the mapping dialog and
+// the gating notices are about.
+// ---------------------------------------------------------------------------
+
+export interface CapabilityDef {
+  key: string;
+  label: string;
+  description: string;
+  /** Panels that come alive once this capability is mapped (for UI copy). */
+  unlocks: string;
+}
+
+export const CAPABILITIES: CapabilityDef[] = [
+  {
+    key: "commitDate",
+    label: "Commitment / due date",
+    description:
+      "Which field on this workflow carries the promised delivery / due date. The model can't tell a due-date from a created-date on its own, so point us at the right one.",
+    unlocks: "Timeliness — overdue work, on-time rate, and (next) predicted lateness.",
+  },
+];
+
+// Per-workflow mapping: capability key → the model field name it resolves to.
+export type WorkflowMapping = Record<string, string>;
+// Org-wide: workflowId → its mapping.
+export type OrgMappings = Record<string, WorkflowMapping>;
+
+const mapKey = (orgId: string) => `orgdash:mappings:${orgId}`;
+
+/** Every workflow mapping in the org (empty object when none configured). */
+export async function getOrgMappings(orgId: string): Promise<OrgMappings> {
+  const raw = await getMeta(mapKey(orgId));
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" ? (v as OrgMappings) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Set (or clear) one capability mapping for one workflow. Passing an empty/blank
+ * field clears that capability. Returns the full updated org mapping set. */
+export async function setWorkflowMapping(
+  orgId: string,
+  workflowId: string,
+  capabilityKey: string,
+  field: string | null,
+): Promise<OrgMappings> {
+  if (!CAPABILITIES.some((c) => c.key === capabilityKey)) {
+    throw new Error(`unknown dashboard capability "${capabilityKey}"`);
+  }
+  const all = await getOrgMappings(orgId);
+  const wf = { ...(all[workflowId] ?? {}) };
+  if (field && field.trim()) wf[capabilityKey] = field.trim();
+  else delete wf[capabilityKey];
+  if (Object.keys(wf).length) all[workflowId] = wf;
+  else delete all[workflowId];
+  await setMeta(mapKey(orgId), JSON.stringify(all));
+  return all;
+}
+
+// ---------------------------------------------------------------------------
+// Ontology helpers (operate on a LOCALLY-loaded Ontology, never the singleton).
+// ---------------------------------------------------------------------------
+
+interface OrderInfo {
+  refs: string[]; // event $refs in linear (demo) order
+  total: number;
+  terminal: string | null; // last step's $ref
+  indexByRef: Map<string, number>;
+}
+
+function orderInfo(ont: Ontology): OrderInfo {
+  const refs = ont
+    .linearOrder()
+    .map((k) => ont.eventByKey(k)?.ref)
+    .filter((r): r is string => !!r);
+  const indexByRef = new Map(refs.map((r, i) => [r, i]));
+  return { refs, total: refs.length, terminal: refs[refs.length - 1] ?? null, indexByRef };
+}
+
+const DATEISH_RE = /(date|time|due|deadline|eta|occurr|deliver|promise|schedul|week|when)/i;
+
+export interface FieldOption {
+  name: string;
+  dataType?: string;
+  dateish: boolean;
+  source: "entity" | "command";
+}
+
+/** The fields a workflow exposes, for the mapping dialog's dropdowns. Date-shaped
+ * fields are flagged and sorted first; `suggested` is the best date guess. */
+export function availableFields(ont: Ontology): { fields: FieldOption[]; suggested: string | null } {
+  const seen = new Map<string, FieldOption>();
+  const consider = (name: string, dataType: string | undefined, source: "entity" | "command") => {
+    if (!name || name === "id" || seen.has(name)) return;
+    const dateish = /date|time/i.test(dataType ?? "") || DATEISH_RE.test(name);
+    seen.set(name, { name, dataType, dateish, source });
+  };
+  for (const e of ont.entities) for (const f of e.fields) consider(f.name, f.dataType, "entity");
+  for (const c of ont.commands) for (const f of c.fields) consider(f.name, f.dataType, "command");
+  const fields = [...seen.values()].sort((a, b) =>
+    a.dateish === b.dateish ? a.name.localeCompare(b.name) : a.dateish ? -1 : 1,
+  );
+  // Suggested = the date-typed field with the most "occurrence/commitment" intent.
+  const score = (f: FieldOption) => {
+    let s = /date|time/i.test(f.dataType ?? "") ? 2 : DATEISH_RE.test(f.name) ? 1 : 0;
+    if (/(due|deadline|eta|promise|deliver|commit)/i.test(f.name)) s += 2;
+    return s;
+  };
+  const suggested = fields.filter((f) => f.dateish).sort((a, b) => score(b) - score(a))[0]?.name ?? null;
+  return { fields, suggested };
+}
+
+// ---------------------------------------------------------------------------
+// Date / week helpers
+// ---------------------------------------------------------------------------
+
+function asDate(v: unknown): Date | null {
+  if (v == null || v === "") return null;
+  const d = v instanceof Date ? v : new Date(v as any);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.max(0, Math.round((b.getTime() - a.getTime()) / 86_400_000));
+}
+
+/** ISO-week key "2026-W30" for bucketing throughput. */
+function isoWeekKey(d: Date): string {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = t.getUTCDay() || 7;
+  t.setUTCDate(t.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((t.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+  return `${t.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio computation
+// ---------------------------------------------------------------------------
+
+type EvtRow = {
+  workflowId: string | null;
+  demandId: string | null;
+  eventRef: string;
+  eventName: string;
+  role: string;
+  boundedContext: string;
+  businessAt: Date | null;
+  occurredAt: Date;
+  provenance: string | null;
+  aggregateId: string;
+};
+
+interface InstanceState {
+  demandId: string;
+  firstAt: Date; // occurredAt of earliest event
+  lastAt: Date; // occurredAt of latest event
+  firstBiz: Date | null;
+  termBiz: Date | null; // businessAt of the terminal event, if reached
+  firedRefs: Set<string>;
+  refCounts: Map<string, number>;
+  realEvents: number;
+  totalEvents: number;
+  softFails: number;
+  done: boolean;
+  currentRef: string | null; // next unfired step's $ref (null if complete)
+}
+
+export interface PortfolioResult {
+  generatedAt: string;
+  org: { id: string };
+  workflows: WorkflowCard[];
+  northStar: {
+    activeInstances: number;
+    totalInstances: number;
+    completedInstances: number;
+    throughputSeries: { week: string; count: number }[];
+    completedRecent: number; // completions in the series window
+    started: number;
+    flowRatio: number | null; // completed ÷ started over the window; <1 = backlog grows
+    twinTrust: { real: number; total: number; pct: number };
+    conformance: { clean: number; total: number; pct: number };
+    workflowCount: number;
+    modelledCount: number;
+  };
+  exceptions: ExceptionRow[];
+  bottlenecks: Bottleneck[];
+  capabilities: CapabilityStatus[];
+  timeliness: TimelinessPanel | null;
+}
+
+export interface WorkflowCard {
+  id: string;
+  name: string;
+  workspaceId: string;
+  hasModel: boolean;
+  totalSteps: number;
+  active: number;
+  completed: number;
+  total: number;
+  throughputRecent: number;
+  series: { week: string; count: number }[];
+  reworkCount: number;
+  softFailCount: number;
+  twinTrust: { real: number; total: number; pct: number };
+  oldestActive: { demandId: string; ageDays: number; stepName: string } | null;
+  topRoleQueue: { role: string; count: number } | null;
+}
+
+export interface ExceptionRow {
+  kind: "overdue" | "rework" | "soft_fail" | "aging";
+  severity: number;
+  workflowId: string;
+  workflowName: string;
+  demandId: string;
+  title: string;
+  detail: string;
+  ageDays: number;
+}
+
+export interface Bottleneck {
+  workflowId: string;
+  workflowName: string;
+  eventRef: string;
+  stepName: string;
+  role: string;
+  boundedContext: string;
+  waiting: number;
+}
+
+export interface CapabilityStatus extends CapabilityDef {
+  state: "ready" | "partial" | "locked";
+  modelledCount: number;
+  mappedCount: number;
+  unmapped: { id: string; name: string }[];
+}
+
+export interface TimelinessPanel {
+  scopeWorkflows: { id: string; name: string; field: string }[];
+  overdue: number;
+  onTime: number;
+  scorable: number;
+  unscorable: number;
+  rows: { workflowId: string; workflowName: string; demandId: string; dueDate: string; overdueDays: number }[];
+  partial: { unmapped: { id: string; name: string }[] } | null;
+}
+
+const SERIES_WEEKS = 8;
+
+export async function computePortfolio(orgId: string): Promise<PortfolioResult> {
+  const now = new Date();
+
+  const workflows = await prisma.platWorkflow.findMany({
+    where: { organizationId: orgId, lifecycleState: "active" },
+    select: { id: true, name: true, workspaceId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const onts = await prisma.platOntology.findMany({
+    where: { organizationId: orgId, name: "workflow", workflowId: { not: null } },
+    select: { id: true, workflowId: true },
+  });
+  const ontIdByWf = new Map(onts.map((o) => [o.workflowId as string, o.id]));
+
+  // Load each workflow's model LOCALLY (no global swap). A workflow with no model
+  // yet stays in the grid as a "needs model" card.
+  const loaded = new Map<string, { ont: Ontology; order: OrderInfo }>();
+  for (const wf of workflows) {
+    const ontId = ontIdByWf.get(wf.id);
+    if (!ontId) continue;
+    const content = await currentContent(orgId, ontId);
+    if (!content) continue;
+    try {
+      const ont = loadOntologyFromStrings(content.workflow, content.overlay);
+      loaded.set(wf.id, { ont, order: orderInfo(ont) });
+    } catch {
+      /* a malformed stored model just reads as "no model" — never throws the board down */
+    }
+  }
+
+  const events = (await prisma.eventLog.findMany({
+    where: { organizationId: orgId },
+    select: {
+      workflowId: true, demandId: true, eventRef: true, eventName: true, role: true,
+      boundedContext: true, businessAt: true, occurredAt: true, provenance: true, aggregateId: true,
+    },
+    orderBy: { occurredAt: "asc" },
+  })) as EvtRow[];
+
+  // Group events → per-workflow → per-instance state.
+  const byWf = new Map<string, Map<string, InstanceState>>();
+  for (const e of events) {
+    if (!e.workflowId || !e.demandId) continue;
+    const order = loaded.get(e.workflowId)?.order;
+    let insts = byWf.get(e.workflowId);
+    if (!insts) byWf.set(e.workflowId, (insts = new Map()));
+    let st = insts.get(e.demandId);
+    if (!st) {
+      st = {
+        demandId: e.demandId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: e.businessAt,
+        termBiz: null, firedRefs: new Set(), refCounts: new Map(), realEvents: 0, totalEvents: 0,
+        softFails: 0, done: false, currentRef: null,
+      };
+      insts.set(e.demandId, st);
+    }
+    if (e.occurredAt < st.firstAt) { st.firstAt = e.occurredAt; st.firstBiz = e.businessAt; }
+    if (e.occurredAt > st.lastAt) st.lastAt = e.occurredAt;
+    st.totalEvents++;
+    if (e.provenance === "recorded" || e.provenance === "live") st.realEvents++;
+    if (e.aggregateId === "") st.softFails++; // soft-fail marker: twin couldn't synthesize the step
+    st.firedRefs.add(e.eventRef);
+    st.refCounts.set(e.eventRef, (st.refCounts.get(e.eventRef) ?? 0) + 1);
+    if (order && e.eventRef === order.terminal) st.termBiz = e.businessAt;
+  }
+
+  // Finalize per-instance derived fields using each workflow's order.
+  for (const [wfId, insts] of byWf) {
+    const order = loaded.get(wfId)?.order;
+    for (const st of insts.values()) {
+      if (order) {
+        st.done = !!order.terminal && st.firedRefs.has(order.terminal);
+        st.currentRef = st.done ? null : (order.refs.find((r) => !st.firedRefs.has(r)) ?? null);
+      } else {
+        // No model → treat any instance with events as "active, step unknown".
+        st.done = false;
+        st.currentRef = null;
+      }
+    }
+  }
+
+  const mappings = await getOrgMappings(orgId);
+
+  // ---- Per-workflow cards + org rollups ----
+  const cards: WorkflowCard[] = [];
+  let orgActive = 0, orgTotal = 0, orgCompleted = 0, orgReal = 0, orgEvents = 0, orgClean = 0, orgStarted = 0;
+  const orgSeries = new Map<string, number>();
+
+  for (const wf of workflows) {
+    const has = loaded.has(wf.id);
+    const order = loaded.get(wf.id)?.order;
+    const ont = loaded.get(wf.id)?.ont;
+    const insts = [...(byWf.get(wf.id)?.values() ?? [])];
+
+    let active = 0, completed = 0, rework = 0, softFail = 0, real = 0, evTotal = 0, clean = 0;
+    const series = new Map<string, number>();
+    const roleQueue = new Map<string, number>();
+    let oldest: WorkflowCard["oldestActive"] = null;
+
+    for (const st of insts) {
+      evTotal += st.totalEvents;
+      real += st.realEvents;
+      clean += st.totalEvents - st.softFails;
+      if (st.softFails) softFail++;
+      if ([...st.refCounts.values()].some((n) => n > 1)) rework++;
+      if (st.done) {
+        completed++;
+        if (st.termBiz) series.set(isoWeekKey(st.termBiz), (series.get(isoWeekKey(st.termBiz)) ?? 0) + 1);
+      } else {
+        active++;
+        const ageDays = daysBetween(st.firstAt, now);
+        const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
+        if (!oldest || ageDays > oldest.ageDays) oldest = { demandId: st.demandId, ageDays, stepName };
+        if (st.currentRef && ont) {
+          const role = ont.eventByRef(st.currentRef)?.role ?? "—";
+          roleQueue.set(role, (roleQueue.get(role) ?? 0) + 1);
+        }
+      }
+    }
+
+    // started (root creations) within the series window, by businessAt of the
+    // earliest event — used for the org flow ratio.
+    const windowWeeks = recentWeeks(now, SERIES_WEEKS);
+    let startedRecent = 0, throughputRecent = 0;
+    for (const st of insts) {
+      if (st.firstBiz && windowWeeks.has(isoWeekKey(st.firstBiz))) startedRecent++;
+      if (st.done && st.termBiz && windowWeeks.has(isoWeekKey(st.termBiz))) throughputRecent++;
+    }
+
+    const topRole = [...roleQueue.entries()].sort((a, b) => b[1] - a[1])[0];
+    cards.push({
+      id: wf.id, name: wf.name, workspaceId: wf.workspaceId, hasModel: has,
+      totalSteps: order?.total ?? 0,
+      active, completed, total: insts.length,
+      throughputRecent,
+      series: seriesRows(now, series),
+      reworkCount: rework, softFailCount: softFail,
+      twinTrust: { real, total: evTotal, pct: pct(real, evTotal) },
+      oldestActive: oldest,
+      topRoleQueue: topRole ? { role: topRole[0], count: topRole[1] } : null,
+    });
+
+    orgActive += active; orgCompleted += completed; orgTotal += insts.length;
+    orgReal += real; orgEvents += evTotal; orgClean += clean; orgStarted += startedRecent;
+    for (const [w, c] of series) orgSeries.set(w, (orgSeries.get(w) ?? 0) + c);
+  }
+
+  const orgSeriesRows = seriesRows(now, orgSeries);
+  const completedRecent = orgSeriesRows.reduce((s, r) => s + r.count, 0);
+
+  // ---- Exceptions (deduped, ranked by severity then age) ----
+  const exceptions: ExceptionRow[] = [];
+  const AGING_DAYS = 3;
+  for (const wf of workflows) {
+    const ont = loaded.get(wf.id)?.ont;
+    for (const st of byWf.get(wf.id)?.values() ?? []) {
+      const ageDays = daysBetween(st.lastAt, now);
+      if (st.done) continue;
+      if ([...st.refCounts.values()].some((n) => n > 1)) {
+        const loops = Math.max(...st.refCounts.values()) - 1;
+        exceptions.push({ kind: "rework", severity: 3, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+          title: "Rework loop", detail: `a step repeated ${loops}× — work kicked back`, ageDays });
+      } else if (st.softFails) {
+        exceptions.push({ kind: "soft_fail", severity: 2, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+          title: "Twin couldn't advance", detail: `${st.softFails} step(s) failed to synthesize from the source model`, ageDays });
+      } else if (ageDays >= AGING_DAYS) {
+        const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
+        exceptions.push({ kind: "aging", severity: 1, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+          title: "No activity", detail: `idle ${ageDays}d at "${stepName}"`, ageDays });
+      }
+    }
+  }
+
+  // ---- Bottlenecks (waiting count per current step, across the portfolio) ----
+  const bnMap = new Map<string, Bottleneck>();
+  for (const wf of workflows) {
+    const ont = loaded.get(wf.id)?.ont;
+    if (!ont) continue;
+    for (const st of byWf.get(wf.id)?.values() ?? []) {
+      if (st.done || !st.currentRef) continue;
+      const ev = ont.eventByRef(st.currentRef);
+      const key = `${wf.id}|${st.currentRef}`;
+      const cur = bnMap.get(key) ?? {
+        workflowId: wf.id, workflowName: wf.name, eventRef: st.currentRef,
+        stepName: ev?.name ?? "—", role: ev?.role ?? "—", boundedContext: ev?.boundedContext ?? "—", waiting: 0,
+      };
+      cur.waiting++;
+      bnMap.set(key, cur);
+    }
+  }
+
+  // ---- Capability gating + the (gated) Timeliness panel ----
+  const modelledWf = workflows.filter((w) => loaded.has(w.id));
+  const capabilities: CapabilityStatus[] = CAPABILITIES.map((cap) => {
+    const mapped = modelledWf.filter((w) => mappings[w.id]?.[cap.key]);
+    const unmapped = modelledWf.filter((w) => !mappings[w.id]?.[cap.key]).map((w) => ({ id: w.id, name: w.name }));
+    const state: CapabilityStatus["state"] = mapped.length === 0 ? "locked" : mapped.length < modelledWf.length ? "partial" : "ready";
+    return { ...cap, state, modelledCount: modelledWf.length, mappedCount: mapped.length, unmapped };
+  });
+
+  const timeliness = await computeTimeliness(orgId, modelledWf, mappings, byWf, loaded, now);
+
+  return {
+    generatedAt: now.toISOString(),
+    org: { id: orgId },
+    workflows: cards,
+    northStar: {
+      activeInstances: orgActive,
+      totalInstances: orgTotal,
+      completedInstances: orgCompleted,
+      throughputSeries: orgSeriesRows,
+      completedRecent,
+      started: orgStarted,
+      flowRatio: orgStarted > 0 ? Math.round((completedRecent / orgStarted) * 100) / 100 : null,
+      twinTrust: { real: orgReal, total: orgEvents, pct: pct(orgReal, orgEvents) },
+      conformance: { clean: orgClean, total: orgEvents, pct: pct(orgClean, orgEvents) },
+      workflowCount: workflows.length,
+      modelledCount: modelledWf.length,
+    },
+    exceptions: exceptions.sort((a, b) => b.severity - a.severity || b.ageDays - a.ageDays).slice(0, 14),
+    bottlenecks: [...bnMap.values()].sort((a, b) => b.waiting - a.waiting).slice(0, 8),
+    capabilities,
+    timeliness,
+  };
+}
+
+/** Timeliness needs the per-instance commitment date, which lives in event
+ * payloads — fetched here ONLY for mapped workflows, so the cost is paid only
+ * once a due-date is actually configured. */
+async function computeTimeliness(
+  orgId: string,
+  modelledWf: { id: string; name: string }[],
+  mappings: OrgMappings,
+  byWf: Map<string, Map<string, InstanceState>>,
+  loaded: Map<string, { ont: Ontology; order: OrderInfo }>,
+  now: Date,
+): Promise<TimelinessPanel | null> {
+  const scope = modelledWf
+    .map((w) => ({ id: w.id, name: w.name, field: mappings[w.id]?.commitDate }))
+    .filter((w): w is { id: string; name: string; field: string } => !!w.field);
+  if (scope.length === 0) return null;
+
+  const scopeIds = scope.map((s) => s.id);
+  const payloadRows = (await prisma.eventLog.findMany({
+    where: { organizationId: orgId, workflowId: { in: scopeIds } },
+    select: { workflowId: true, demandId: true, payload: true, occurredAt: true },
+    orderBy: { occurredAt: "asc" },
+  })) as { workflowId: string | null; demandId: string | null; payload: string; occurredAt: Date }[];
+
+  // Latest mapped-field value per instance (asc order ⇒ last write wins).
+  const dueByInstance = new Map<string, Date>();
+  for (const r of payloadRows) {
+    if (!r.workflowId || !r.demandId) continue;
+    const field = scope.find((s) => s.id === r.workflowId)?.field;
+    if (!field) continue;
+    let payload: Record<string, unknown>;
+    try { payload = JSON.parse(r.payload) as Record<string, unknown>; } catch { continue; }
+    const d = asDate(payload[field]);
+    if (d) dueByInstance.set(`${r.workflowId}|${r.demandId}`, d);
+  }
+
+  let overdue = 0, onTime = 0, scorable = 0, unscorable = 0;
+  const rows: TimelinessPanel["rows"] = [];
+  const nameById = new Map(scope.map((s) => [s.id, s.name]));
+  for (const s of scope) {
+    for (const st of byWf.get(s.id)?.values() ?? []) {
+      if (st.done) continue; // open commitments only
+      const due = dueByInstance.get(`${s.id}|${st.demandId}`);
+      if (!due) { unscorable++; continue; }
+      scorable++;
+      if (due.getTime() < now.getTime()) {
+        overdue++;
+        rows.push({
+          workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, demandId: st.demandId,
+          dueDate: due.toISOString().slice(0, 10), overdueDays: daysBetween(due, now),
+        });
+      } else onTime++;
+    }
+  }
+
+  const unmapped = modelledWf.filter((w) => !mappings[w.id]?.commitDate).map((w) => ({ id: w.id, name: w.name }));
+  return {
+    scopeWorkflows: scope,
+    overdue, onTime, scorable, unscorable,
+    rows: rows.sort((a, b) => b.overdueDays - a.overdueDays).slice(0, 12),
+    partial: unmapped.length ? { unmapped } : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// small helpers
+// ---------------------------------------------------------------------------
+
+function pct(n: number, d: number): number {
+  return d > 0 ? Math.round((n / d) * 100) : 0;
+}
+
+function recentWeeks(now: Date, n: number): Set<string> {
+  const out = new Set<string>();
+  for (let i = 0; i < n; i++) {
+    const d = new Date(now.getTime() - i * 7 * 86_400_000);
+    out.add(isoWeekKey(d));
+  }
+  return out;
+}
+
+/** A dense series of the last SERIES_WEEKS weeks (oldest→newest), zero-filled. */
+function seriesRows(now: Date, counts: Map<string, number>): { week: string; count: number }[] {
+  const rows: { week: string; count: number }[] = [];
+  for (let i = SERIES_WEEKS - 1; i >= 0; i--) {
+    const wk = isoWeekKey(new Date(now.getTime() - i * 7 * 86_400_000));
+    rows.push({ week: wk, count: counts.get(wk) ?? 0 });
+  }
+  return rows;
+}
+
+/** The mapping dialog's per-workflow field options + current mapping. */
+export async function mappingConfig(orgId: string): Promise<{
+  capabilities: CapabilityDef[];
+  workflows: { id: string; name: string; hasModel: boolean; fields: FieldOption[]; suggested: string | null; mapping: WorkflowMapping }[];
+}> {
+  const workflows = await prisma.platWorkflow.findMany({
+    where: { organizationId: orgId, lifecycleState: "active" },
+    select: { id: true, name: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const onts = await prisma.platOntology.findMany({
+    where: { organizationId: orgId, name: "workflow", workflowId: { not: null } },
+    select: { id: true, workflowId: true },
+  });
+  const ontIdByWf = new Map(onts.map((o) => [o.workflowId as string, o.id]));
+  const mappings = await getOrgMappings(orgId);
+
+  const out = [];
+  for (const wf of workflows) {
+    const ontId = ontIdByWf.get(wf.id);
+    let fields: FieldOption[] = [];
+    let suggested: string | null = null;
+    let hasModel = false;
+    if (ontId) {
+      const content = await currentContent(orgId, ontId);
+      if (content) {
+        try {
+          const ont = loadOntologyFromStrings(content.workflow, content.overlay);
+          ({ fields, suggested } = availableFields(ont));
+          hasModel = true;
+        } catch { /* no model */ }
+      }
+    }
+    out.push({ id: wf.id, name: wf.name, hasModel, fields, suggested, mapping: mappings[wf.id] ?? {} });
+  }
+  return { capabilities: CAPABILITIES, workflows: out };
+}

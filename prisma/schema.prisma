@@ -403,8 +403,10 @@ model PlatOntologyVersion {
   seq            Int                     // 0,1,2… within (org, ontology)
   manifestHash   String                  // sha256 of the per-version manifest blob (the pair)
   contentSize    Int      @default(0)    // bytes of the workflow body (for listing/quotas)
-  source         String   @default("edit")  // initial | fetch | edit | restore
+  source         String   @default("edit")  // initial | fetch | edit | restore | set
   summaryJson    String?                 // {events, roles, boundedContexts, …}
+  sourceUrl      String?                 // Qlerify modeller link this version was pulled from (null = upload/paste); the latest version's link is the "reload" source
+  sourceName     String?                 // human label for sourceUrl (the model's boundedContext); null falls back to the shortened URL
   createdBy      String?
   createdAt      DateTime @default(now())
 

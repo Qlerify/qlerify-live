@@ -124,8 +124,8 @@ const state = {
   // create-workflow modal — the model is mandatory at creation (link or upload/paste)
   newWfUrl: "",
   newWfText: "",
-  // model & versions ("Inspect model") dialog
-  modelInspectOpen: false,
+  // model & versions (Model page — #model)
+  modelNoContent: false,   // workflow has no model.json yet (content 404)
   modelStatus: null,    // GET /v1/workflow/model/status → { versions, current, total, currentVersion, sourceUrl }
   modelContent: null,   // GET /v1/workflow/model/content → raw current workflow.json
   modelBusy: false,     // a restore/reload is in flight
@@ -544,49 +544,36 @@ async function loadRegistryStatus() {
 
 // Set-this-workflow's-model control. Points the active workflow at a Qlerify model
 // (link, or uploaded/pasted workflow.json) and rebuilds this workflow's data.
-function workflowModelControls() {
-  if (!state.me) return "";
-  return `
-    <button id="btn-model-inspect" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Browse this workflow's model versions — reload, view, and restore">👁 Model &amp; versions</button>
-    <button id="btn-proj-model" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium" title="Set or replace this workflow's model with a Qlerify model">⚙ Set model</button>`;
-}
-
-function workflowModelDialog() {
+// Set-or-replace form, inlined on the Model page (#model) when opened.
+function modelReplaceInline() {
   if (!state.projModelOpen) return "";
   const err = state.projModelErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.projModelErr)}</div>` : "";
   return `
-    <div class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl flex flex-col max-h-[85vh]">
-        <div class="px-5 py-4 border-b border-stone-200">
-          <div class="text-lg font-semibold">Set this workflow's model</div>
-          <div class="text-sm text-stone-500 mt-0.5">Point the workflow at a Qlerify model. It replaces <b>this workflow's</b> model and rebuilds <b>this workflow's</b> data — the demo and other workflows are untouched.</div>
+    <div class="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-4">
+      <div class="text-sm font-semibold text-stone-800">Replace this workflow's model</div>
+      <div class="text-xs text-stone-500 mt-0.5 mb-3">Point the workflow at a Qlerify model. It replaces <b>this workflow's</b> model and rebuilds <b>this workflow's</b> data.</div>
+      ${err}
+      <label class="block text-sm font-medium text-stone-700 mb-1">Qlerify model link</label>
+      <input id="proj-model-url" type="url" value="${escapeHtml(state.projModelUrl || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm bg-white" placeholder="https://app.qlerify.com/workflow/&lt;projectId&gt;/&lt;workflowId&gt;" />
+      <div class="text-xs text-stone-500 mt-1">Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.</div>
+      <details class="mt-3">
+        <summary class="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">Advanced — upload or paste a workflow.json instead</summary>
+        <div class="mt-3">
+          <div class="mb-2 flex items-center gap-2">
+            <input id="proj-model-file" type="file" accept=".json,application/json" class="text-sm" />
+            <span class="text-xs text-stone-400">— or paste below —</span>
+          </div>
+          <textarea id="proj-model-text" class="w-full h-40 rounded-md border border-stone-300 p-2 text-xs mono bg-white" placeholder='{ "boundedContext": "...", "domainEvents": { ... } }'>${escapeHtml(state.projModelText || "")}</textarea>
         </div>
-        <div class="p-5 overflow-auto flex-1">
-          ${err}
-          <label class="block text-sm font-medium text-stone-700 mb-1">Qlerify model link</label>
-          <input id="proj-model-url" type="url" value="${escapeHtml(state.projModelUrl || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="https://app.qlerify.com/workflow/&lt;projectId&gt;/&lt;workflowId&gt;" />
-          <div class="text-xs text-stone-500 mt-1">Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.</div>
-          <details class="mt-4">
-            <summary class="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">Advanced — upload or paste a workflow.json instead</summary>
-            <div class="mt-3">
-              <div class="mb-2 flex items-center gap-2">
-                <input id="proj-model-file" type="file" accept=".json,application/json" class="text-sm" />
-                <span class="text-xs text-stone-400">— or paste below —</span>
-              </div>
-              <textarea id="proj-model-text" class="w-full h-48 rounded-md border border-stone-300 p-2 text-xs mono" placeholder='{ "boundedContext": "...", "domainEvents": { ... } }'>${escapeHtml(state.projModelText || "")}</textarea>
-            </div>
-          </details>
-        </div>
-        <div class="px-5 py-3 border-t border-stone-200 flex items-center justify-end gap-2">
-          <button id="proj-model-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
-          <button id="proj-model-apply" ${state.projModelBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.projModelBusy ? "Applying…" : "Apply to workflow"}</button>
-        </div>
+      </details>
+      <div class="mt-3 flex items-center justify-end gap-2">
+        <button id="proj-model-cancel" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Cancel</button>
+        <button id="proj-model-apply" ${state.projModelBusy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">${state.projModelBusy ? "Applying…" : "Apply to workflow"}</button>
       </div>
     </div>`;
 }
 
 function bindWorkflowModel() {
-  document.getElementById("btn-proj-model")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
   document.getElementById("proj-model-cancel")?.addEventListener("click", () => { state.projModelOpen = false; render(); });
   document.getElementById("proj-model-url")?.addEventListener("input", (e) => { state.projModelUrl = e.target.value; });
   // Don't re-render on file load (it would collapse the <details>); fill the textarea directly.
@@ -631,9 +618,9 @@ function bindWorkflowModel() {
 }
 
 // ---------------------------------------------------------------------------
-// Inspect model — version history, reload, restore, and the source link, all in
-// one dialog (ported from the pre-multi-tenant build, rewired to the per-workflow
-// /v1/workflow/model/* endpoints).
+// Model page (#model) — version history, reload, restore, and the source link,
+// all on one page (ported from the pre-multi-tenant build, rewired to the
+// per-workflow /v1/workflow/model/* endpoints).
 // ---------------------------------------------------------------------------
 
 // Compact display form of a workflow URL — keep the tail recognizable (so two
@@ -710,71 +697,91 @@ function modelVersionSidebar() {
     </aside>`;
 }
 
-// Inspect-model dialog: version sidebar + reload/replace + the source link and a
-// read-only view of the current workflow.json, all in one place.
-function modelInspectDialog() {
-  if (!state.modelInspectOpen) return "";
+// Model page (#model) — version history, reload, replace, and read-only JSON.
+function modelView() {
   const s = state.modelStatus;
   const total = s ? s.total : 0;
   const current = s ? s.current : -1;
   const events = s && s.currentVersion && s.currentVersion.summary ? (s.currentVersion.summary.events ?? 0) : 0;
-  const versionLabel = total > 0 ? `v${current + 1}/${total}${s && s.currentVersion ? ` · ${events} events` : ""}` : "not yet versioned";
+  const versionLabel = total > 0 ? `v${current + 1} of ${total} · ${events} domain events` : "Not versioned yet";
   const reloadUrl = s ? s.sourceUrl : null;
-  const wfName = (state.me?.workflows || []).find((w) => w.id === state.me?.workflowId)?.name || "";
+  const wfId = selectedWorkflowId();
+  const wfName = (state.me?.workflows || []).find((w) => w.id === wfId)?.name || "Workflow";
   const content = state.modelContent;
-  const body = content == null
-    ? `<div class="text-stone-500 text-sm p-6">Loading model…</div>`
-    : `<pre class="mono text-[12px] leading-relaxed whitespace-pre p-4 overflow-auto">${escapeHtml(content)}</pre>`;
   const sizeKb = content ? Math.round(content.length / 1024) : 0;
+  const assistantBtn = `<button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>`;
+  const body = content == null
+    ? `<div class="flex-1 flex items-center justify-center p-8 text-center">
+        <div>
+          <div class="text-3xl mb-2">🧩</div>
+          <div class="text-sm font-medium text-stone-700">${state.modelStatus == null ? "Loading model…" : "This workflow has no model yet"}</div>
+          ${state.modelNoContent ? `<div class="text-xs text-stone-500 mt-1 max-w-sm">Point it at a Qlerify model using <b>Replace</b> above.</div>` : ""}
+        </div>
+      </div>`
+    : `<pre class="mono text-[12px] leading-relaxed whitespace-pre p-4 overflow-auto flex-1">${escapeHtml(content)}</pre>`;
   return `
-    <div id="model-inspect-backdrop" class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6">
-      <div class="bg-white rounded-lg shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col" role="dialog" aria-modal="true">
-        <div class="px-5 py-3 border-b border-stone-200 flex flex-col gap-2.5">
-          <div class="flex items-center gap-3">
-            <div class="flex-1 min-w-0">
-              <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify model</div>
-              <div class="text-[12px] text-stone-600 tabular-nums truncate">${escapeHtml(versionLabel)}${wfName ? ` · ${escapeHtml(wfName)}` : ""}</div>
-            </div>
-            ${content ? `<span class="text-[11px] text-stone-400 tabular-nums shrink-0">${sizeKb} KB</span>` : ""}
-            <button id="model-inspect-close" class="text-stone-400 hover:text-stone-700 text-lg leading-none shrink-0" title="Close">×</button>
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4">
+        <div class="flex items-center gap-4 flex-wrap">
+          <div class="flex-1 min-w-0">
+            <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify model</div>
+            <div class="text-stone-900 text-xl font-semibold leading-tight truncate">${escapeHtml(wfName)}</div>
+            <div class="text-xs text-stone-500 mt-0.5 tabular-nums">${escapeHtml(versionLabel)}${content ? ` · ${sizeKb} KB` : ""}</div>
           </div>
-          <div class="flex items-center gap-1.5">
-            <button id="btn-model-reload" ${state.modelBusy || !reloadUrl ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="${reloadUrl ? "Re-pull the latest model from the source link, then rebuild this workflow" : "No source link — this model was uploaded or pasted. Use Replace to re-point it."}">${state.modelBusy ? "⏳ Working…" : "⤓ Reload"}</button>
-            <button id="btn-model-replace" ${state.modelBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Replace this workflow's model — change the link, or upload/paste a new workflow.json">✎ Replace</button>
-            <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0 ml-auto">Source</span>
-            ${reloadUrl
-              ? `<a href="${escapeHtml(reloadUrl)}" target="_blank" rel="noopener" class="min-w-0 max-w-xs text-[12px] mono text-sky-700 hover:text-sky-900 underline decoration-dotted truncate" title="${escapeHtml(reloadUrl)}">${escapeHtml(shortWorkflowUrl(reloadUrl))} ↗</a>`
-              : `<span class="text-[12px] text-stone-400 italic">uploaded / pasted — no link</span>`}
-          </div>
+          <button id="btn-model-reload" ${state.modelBusy || !reloadUrl ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="${reloadUrl ? "Re-pull the latest model from the source link, then rebuild this workflow" : "No source link — this model was uploaded or pasted. Use Replace to re-point it."}">${state.modelBusy ? "⏳ Working…" : "⤓ Reload"}</button>
+          <button id="btn-model-replace" ${state.modelBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Replace this workflow's model — change the link, or upload/paste a new workflow.json">${state.projModelOpen ? "✕ Close replace" : "✎ Replace"}</button>
+          ${assistantBtn}
         </div>
-        <div class="flex-1 flex min-h-0">
-          ${modelVersionSidebar()}
-          <div class="flex-1 overflow-auto bg-stone-50">${body}</div>
+        <div class="mt-3 flex items-center gap-2 flex-wrap text-sm">
+          <span class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold shrink-0">Source</span>
+          ${reloadUrl
+            ? `<a href="${escapeHtml(reloadUrl)}" target="_blank" rel="noopener" class="min-w-0 max-w-md text-[12px] mono text-sky-700 hover:text-sky-900 underline decoration-dotted truncate" title="${escapeHtml(reloadUrl)}">${escapeHtml(shortWorkflowUrl(reloadUrl))} ↗</a>`
+            : `<span class="text-[12px] text-stone-400 italic">uploaded / pasted — no link</span>`}
         </div>
+        ${modelReplaceInline()}
       </div>
-    </div>`;
+    </header>
+    <main class="flex-1 flex min-h-0 overflow-hidden">
+      ${modelVersionSidebar()}
+      <div class="flex-1 overflow-auto bg-stone-50 flex flex-col min-w-0">${body}</div>
+    </main>`;
 }
 
-// Pull the version list + current model body for the dialog. Best-effort — a
-// failed leg leaves the previous content rather than blanking the dialog.
-async function refreshModelInspect() {
+async function loadModel() {
+  state.modelStatus = null;
+  state.modelContent = null;
+  state.modelNoContent = false;
+  render();
   const [status, content] = await Promise.allSettled([
     api("/v1/workflow/model/status"),
     api("/v1/workflow/model/content"),
   ]);
   if (status.status === "fulfilled") state.modelStatus = status.value;
-  if (content.status === "fulfilled") state.modelContent = content.value.content || "";
+  else state.modelStatus = { versions: [], current: -1, total: 0, currentVersion: null, sourceUrl: null };
+  if (content.status === "fulfilled") {
+    state.modelContent = content.value.content || "";
+  } else {
+    state.modelContent = null;
+    state.modelNoContent = true;
+    if (!state.projModelOpen) state.projModelOpen = true;
+  }
   render();
 }
 
-async function openModelInspect() {
-  state.modelInspectOpen = true; state.modelBusy = false;
-  state.modelStatus = null; state.modelContent = null;
+// Pull the version list + current model body for the Model page.
+async function refreshModelPage() {
+  const [status, content] = await Promise.allSettled([
+    api("/v1/workflow/model/status"),
+    api("/v1/workflow/model/content"),
+  ]);
+  if (status.status === "fulfilled") state.modelStatus = status.value;
+  if (content.status === "fulfilled") {
+    state.modelContent = content.value.content || "";
+    state.modelNoContent = false;
+    state.projModelOpen = false;
+  }
   render();
-  await refreshModelInspect();
 }
-
-function closeModelInspect() { state.modelInspectOpen = false; render(); }
 
 // Re-pull the latest model from the current version's stored link, then rebuild
 // this workflow. Disabled in the UI when there is no link to pull from.
@@ -784,7 +791,7 @@ async function reloadWorkflowModel() {
   try {
     await api("/v1/workflow/model/reload", { method: "POST", body: "{}" });
     state.modelMsg = { ok: true, text: "Reloaded the latest model from the source link — rebuilt this workflow." };
-    await refreshModelInspect();
+    await refreshModelPage();
     await ensureMe();
     onHashChange();
   } catch (e) {
@@ -802,7 +809,7 @@ async function restoreWorkflowVersion(versionId) {
   try {
     await api("/v1/workflow/model/restore", { method: "POST", body: JSON.stringify({ versionId }) });
     state.modelMsg = { ok: true, text: "Restored that version — rebuilt this workflow." };
-    await refreshModelInspect();
+    await refreshModelPage();
     await ensureMe();
     onHashChange();
   } catch (e) {
@@ -813,15 +820,15 @@ async function restoreWorkflowVersion(versionId) {
   }
 }
 
-function bindModelInspect() {
-  document.getElementById("btn-model-inspect")?.addEventListener("click", openModelInspect);
-  document.getElementById("model-inspect-close")?.addEventListener("click", closeModelInspect);
-  document.getElementById("model-inspect-backdrop")?.addEventListener("click", (e) => { if (e.target && e.target.id === "model-inspect-backdrop") closeModelInspect(); });
+function bindModelPage() {
   document.getElementById("btn-model-reload")?.addEventListener("click", reloadWorkflowModel);
-  // Replace hands off to the Set-model dialog (change link / upload / paste), so
-  // close Inspect rather than stacking the two modals.
-  document.getElementById("btn-model-replace")?.addEventListener("click", () => { state.modelInspectOpen = false; state.projModelOpen = true; state.projModelErr = null; render(); });
+  document.getElementById("btn-model-replace")?.addEventListener("click", () => {
+    state.projModelOpen = !state.projModelOpen;
+    state.projModelErr = null;
+    render();
+  });
   document.querySelectorAll(".model-restore-btn").forEach((btn) => btn.addEventListener("click", () => restoreWorkflowVersion(btn.getAttribute("data-restore-id"))));
+  bindWorkflowModel();
 }
 
 // Persistent banner shown when the loaded Qlerify model doesn't match the
@@ -833,7 +840,7 @@ function registryBanner() {
     <div class="bg-rose-600 text-white px-6 py-3 text-sm shadow">
       <div class="font-semibold">⚠ This workflow's model couldn't be loaded</div>
       <div class="mt-0.5 opacity-90">${escapeHtml(state.registryError)}</div>
-      <div class="mt-1 text-xs opacity-80">The event registry couldn't be built from the current model. Set a valid Qlerify model (⚙ Set model) and this banner clears.</div>
+      <div class="mt-1 text-xs opacity-80">The event registry couldn't be built from the current model. Open the <b>Model</b> tab and replace it with a valid Qlerify model.</div>
     </div>
   `;
 }
@@ -859,6 +866,7 @@ function parseHash() {
   if (h.startsWith("#admin")) return { view: "admin" };
   if (h.startsWith("#org")) return { view: "org" };
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
+  if (h.startsWith("#model")) return { view: "model" };
   if (h.startsWith("#bcs")) return { view: "bcs" };
   if ((m = h.match(/^#demand\/([\w-]+)/))) return { view: "detail", demandId: m[1] };
   return { view: "dashboard" };
@@ -875,6 +883,15 @@ function navigate(hash) {
 
 let dashboardTimer = null;
 
+const WORKFLOW_SCOPED_VIEWS = new Set(["dashboard", "detail", "model", "bcs", "bc"]);
+
+async function ensureWorkflowSelected() {
+  if (AUTH.workflow()) return;
+  await ensureMe();
+  const id = state.me?.workflowId;
+  if (id) AUTH.setWorkflow(id);
+}
+
 async function onHashChange() {
   const r = parseHash();
   state.view = r.view;
@@ -885,6 +902,12 @@ async function onHashChange() {
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
 
   if (r.view === "login") { render(); return; }
+
+  // The portfolio (#org) is org-wide regardless of the active workflow, so we
+  // deliberately DON'T deselect here: keeping the selection means a focused
+  // workflow simply narrows the portfolio (the "Focused: …" chip) and Back
+  // returns to that workflow. Defocusing to the full portfolio is explicit
+  // (the logo, the switcher's "All workflows", or the chip's "View all").
   await ensureMe(); // load the tenant context for the top bar (best-effort)
   // If a 401 during ensureMe() cleared the session and redirected us, render the
   // login screen now instead of flashing a frame of header-less content.
@@ -905,6 +928,11 @@ async function onHashChange() {
     return;
   }
 
+  if (WORKFLOW_SCOPED_VIEWS.has(r.view)) {
+    await ensureWorkflowSelected();
+    await ensureMe();
+  }
+
   // A workflow that exists but has no model yet → the data plane throws
   // MODEL_NOT_LOADED. Catch it and show the "set this workflow's model" prompt
   // instead of a broken view.
@@ -917,6 +945,8 @@ async function onHashChange() {
       await loadExplorer();
     } else if (r.view === "bc") {
       await loadBc(r.bc);
+    } else if (r.view === "model") {
+      await loadModel();
     } else if (r.view === "org") {
       await loadOrg();
       // Poll every 5s so the portfolio reads as a live control tower.
@@ -931,7 +961,12 @@ async function onHashChange() {
       }, 5000);
     }
   } catch (e) {
-    if (isNoModelErr(e)) { state.view = "no-model"; render(); return; }
+    if (isNoModelErr(e)) {
+      state.projModelOpen = true;
+      if (state.view !== "model") { navigate("#model"); return; }
+      await loadModel();
+      return;
+    }
     throw e;
   }
 }
@@ -1034,7 +1069,6 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
-        ${workflowModelControls()}
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1074,8 +1108,6 @@ function dashboardView() {
 }
 
 function bindDashboard() {
-  bindWorkflowModel();
-  bindModelInspect();
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
@@ -1108,7 +1140,7 @@ async function loadOrg() {
 // Switch the active workflow (if needed) then navigate — the drill from a
 // portfolio tile into that workflow's overview or one of its instances.
 async function orgGotoWorkflow(workflowId, hash) {
-  if (workflowId && workflowId !== (state.me?.workflowId || "")) {
+  if (workflowId && workflowId !== AUTH.workflow()) {
     AUTH.setWorkflow(workflowId);
     state.me = null;
     await ensureMe();
@@ -1315,15 +1347,43 @@ function orgFreshnessPanel(o) {
     </section>`;
 }
 
+// The currently-focused workflow's name, when one is selected. Derived from the
+// live selection (AUTH.workflow) so it stays in sync with the breadcrumb and
+// survives a Back into that workflow.
+function orgFilterLabel() {
+  const id = AUTH.workflow();
+  if (!id) return "";
+  return (state.me?.workflows || []).find((w) => w.id === id)?.name || "workflow";
+}
+
+// "Focused: …" — not "Showing:". The focus narrows the per-workflow sections
+// (cards, exceptions, bottlenecks, value-at-risk) while the headline KPIs,
+// timeliness and freshness stay org-wide, so the label must not claim a full
+// filter. The chip's ✕ / "View all" clear the focus (deselect the workflow).
+function orgFilterChip() {
+  const name = orgFilterLabel();
+  if (!name) return "";
+  return `
+    <div class="flex items-center flex-wrap gap-2 mt-2">
+      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+        Focused: ${escapeHtml(name)}
+        <button id="org-filter-clear" type="button" class="hover:text-amber-700 font-bold leading-none" title="Clear focus — show all workflows">✕</button>
+      </span>
+      <button id="org-filter-view-all" type="button" class="text-xs text-stone-500 hover:text-stone-800 underline">View all</button>
+    </div>`;
+}
+
 function orgView() {
   const o = state.org;
+  const fid = AUTH.workflow() || null;
   const head = (right) => `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-6">
         <div class="flex-1">
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Qlerify Live — Portfolio</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">Portfolio overview</div>
-          ${o && !o.error ? `<div class="text-xs text-stone-500 mt-0.5">${o.northStar.workflowCount} workflow type${o.northStar.workflowCount === 1 ? "" : "s"} · ${o.northStar.activeInstances} active · ${o.northStar.modelledCount} modelled</div>` : ""}
+          ${orgFilterChip()}
+          ${o && !o.error ? `<div class="text-xs text-stone-500 mt-0.5">${fid ? "Cards &amp; feeds filtered · KPIs org-wide: " : ""}${o.northStar.workflowCount} workflow type${o.northStar.workflowCount === 1 ? "" : "s"} · ${o.northStar.activeInstances} active · ${o.northStar.modelledCount} modelled</div>` : ""}
         </div>
         ${right}
       </div>
@@ -1334,6 +1394,13 @@ function orgView() {
     return head(assistantBtn) + `<main class="flex-1 p-6"><div class="text-sm ${o && o.error ? "text-rose-600" : "text-stone-400"}">${o && o.error ? escapeHtml(o.error) : "Loading portfolio…"}</div></main>` + orgMapDialog();
   }
   const ns = o.northStar;
+  const wfCards = fid ? o.workflows.filter((w) => w.id === fid) : o.workflows;
+  const exceptions = fid ? o.exceptions.filter((x) => x.workflowId === fid) : o.exceptions;
+  const bottlenecks = fid ? o.bottlenecks.filter((b) => b.workflowId === fid) : o.bottlenecks;
+  const valueAtRisk = fid && o.valueAtRisk?.byWorkflow
+    ? { ...o.valueAtRisk, byWorkflow: o.valueAtRisk.byWorkflow.filter((w) => w.workflowId === fid) }
+    : o.valueAtRisk;
+  const oPanels = valueAtRisk !== o.valueAtRisk ? { ...o, valueAtRisk } : o;
   const right = `
     <span class="hidden sm:flex items-center gap-1.5 text-xs text-stone-500"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>live</span>
     <button data-org-map-open class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50" title="Map workflow attributes to dashboard capabilities">⚙ Map attributes</button>
@@ -1351,20 +1418,20 @@ function orgView() {
     </div>`;
   const grid = `
     <section class="mt-6">
-      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold mb-2">Workflow types</div>
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">${o.workflows.map(orgCard).join("")}</div>
+      <div class="text-[11px] uppercase tracking-wide text-stone-500 font-semibold mb-2">${fid ? "Workflow" : "Workflow types"}</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">${wfCards.length ? wfCards.map(orgCard).join("") : `<div class="text-sm text-stone-400 col-span-full">No workflow matches this filter.</div>`}</div>
     </section>`;
   const feeds = `
     <section class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-3">
-      ${panelShell("Exceptions", "Cross-portfolio attention queue", o.exceptions.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${o.exceptions.map(orgExceptionRow).join("")}</div>` : `<div class="text-sm text-stone-400">Nothing needs attention. 🎉</div>`)}
-      ${panelShell("Bottlenecks", "Where work is waiting (by step)", o.bottlenecks.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${o.bottlenecks.map(orgBottleneckRow).join("")}</div>` : `<div class="text-sm text-stone-400">No active work in flight.</div>`)}
+      ${panelShell("Exceptions", "Cross-portfolio attention queue", exceptions.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${exceptions.map(orgExceptionRow).join("")}</div>` : `<div class="text-sm text-stone-400">Nothing needs attention. 🎉</div>`)}
+      ${panelShell("Bottlenecks", "Where work is waiting (by step)", bottlenecks.length ? `<div class="-mx-4 -mb-4 divide-y divide-stone-100">${bottlenecks.map(orgBottleneckRow).join("")}</div>` : `<div class="text-sm text-stone-400">No active work in flight.</div>`)}
     </section>`;
   return head(right) + `
     <main class="flex-1 overflow-auto p-6">
       ${band}
       <div class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-3">
         ${orgTimelinessPanel(o)}
-        ${orgValueAtRiskPanel(o)}
+        ${orgValueAtRiskPanel(oPanels)}
       </div>
       ${grid}
       ${feeds}
@@ -1377,6 +1444,12 @@ function orgView() {
 }
 
 function bindOrg() {
+  // "View all" / ✕ — clear the focus (deselect the workflow) so the portfolio
+  // spans every workflow and the breadcrumb reads "All workflows". Portfolio
+  // data is org-wide regardless, so no refetch is needed — just re-render.
+  const clearOrgFilter = () => { AUTH.setWorkflow(null); render(); };
+  document.getElementById("org-filter-clear")?.addEventListener("click", clearOrgFilter);
+  document.getElementById("org-filter-view-all")?.addEventListener("click", clearOrgFilter);
   document.querySelectorAll("[data-wf-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-wf-go"), "#")));
   document.querySelectorAll("[data-bn-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-bn-go"), "#")));
   document.querySelectorAll("[data-ex-go]").forEach((el) => el.addEventListener("click", () => {
@@ -1515,7 +1588,7 @@ function bcHeader(title, subtitle, back) {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(subtitle)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(title)}</div>
         </div>
-        <button data-go="#" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Dashboard</button>
+        <button data-go="#" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Overview</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>`;
@@ -2713,9 +2786,10 @@ function bindDetail() {
 function render() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
-  // Every main view is wrapped with the tenant bar (org switcher + breadcrumb +
-  // user) so the whole app reads as a multi-tenant console.
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${tenantBar()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${workflowModelDialog()}${modelInspectDialog()}${newOrgDialog()}${newWfDialog()}`;
+  // Every main view is wrapped with the tenant shell (scope bar + workflow
+  // section tabs) so the whole app reads as a multi-tenant console.
+  const shell = () => `${tenantBar()}${sectionBar()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${shell()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${newOrgDialog()}${newWfDialog()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -2758,11 +2832,10 @@ function render() {
     bindTenantBar();
     bindEmptyOrg();
     bindChat();
-  } else if (state.view === "no-model") {
-    root.innerHTML = wrap(noModelView());
+  } else if (state.view === "model") {
+    root.innerHTML = wrap(modelView());
     bindTenantBar();
-    bindNoModel();
-    bindWorkflowModel();
+    bindModelPage();
     bindChat();
   } else if (state.view === "bcs") {
     root.innerHTML = wrap(explorerView());
@@ -2974,8 +3047,15 @@ function workflowGlyph(cls) {
 // it on any outside click.
 function workflowMenuPanel() {
   const workflows = state.me?.workflows || [];
-  const curId = state.me?.workflowId || "";
+  const curId = AUTH.workflow() || "";
   const check = `<svg viewBox="0 0 20 20" fill="none" class="h-4 w-4 text-stone-900 shrink-0"><path d="M5 10.5l3.5 3.5L15 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const allRow = `
+    <button role="menuitem" id="wf-menu-all" class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-stone-100 text-left ${!curId ? "bg-stone-100" : ""}">
+      ${workflowGlyph("h-5 w-5 text-stone-400")}
+      <span class="flex-1 text-sm truncate ${!curId ? "text-stone-900 font-medium" : "text-stone-800"}">All workflows</span>
+      ${!curId ? check : ""}
+    </button>
+    <div class="my-1 border-t border-stone-100"></div>`;
   const list = workflows.map((w) => {
     const active = w.id === curId;
     return `
@@ -2989,7 +3069,7 @@ function workflowMenuPanel() {
     <div id="wf-menu-backdrop" class="fixed inset-0 z-40"></div>
     <div id="wf-menu" role="menu" aria-label="Workflows" class="absolute left-0 top-full mt-1.5 z-50 w-64 rounded-xl border border-stone-200 bg-white shadow-xl text-stone-900 overflow-hidden">
       <div class="p-2">
-        <div class="max-h-72 overflow-auto">${list}</div>
+        <div class="max-h-72 overflow-auto">${allRow}${list}</div>
       </div>
       <button role="menuitem" id="wf-menu-create" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
         <span class="inline-flex items-center justify-center h-7 w-7 rounded-md border border-stone-300 text-stone-500 text-lg leading-none">+</span>
@@ -3005,6 +3085,45 @@ function qlerifyMark(cls) {
   return `<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" class="shrink-0 ${cls}"><path d="M23.7425 23.7122H29.5003C29.5169 23.7124 29.5305 23.7259 29.5306 23.7425V29.5003C29.5304 29.5168 29.5168 29.5304 29.5003 29.5306H23.7425C23.7259 29.5305 23.7124 29.5169 23.7122 29.5003V23.7425C23.7123 23.7258 23.7258 23.7123 23.7425 23.7122Z"/><path d="M15.0404 27.8003L3.07345 15.8334C2.8545 15.6144 2.85461 15.2597 3.07345 15.0406L15.0404 3.0737C15.2594 2.8547 15.6141 2.8547 15.8331 3.0737L27.8001 15.0406C28.0189 15.2597 28.019 15.6144 27.8001 15.8334L15.8331 27.8003C15.6142 28.0191 15.2594 28.0191 15.0404 27.8003Z"/></svg>`;
 }
 
+const menuCaret = `<svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function selectedWorkflowId() {
+  return AUTH.workflow() || "";
+}
+
+function workflowBreadcrumbLabel() {
+  const workflows = state.me?.workflows || [];
+  const id = selectedWorkflowId();
+  if (!id) return "All workflows";
+  return (workflows.find((w) => w.id === id) || {}).name || "Workflow";
+}
+
+function showWorkflowSectionBar() {
+  return WORKFLOW_SCOPED_VIEWS.has(state.view) && !!selectedWorkflowId();
+}
+
+function sectionTab(href, label, active, title) {
+  const cls = active
+    ? "border-stone-900 text-stone-900 font-medium"
+    : "border-transparent text-stone-500 hover:text-stone-800 hover:border-stone-300";
+  return `<a href="${href}" class="py-2.5 -mb-px border-b-2 ${cls} whitespace-nowrap" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`;
+}
+
+function sectionBar() {
+  if (!showWorkflowSectionBar()) return "";
+  const overviewActive = state.view === "dashboard" || state.view === "detail";
+  const modelActive = state.view === "model";
+  const systemsActive = state.view === "bcs" || state.view === "bc";
+  return `
+    <div class="bg-stone-50 text-sm border-b border-stone-200">
+      <div class="px-6 flex items-center gap-6">
+        ${sectionTab("#", "Overview", overviewActive, "Live ops — instances in flight for this workflow")}
+        ${sectionTab("#model", "Model", modelActive, "Qlerify model — versions, source link, and workflow.json")}
+        ${sectionTab("#bcs", "Systems", systemsActive, "Data sources and adapters for this workflow")}
+      </div>
+    </div>`;
+}
+
 function tenantBar() {
   const me = state.me;
   const subject = me?.subject || "system";
@@ -3013,44 +3132,46 @@ function tenantBar() {
   const curId = me?.organizationId || "";
   const curOrg = orgs.find((o) => o.id === curId) || { id: curId, name: currentOrgName() };
   const workflows = me?.workflows || [];
-  const curProj = me?.workflowId || "";
   const emptyOrg = workflows.length === 0;
-  const projName = (workflows.find((p) => p.id === curProj) || {}).name || (emptyOrg ? "No workflow" : "Default");
+  const wfLabel = workflowBreadcrumbLabel();
+  const wfHomeHref = selectedWorkflowId() ? "#" : "#org";
   const projControl = emptyOrg
     ? `<button id="wf-empty-create" class="text-sm text-amber-300 hover:text-amber-200" title="This organization has no workflows yet">+ Create workflow</button>`
-    : `<div class="relative" id="wf-menu-wrap">
-          <button id="wf-menu-btn" aria-haspopup="menu" aria-expanded="${state.wfMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1.5 pr-1.5 py-0.5" title="Workflow menu — switch or create">
+    : `<div class="relative flex items-center rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800" id="wf-menu-wrap">
+          <a id="wf-home" href="${wfHomeHref}" class="flex items-center gap-2 pl-1.5 pr-1 py-0.5 rounded-l-md" title="${selectedWorkflowId() ? "This workflow's overview" : "Organisation portfolio — all workflows"}">
             ${workflowGlyph("h-4 w-4 text-stone-400")}
-            <span class="text-sm font-medium text-stone-100 max-w-[220px] truncate">${escapeHtml(projName)}</span>
-            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="text-sm font-medium text-stone-100 max-w-[220px] truncate">${escapeHtml(wfLabel)}</span>
+          </a>
+          <button id="wf-menu-btn" type="button" aria-haspopup="menu" aria-expanded="${state.wfMenuOpen ? "true" : "false"}" class="px-1.5 py-1 rounded-r-md border-l border-stone-700/60" title="Switch workflow">
+            ${menuCaret}
           </button>
           ${state.wfMenuOpen ? workflowMenuPanel() : ""}
         </div>`;
   return `
     <div class="bg-stone-900 text-stone-300 text-sm border-b border-stone-800">
       <div class="px-6 py-1.5 flex items-center gap-3">
-        <span class="flex items-center gap-1.5 text-stone-100">${qlerifyMark("h-4 w-4")}<span class="font-semibold tracking-tight">Qlerify<span class="text-amber-400">·</span>Live</span></span>
+        <button id="logo-home" type="button" class="flex items-center gap-1.5 text-stone-100 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 px-1 py-0.5" title="Portfolio — all workflows">
+          ${qlerifyMark("h-4 w-4")}<span class="font-semibold tracking-tight">Qlerify<span class="text-amber-400">·</span>Live</span>
+        </button>
         <span class="text-stone-500">›</span>
-        <div class="relative" id="org-menu-wrap">
-          <button id="org-menu-btn" aria-haspopup="menu" aria-expanded="${state.orgMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Organisation menu — switch, create, or manage">
+        <div class="relative flex items-center rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800" id="org-menu-wrap">
+          <a id="org-home" href="#org" class="flex items-center gap-2 pl-1 pr-1 py-0.5 rounded-l-md" title="Organisation portfolio">
             ${orgAvatar(curOrg, "h-6 w-6", "text-[11px]")}
             <span class="text-sm font-medium text-stone-100 max-w-[220px] truncate">${escapeHtml(currentOrgName())}</span>
-            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+          <button id="org-menu-btn" type="button" aria-haspopup="menu" aria-expanded="${state.orgMenuOpen ? "true" : "false"}" class="px-1.5 py-1 rounded-r-md border-l border-stone-700/60" title="Switch organisation">
+            ${menuCaret}
           </button>
           ${state.orgMenuOpen ? orgMenuPanel() : ""}
         </div>
         <span class="text-stone-500">›</span>
         ${projControl}
         <div class="flex-1"></div>
-        <a href="#org" class="px-2 py-0.5 rounded hover:bg-stone-800 ${state.view === "org" ? "bg-stone-800 text-white" : ""}" title="Organisation portfolio — every workflow at a glance">▣ Portfolio</a>
-        <a href="#" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "dashboard" || state.view === "detail") ? "bg-stone-800 text-white" : ""}" title="Workflow simulator — the model dashboard">▦ Workflow</a>
-        <a href="#bcs" class="px-2 py-0.5 rounded hover:bg-stone-800 ${(state.view === "bcs" || state.view === "bc") ? "bg-stone-800 text-white" : ""}" title="Systems — data explorer">🔌 Systems</a>
-        <span class="text-stone-500">·</span>
         <div class="relative" id="acct-menu-wrap">
           <button id="acct-menu-btn" aria-haspopup="menu" aria-expanded="${state.acctMenuOpen ? "true" : "false"}" class="flex items-center gap-2 rounded-md border border-transparent hover:border-stone-700 hover:bg-stone-800 pl-1 pr-1.5 py-0.5" title="Account — signed in as ${escapeHtml(subject)}">
             ${isAdmin ? `<span class="text-[10px] uppercase font-bold tracking-wide px-1.5 py-px rounded bg-amber-500 text-stone-900" title="You are signed in as a platform superuser — you can act across every organization, and every cross-tenant action is audited">Superuser</span>` : ""}
             ${userAvatar(subject, isAdmin)}
-            <svg viewBox="0 0 20 20" fill="none" class="h-3.5 w-3.5 text-stone-400 shrink-0"><path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            ${menuCaret}
           </button>
           ${state.acctMenuOpen ? accountMenuPanel() : ""}
         </div>
@@ -3059,6 +3180,16 @@ function tenantBar() {
 }
 
 function bindTenantBar() {
+  // --- Scope navigation (logo / org name → portfolio; workflow name → overview) -
+  document.getElementById("logo-home")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    state.orgMenuOpen = false;
+    state.wfMenuOpen = false;
+    AUTH.setWorkflow(null); // the logo is the org's home: defocus to the full portfolio
+    if (state.view === "org") { render(); return; } // already there — just drop the focus
+    navigate("#org");
+  });
+
   // --- Account menu (avatar dropdown: identity + sign out) ------------------
   // Dismiss without acting (Escape / outside-click): close and return focus to
   // the trigger so a keyboard user isn't dropped onto <body> by the re-render.
@@ -3131,17 +3262,26 @@ function bindTenantBar() {
       render();
     }
   };
-  // --- Workflow menu (switcher dropdown: switch / create) -------------------
+  // --- Workflow menu (switcher dropdown: all / switch / create) ---------------
   const dismissWfMenu = () => { state.wfMenuOpen = false; render(); document.getElementById("wf-menu-btn")?.focus(); };
-  document.getElementById("wf-menu-btn")?.addEventListener("click", () => { state.wfMenuOpen = !state.wfMenuOpen; render(); });
+  document.getElementById("wf-menu-btn")?.addEventListener("click", (e) => { e.stopPropagation(); state.wfMenuOpen = !state.wfMenuOpen; render(); });
   document.getElementById("wf-menu-backdrop")?.addEventListener("click", dismissWfMenu);
+  const selectAllWorkflows = () => {
+    state.wfMenuOpen = false;
+    AUTH.setWorkflow(null); // deselect → the unfiltered, org-wide portfolio
+    if (state.view === "org") { render(); return; } // already on the portfolio — just defocus
+    navigate("#org");
+  };
+  document.getElementById("wf-menu-all")?.addEventListener("click", selectAllWorkflows);
   document.querySelectorAll("[data-wf-pick]").forEach((el) => el.addEventListener("click", async () => {
     const id = el.getAttribute("data-wf-pick");
     state.wfMenuOpen = false;
-    if (id === (state.me?.workflowId || "")) { render(); return; } // already the current workflow — just close
+    if (id === AUTH.workflow()) { render(); return; }
     AUTH.setWorkflow(id);
+    state.me = null;
     await ensureMe();
-    onHashChange(); // reloads the current view for the newly selected workflow
+    if (state.view === "org" || (location.hash || "").startsWith("#org")) navigate("#");
+    else onHashChange();
   }));
   const openCreateWorkflow = () => {
     state.wfMenuOpen = false;
@@ -3172,13 +3312,14 @@ function bindTenantBar() {
   document.getElementById("new-wf-text")?.addEventListener("input", (e) => { state.newWfText = e.target.value; });
   document.getElementById("new-wf-create")?.addEventListener("click", createWorkflow);
 
-  // --- Organisation menu (avatar dropdown: switch / admin / create) ---------
+  // --- Organisation menu (caret dropdown: switch / admin / create) ----------
   // Dismiss without acting (Escape / outside-click): close and return focus to
   // the trigger so a keyboard user isn't dropped onto <body> by the re-render.
   const dismissOrgMenu = () => { state.orgMenuOpen = false; render(); document.getElementById("org-menu-btn")?.focus(); };
-  document.getElementById("org-menu-btn")?.addEventListener("click", () => {
+  document.getElementById("org-menu-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
     state.orgMenuOpen = !state.orgMenuOpen;
-    if (state.orgMenuOpen) loadOrgMemberCount(); // best-effort subtitle, re-renders when ready
+    if (state.orgMenuOpen) loadOrgMemberCount();
     render();
   });
   document.getElementById("org-menu-backdrop")?.addEventListener("click", dismissOrgMenu);
@@ -3186,7 +3327,7 @@ function bindTenantBar() {
   document.querySelectorAll("[data-org-pick]").forEach((el) => el.addEventListener("click", () => {
     const id = el.getAttribute("data-org-pick");
     state.orgMenuOpen = false;
-    if (id === (state.me?.organizationId || "")) { render(); return; } // already the current org — just close
+    if (id === (state.me?.organizationId || "")) { render(); return; }
     AUTH.setOrg(id); // also clears the selected workflow
     state.orgMemberCount = null; state.orgMemberCountFor = null; // invalidate the cached subtitle for the new org
     onHashChange(); // reloads whoami + the current view for the newly selected org
@@ -3214,7 +3355,7 @@ function bindTenantBar() {
 }
 
 // Self-service create-organization modal, opened from the tenant bar's "+ New org"
-// button. Mirrors workflowModelDialog()'s open/busy/err state pattern.
+// button. Mirrors the model-replace form's open/busy/err state pattern.
 function newOrgDialog() {
   if (!state.newOrgOpen) return "";
   const err = state.newOrgErr ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.newOrgErr)}</div>` : "";
@@ -3360,25 +3501,6 @@ function bindNoOrg() {
   document.querySelectorAll(".firstorg-switch").forEach((b) => b.addEventListener("click", () => {
     AUTH.setOrg(b.getAttribute("data-org")); state.me = null; navigate("#");
   }));
-}
-
-// A workflow exists but has no model yet (freshly created — nothing is preloaded).
-// Prompt the user to point it at their own Qlerify model (opens the same dialog
-// the dashboard's "⚙ Set model" button uses).
-function noModelView() {
-  return `
-    <main class="flex-1 flex items-center justify-center p-8">
-      <div class="w-full max-w-md rounded-xl border border-stone-200 bg-white p-6 shadow-sm text-center">
-        <div class="text-3xl mb-2">🧩</div>
-        <div class="text-lg font-semibold text-stone-900">This workflow has no model yet</div>
-        <div class="text-sm text-stone-500 mt-1 mb-5">Point it at a Qlerify model to generate its workflow and data. Nothing is preloaded — the model is yours.</div>
-        <button id="nomodel-set" class="rounded-md bg-stone-900 text-white py-2 px-4 text-sm font-medium hover:bg-stone-800">⚙ Set this workflow's model</button>
-      </div>
-    </main>`;
-}
-
-function bindNoModel() {
-  document.getElementById("nomodel-set")?.addEventListener("click", () => { state.projModelOpen = true; state.projModelErr = null; render(); });
 }
 
 function loginView() {

@@ -1759,7 +1759,7 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, tableSearch: "", filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
   return state.exp;
 }
 
@@ -1889,25 +1889,67 @@ const STATUS_DOT = {
   no_adapter: "bg-white border-2 border-stone-300",
 };
 const STATUS_LABEL = {
-  live: "live data",
-  simulated: "simulated / recorded data",
-  wired_empty: "adapter set, no data yet",
-  no_adapter: "no adapter",
+  live: "Live data — connected to a live source",
+  simulated: "Simulated / recorded data",
+  wired_empty: "Adapter configured, but no data pulled yet",
+  no_adapter: "No adapter — not connected to a source",
 };
+
+// One marker per table row: SHAPE encodes type (square = entity, diamond = value
+// object), COLOR encodes the 4-state connection status (same scheme as before).
+// The full type + state is spelled out in the hover tooltip.
+function tableGlyph(kind, status) {
+  const vo = kind === "valueObject";
+  const typeTip = vo
+    ? "Value object — defined only by its attributes, no identity of its own"
+    : "Entity — a thing with a unique identity and its own lifecycle";
+  const shape = `<span class="w-2.5 h-2.5 rounded-sm ${vo ? "rotate-45" : ""} ${STATUS_DOT[status] || STATUS_DOT.no_adapter}"></span>`;
+  // p-1 / -m-1 enlarges the hover target without changing the 10px visual; the
+  // custom tooltip (initTooltips) reads data-tip-* and opens instantly.
+  return `<span data-tip-type="${escapeHtml(typeTip)}" data-tip-status="${escapeHtml(STATUS_LABEL[status] || status)}" class="shrink-0 inline-flex items-center justify-center p-1 -m-1 cursor-help">${shape}</span>`;
+}
+
+// One render row per table, in system order, flagged with the FIRST table of each
+// system so the Systems column can print the system name aligned to it. A system
+// with no tables still yields one (table-less) row so both columns stay 1:1.
+function expRowEntries(e) {
+  const systems = (e.health && e.health.systems) || [];
+  const entries = [];
+  let firstSystem = true; // a divider goes before every system EXCEPT the first
+  for (const s of systems) {
+    const sep = !firstSystem;
+    if (!s.tables.length) { entries.push({ system: s, table: null, first: true, sep }); firstSystem = false; continue; }
+    s.tables.forEach((t, i) => entries.push({ system: s, table: t, first: i === 0, sep: i === 0 && sep }));
+    firstSystem = false;
+  }
+  return entries;
+}
 
 function expSystemsCol(e) {
   if (e.sysCollapsed) {
     return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-sys-expand" class="text-stone-400 hover:text-stone-700" title="Show systems">›</button></div>`;
   }
-  const items = (e.systems || []).map((s) =>
-    `<button data-exp-sys="${escapeHtml(s.name)}" class="w-full text-left px-4 py-2 text-sm hover:bg-stone-100 ${s.name === e.system ? "text-sky-700 font-semibold bg-sky-50" : "text-stone-700"}">${escapeHtml(s.name)}</button>`).join("");
+  // One row per table (aligned 1:1 with the Tables column via synced scroll), but the
+  // system name is printed only on its first table's row — so each system lines up
+  // with where its tables begin, and isn't repeated down the column.
+  const entries = expRowEntries(e);
+  const rows = entries.map((en) => {
+    const active = en.system.name === e.system;
+    const label = en.first
+      ? `<button data-exp-sys="${escapeHtml(en.system.name)}" class="text-sm text-left truncate ${active ? "text-sky-700 font-semibold" : "text-stone-700 hover:text-stone-900"}">${escapeHtml(en.system.name)}</button>`
+      : "";
+    return `<div class="h-9 flex items-center px-4 ${en.sep ? "mt-2 border-t border-stone-200" : ""} ${en.first && active ? "bg-sky-50" : ""}">${label}</div>`;
+  }).join("");
+  const body = !e.health
+    ? `<div class="px-4 py-3 text-sm text-stone-400">Loading…</div>`
+    : (rows || `<div class="px-4 py-3 text-sm text-stone-400">No systems</div>`);
   return `
     <div class="w-56 shrink-0 border-r border-stone-200 bg-white flex flex-col">
       <div class="px-4 py-3 flex items-center justify-between border-b border-stone-100">
         <span class="font-semibold text-stone-900">Systems</span>
         <button id="exp-sys-collapse" class="text-stone-400 hover:text-stone-700" title="Collapse">‹</button>
       </div>
-      <div class="overflow-y-auto py-1 flex-1">${items || '<div class="px-4 py-3 text-sm text-stone-400">No systems</div>'}</div>
+      <div id="exp-sys-body" class="overflow-y-auto py-1 flex-1">${body}</div>
     </div>`;
 }
 
@@ -1915,53 +1957,30 @@ function expTablesCol(e) {
   if (e.tablesCollapsed) {
     return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-tables-expand" class="text-stone-400 hover:text-stone-700" title="Show tables">›</button></div>`;
   }
-  // Every system's tables at once (no need to click a system to reveal them), each
-  // row carrying its 4-state connection dot. Sourced from /api/bc/health (e.health).
-  const q = (e.tableSearch || "").toLowerCase();
-  const match = (name) => !q || name.toLowerCase().includes(q);
-  const systems = (e.health && e.health.systems) || [];
-  const dot = (status) =>
-    `<span class="shrink-0 w-2.5 h-2.5 rounded-full ${STATUS_DOT[status] || STATUS_DOT.no_adapter}" title="${escapeHtml(STATUS_LABEL[status] || status)}"></span>`;
-  const row = (sysName, t) => {
-    const sel = t.name === e.entity && sysName === e.system;
-    return `<button data-exp-esys="${escapeHtml(sysName)}" data-exp-entity="${escapeHtml(t.name)}" title="${escapeHtml(t.detail || "")}" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-stone-100 ${sel ? "bg-sky-50" : ""}">
-      ${dot(t.status)}
+  // Every system's entities + value objects in one flat list (system order), aligned
+  // row-for-row with the Systems column. Each row: a type glyph (entity / value
+  // object, explained on hover) + a connection status dot (state explained on hover).
+  const entries = expRowEntries(e);
+  const total = entries.filter((en) => en.table).length;
+  const rows = entries.map((en) => {
+    const t = en.table;
+    if (!t) return `<div class="h-9 ${en.sep ? "mt-2 border-t border-stone-200" : ""}"></div>`; // spacer for a table-less system
+    const sel = t.name === e.entity && en.system.name === e.system;
+    return `<button data-exp-esys="${escapeHtml(en.system.name)}" data-exp-entity="${escapeHtml(t.name)}" class="w-full h-9 flex items-center gap-2 px-3 text-sm text-left hover:bg-stone-100 ${en.sep ? "mt-2 border-t border-stone-200" : ""} ${sel ? "bg-sky-50" : ""}">
+      ${tableGlyph(t.kind, t.status)}
       <span class="flex-1 truncate ${sel ? "text-sky-700 font-medium" : "text-stone-700"}">${escapeHtml(t.name)}</span>
     </button>`;
-  };
-  const subgroup = (label, rows) => rows.length
-    ? `<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-widest text-stone-400">${label}</div>${rows.join("")}`
-    : "";
-  let total = 0;
-  const sections = systems.map((s) => {
-    const ents = s.tables.filter((t) => t.kind === "entity" && match(t.name));
-    const vos = s.tables.filter((t) => t.kind === "valueObject" && match(t.name));
-    if (!ents.length && !vos.length) return "";
-    total += ents.length + vos.length;
-    return `
-      <div class="px-3 pt-3 pb-1.5 flex items-center justify-between border-t border-stone-100 first:border-t-0">
-        <span class="text-xs font-semibold text-stone-700">${escapeHtml(s.name)}</span>
-        <span class="text-[10px] font-normal text-stone-400 tabular-nums" title="connected / total">${s.connected}/${s.total}</span>
-      </div>
-      ${subgroup("Entities", ents.map((t) => row(s.name, t)))}
-      ${subgroup("Value objects", vos.map((t) => row(s.name, t)))}`;
   }).join("");
   const body = !e.health
     ? `<div class="px-4 py-3 text-sm text-stone-400">Loading…</div>`
-    : (sections || `<div class="px-4 py-3 text-sm text-stone-400">${q ? "No match" : "No tables"}</div>`);
+    : (rows || `<div class="px-4 py-3 text-sm text-stone-400">No tables</div>`);
   return `
     <div class="w-80 shrink-0 border-r border-stone-200 bg-white flex flex-col">
       <div class="px-4 py-3 border-b border-stone-100 flex items-center justify-between">
         <span class="font-semibold text-stone-900">Tables <span class="text-stone-400 font-normal">(${total})</span></span>
         <button id="exp-tables-collapse" class="text-stone-400 hover:text-stone-700" title="Collapse">‹</button>
       </div>
-      <div class="px-3 py-2 border-b border-stone-100">
-        <div class="relative">
-          <input id="exp-table-search" value="${escapeHtml(e.tableSearch || "")}" placeholder="Find a table" class="w-full text-sm border border-stone-300 rounded-md pl-7 pr-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400" />
-          <span class="absolute left-2 top-1.5 text-stone-400 text-sm">🔍</span>
-        </div>
-      </div>
-      <div class="overflow-y-auto py-1 flex-1">${body}</div>
+      <div id="exp-tables-body" class="overflow-y-auto py-1 flex-1">${body}</div>
     </div>`;
 }
 
@@ -2104,7 +2123,56 @@ function connectorHistoryBody(e) {
     </div>`;
 }
 
+// A shared, instant-opening tooltip with two labelled sections (Type / Status).
+// Lives on <body> (a sibling of #app) so it survives re-renders and isn't clipped
+// by the columns' overflow. Wired once via event delegation on data-tip-* elements.
+let _tipReady = false;
+function initTooltips() {
+  if (_tipReady) return;
+  _tipReady = true;
+  const tip = document.createElement("div");
+  tip.id = "app-tip";
+  tip.className = "fixed z-50 hidden w-64 rounded-lg border border-stone-200 bg-white shadow-xl text-xs overflow-hidden pointer-events-none";
+  tip.innerHTML = `
+    <div class="px-3 py-2 border-b border-stone-100">
+      <div class="text-[10px] uppercase tracking-widest text-stone-400 mb-0.5">Type</div>
+      <div class="text-stone-700 leading-snug" data-tip-slot="type"></div>
+    </div>
+    <div class="px-3 py-2">
+      <div class="text-[10px] uppercase tracking-widest text-stone-400 mb-0.5">Status</div>
+      <div class="text-stone-700 leading-snug" data-tip-slot="status"></div>
+    </div>`;
+  document.body.appendChild(tip);
+  const typeSlot = tip.querySelector('[data-tip-slot="type"]');
+  const statusSlot = tip.querySelector('[data-tip-slot="status"]');
+  const place = (el) => {
+    tip.classList.remove("hidden");
+    const r = el.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let left = r.right + 8;
+    if (left + tw > window.innerWidth - 8) left = r.left - tw - 8; // flip left on overflow
+    left = Math.max(8, left);
+    let top = Math.max(8, Math.min(r.top + r.height / 2 - th / 2, window.innerHeight - th - 8));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  };
+  document.addEventListener("mouseover", (ev) => {
+    const el = ev.target.closest?.("[data-tip-type]");
+    if (!el) return;
+    typeSlot.textContent = el.dataset.tipType || "";
+    statusSlot.textContent = el.dataset.tipStatus || "";
+    place(el);
+  });
+  document.addEventListener("mouseout", (ev) => {
+    const el = ev.target.closest?.("[data-tip-type]");
+    if (!el) return;
+    if (ev.relatedTarget && el.contains(ev.relatedTarget)) return; // moved within the same trigger
+    tip.classList.add("hidden");
+  });
+}
+
 function bindExplorer() {
+  initTooltips();
   document.getElementById("exp-sys-collapse")?.addEventListener("click", () => { expState().sysCollapsed = true; render(); });
   document.getElementById("exp-sys-expand")?.addEventListener("click", () => { expState().sysCollapsed = false; render(); });
   document.getElementById("exp-tables-collapse")?.addEventListener("click", () => { expState().tablesCollapsed = true; render(); });
@@ -2116,13 +2184,17 @@ function bindExplorer() {
     const e = expState(), sys = el.dataset.expEsys, name = el.dataset.expEntity;
     if (sys && sys !== e.system) selectExpSystem(sys, name); else selectExpEntity(name);
   }));
-  const search = document.getElementById("exp-table-search");
-  if (search) search.addEventListener("input", (ev) => {
-    expState().tableSearch = ev.target.value;
-    render();
-    const s = document.getElementById("exp-table-search");
-    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
-  });
+  // Keep the Systems and Tables columns vertically aligned while scrolling, so each
+  // system name stays level with its first table even past the fold.
+  const sysBody = document.getElementById("exp-sys-body");
+  const tblBody = document.getElementById("exp-tables-body");
+  if (sysBody && tblBody) {
+    let syncing = false;
+    const link = (from, to) => from.addEventListener("scroll", () => {
+      if (syncing) return; syncing = true; to.scrollTop = from.scrollTop; syncing = false;
+    });
+    link(sysBody, tblBody); link(tblBody, sysBody);
+  }
   // Filter inputs update state quietly (no re-render → no focus loss); Run applies.
   document.querySelectorAll("[data-filter-idx]").forEach((el) => {
     const i = Number(el.dataset.filterIdx), field = el.dataset.filterField;

@@ -245,6 +245,20 @@ export async function findMany(table: string, limit = 200): Promise<Array<Record
   return rows.map((r) => normalizeRow(r)!) as Array<Record<string, unknown>>;
 }
 
+/** Org-scoped row count for a projection table. 0 when the table doesn't exist
+ * yet (so a model entity that has never been ingested reads as empty, not an
+ * error). Mirrors findMany's org scoping. */
+export async function countRows(table: string): Promise<number> {
+  if (!(await tableExists(table))) return 0;
+  const f = await orgFilterSql(table);
+  const where = f.clause ? `WHERE ${f.clause}` : "";
+  const rows = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>(
+    `SELECT count(*) as n FROM ${phys(table)} ${where}`,
+    ...f.params,
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 export async function insert(table: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
   const now = new Date().toISOString();
   const full: Record<string, unknown> = { version: 0, createdAt: now, updatedAt: now, ...data };

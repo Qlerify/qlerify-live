@@ -9,10 +9,12 @@ import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
 import { isHandledError } from "../errors.js";
 import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/model.js";
+import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } from "../ontology/bc-helpers.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatId } from "../packs/connector/journal.js";
 import { provenanceMeta } from "../twin/provenance.js";
+import { computeSystemsHealth } from "../twin/systems-health.js";
 import * as store from "../twin/projection-store.js";
 
 /** Per-bounded-context event counts (feeds the provenance rollup). */
@@ -21,33 +23,6 @@ async function eventCounts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const r of rows) out[r.boundedContext] = r._count._all;
   return out;
-}
-
-function eventsForBc(bc: string): OntologyEvent[] {
-  return getOntology().events.filter((e) => e.boundedContext === bc);
-}
-
-/** Entities a BC owns = the aggregate roots of its events. */
-function entitiesForBc(bc: string): EntitySchema[] {
-  const roots = new Set(eventsForBc(bc).map((e) => e.aggregateRoot).filter(Boolean));
-  return getOntology().entities.filter((e) => roots.has(e.name));
-}
-
-/** The entity whose raw rows the workbench shows by default (the first aggregate
- * root in the BC's events). */
-function defaultEntityForBc(bc: string): string | null {
-  return eventsForBc(bc).map((e) => e.aggregateRoot).find(Boolean) ?? null;
-}
-
-/** Value objects referenced by this BC's entities — listed as their own populatable
- * "tables" in the explorer (a connector can fill a value object as its own table). */
-function valueObjectsForBc(bc: string): EntitySchema[] {
-  const o = getOntology();
-  const names = new Set<string>();
-  for (const e of entitiesForBc(bc)) {
-    for (const f of e.fields) if (f.relatedEntity && o.valueObject(f.relatedEntity)) names.add(f.relatedEntity);
-  }
-  return [...names].map((n) => o.valueObject(n)).filter((v): v is EntitySchema => !!v);
 }
 
 function slimEvent(e: OntologyEvent) {
@@ -115,31 +90,38 @@ export function registerBcRoutes(app: FastifyInstance): void {
     const adapters = listAdapters();
     return o.boundedContexts.map((bc) => ({
       name: bc,
-      eventCount: eventsForBc(bc).length,
-      entityCount: entitiesForBc(bc).length,
+      eventCount: eventsForBc(o, bc).length,
+      entityCount: entitiesForBc(o, bc).length,
       adapterCount: adapters.filter((a) => a.boundedContext === bc).length,
       provenance: prov.byContext[bc] ?? { mode: "simulated", eventCount: 0 },
     }));
   });
+
+  // Health board — every bounded context's entities + value objects with a
+  // derived 4-state connection status (no adapter / wired-but-empty / simulated /
+  // live). Pure projection over the ontology + adapter registry + gen_ row counts;
+  // no AI, credentials, or writes. Registered as a STATIC route so it wins over
+  // the "/api/bc/:bc" param route below.
+  app.get("/api/bc/health", async () => computeSystemsHealth());
 
   // Overview — the BC's events, entities, commands, adapters, provenance.
   app.get("/api/bc/:bc", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC", message: `no bounded context "${(req.params as any).bc}"` });
     const o = getOntology();
-    const events = eventsForBc(bc);
+    const events = eventsForBc(o, bc);
     const cmdNames = new Set(events.map((e) => e.commandName).filter(Boolean));
     const commands = o.commands.filter((c) => cmdNames.has(c.name));
     const prov = (await provenanceMeta(o.boundedContexts, o.events, await eventCounts())).byContext[bc];
     return {
       name: bc,
       events: events.map(slimEvent),
-      entities: entitiesForBc(bc),
-      valueObjects: valueObjectsForBc(bc),
+      entities: entitiesForBc(o, bc),
+      valueObjects: valueObjectsForBc(o, bc),
       commands,
       adapters: listAdapters().filter((a) => a.boundedContext === bc).map(serializeAdapter),
       provenance: prov ?? { mode: "simulated", eventCount: 0 },
-      defaultEntity: defaultEntityForBc(bc),
+      defaultEntity: defaultEntityForBc(o, bc),
     };
   });
 
@@ -180,7 +162,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
   app.get("/api/bc/:bc/raw", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
-    const entity = (req.query as any)?.entity || defaultEntityForBc(bc);
+    const entity = (req.query as any)?.entity || defaultEntityForBc(getOntology(), bc);
     if (!entity) return { entity: null, rows: [], tableMissing: true };
     const limit = Math.max(1, Math.min(500, Number((req.query as any)?.limit ?? 50)));
     if (!(await store.tableExists(entity))) return { entity, rows: [], tableMissing: true };

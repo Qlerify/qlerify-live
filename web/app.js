@@ -1759,27 +1759,36 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, tableSearch: "", filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
   return state.exp;
 }
 
 async function loadExplorer() {
   const e = expState();
   try { e.systems = await api("/api/bc"); } catch (_err) { e.systems = []; }
+  loadHealth(); // per-table connection status for the Tables pane; renders when it lands
   const cur = e.system && e.systems.find((s) => s.name === e.system);
   if (e.systems[0]) { await selectExpSystem(cur ? e.system : e.systems[0].name); return; }
   render();
 }
 
-async function selectExpSystem(name) {
+// Per-table connection status (4-state) for EVERY system — the dot on each row of
+// the Tables pane. Derived server-side from adapters + gen_ row counts.
+async function loadHealth() {
   const e = expState();
-  e.system = name; e.entity = null; e.items = []; e.tableSearch = ""; e.filters = []; e.page = 0;
+  try { e.health = await api("/api/bc/health"); } catch (_err) { e.health = { gaps: 0, systems: [] }; }
+  render();
+}
+
+async function selectExpSystem(name, targetEntity) {
+  const e = expState();
+  e.system = name; e.entity = null; e.items = []; e.filters = []; e.page = 0;
   try {
     const d = await api(`/api/bc/${encodeURIComponent(name)}`);
     e.entities = d.entities || [];
     e.valueObjects = d.valueObjects || [];
     e.adapters = d.adapters || [];
-    const def = d.defaultEntity || (e.entities[0] && e.entities[0].name) || (e.valueObjects[0] && e.valueObjects[0].name);
+    const def = targetEntity || d.defaultEntity || (e.entities[0] && e.entities[0].name) || (e.valueObjects[0] && e.valueObjects[0].name);
     if (def) { await selectExpEntity(def); return; }
   } catch (_err) { e.entities = []; e.valueObjects = []; e.adapters = []; }
   activateConnectorChat(e.system, e.entity); // no table → this system's empty thread
@@ -1839,6 +1848,9 @@ async function refreshExplorerAfterChat() {
       e.tableMissing = !!d.tableMissing;
     } catch (_e) { /* keep prior */ }
   }
+  // A create/build/ingest changes connection status → refresh the Tables-pane
+  // status dots too so they update without a manual reload (caller renders).
+  try { e.health = await api("/api/bc/health"); } catch (_e) { /* keep prior */ }
 }
 
 function applyExpFilters(items, filters) {
@@ -1869,6 +1881,20 @@ function explorerView() {
     </div>`;
 }
 
+// Dot + label per 4-state connection status, shown on every Tables-pane row.
+const STATUS_DOT = {
+  live: "bg-emerald-500",
+  simulated: "bg-sky-500",
+  wired_empty: "bg-white border-2 border-amber-400",
+  no_adapter: "bg-white border-2 border-stone-300",
+};
+const STATUS_LABEL = {
+  live: "live data",
+  simulated: "simulated / recorded data",
+  wired_empty: "adapter set, no data yet",
+  no_adapter: "no adapter",
+};
+
 function expSystemsCol(e) {
   if (e.sysCollapsed) {
     return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-sys-expand" class="text-stone-400 hover:text-stone-700" title="Show systems">›</button></div>`;
@@ -1889,24 +1915,40 @@ function expTablesCol(e) {
   if (e.tablesCollapsed) {
     return `<div class="w-9 shrink-0 border-r border-stone-200 bg-white flex flex-col items-center pt-3"><button id="exp-tables-expand" class="text-stone-400 hover:text-stone-700" title="Show tables">›</button></div>`;
   }
-  const entities = e.entities || [];
-  const vos = e.valueObjects || [];
-  const total = entities.length + vos.length;
+  // Every system's tables at once (no need to click a system to reveal them), each
+  // row carrying its 4-state connection dot. Sourced from /api/bc/health (e.health).
   const q = (e.tableSearch || "").toLowerCase();
-  const match = (t) => !q || t.name.toLowerCase().includes(q);
-  const row = (t) =>
-    `<button data-exp-entity="${escapeHtml(t.name)}" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-stone-100 ${t.name === e.entity ? "bg-sky-50" : ""}">
-      <span class="w-3 h-3 rounded-full border ${t.name === e.entity ? "border-sky-500 bg-sky-500" : "border-stone-300"}"></span>
-      <span class="flex-1 ${t.name === e.entity ? "text-sky-700 font-medium" : "text-stone-700"}">${escapeHtml(t.name)}</span>
+  const match = (name) => !q || name.toLowerCase().includes(q);
+  const systems = (e.health && e.health.systems) || [];
+  const dot = (status) =>
+    `<span class="shrink-0 w-2.5 h-2.5 rounded-full ${STATUS_DOT[status] || STATUS_DOT.no_adapter}" title="${escapeHtml(STATUS_LABEL[status] || status)}"></span>`;
+  const row = (sysName, t) => {
+    const sel = t.name === e.entity && sysName === e.system;
+    return `<button data-exp-esys="${escapeHtml(sysName)}" data-exp-entity="${escapeHtml(t.name)}" title="${escapeHtml(t.detail || "")}" class="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-stone-100 ${sel ? "bg-sky-50" : ""}">
+      ${dot(t.status)}
+      <span class="flex-1 truncate ${sel ? "text-sky-700 font-medium" : "text-stone-700"}">${escapeHtml(t.name)}</span>
     </button>`;
-  const ents = entities.filter(match);
-  const vobs = vos.filter(match);
-  const group = (label, list) => list.length
-    ? `<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-widest text-stone-400">${label}</div>${list.map(row).join("")}`
+  };
+  const subgroup = (label, rows) => rows.length
+    ? `<div class="px-3 pt-2 pb-1 text-[10px] uppercase tracking-widest text-stone-400">${label}</div>${rows.join("")}`
     : "";
-  const body = (ents.length || vobs.length)
-    ? `${group("Entities", ents)}${group("Value objects", vobs)}`
-    : `<div class="px-4 py-3 text-sm text-stone-400">${total ? "No match" : "No tables"}</div>`;
+  let total = 0;
+  const sections = systems.map((s) => {
+    const ents = s.tables.filter((t) => t.kind === "entity" && match(t.name));
+    const vos = s.tables.filter((t) => t.kind === "valueObject" && match(t.name));
+    if (!ents.length && !vos.length) return "";
+    total += ents.length + vos.length;
+    return `
+      <div class="px-3 pt-3 pb-1.5 flex items-center justify-between border-t border-stone-100 first:border-t-0">
+        <span class="text-xs font-semibold text-stone-700">${escapeHtml(s.name)}</span>
+        <span class="text-[10px] font-normal text-stone-400 tabular-nums" title="connected / total">${s.connected}/${s.total}</span>
+      </div>
+      ${subgroup("Entities", ents.map((t) => row(s.name, t)))}
+      ${subgroup("Value objects", vos.map((t) => row(s.name, t)))}`;
+  }).join("");
+  const body = !e.health
+    ? `<div class="px-4 py-3 text-sm text-stone-400">Loading…</div>`
+    : (sections || `<div class="px-4 py-3 text-sm text-stone-400">${q ? "No match" : "No tables"}</div>`);
   return `
     <div class="w-80 shrink-0 border-r border-stone-200 bg-white flex flex-col">
       <div class="px-4 py-3 border-b border-stone-100 flex items-center justify-between">
@@ -2068,7 +2110,12 @@ function bindExplorer() {
   document.getElementById("exp-tables-collapse")?.addEventListener("click", () => { expState().tablesCollapsed = true; render(); });
   document.getElementById("exp-tables-expand")?.addEventListener("click", () => { expState().tablesCollapsed = false; render(); });
   document.querySelectorAll("[data-exp-sys]").forEach((el) => el.addEventListener("click", () => selectExpSystem(el.dataset.expSys)));
-  document.querySelectorAll("[data-exp-entity]").forEach((el) => el.addEventListener("click", () => selectExpEntity(el.dataset.expEntity)));
+  // A table row carries its own system (data-exp-esys); switch systems first when
+  // the clicked table belongs to a different one than the active selection.
+  document.querySelectorAll("[data-exp-entity]").forEach((el) => el.addEventListener("click", () => {
+    const e = expState(), sys = el.dataset.expEsys, name = el.dataset.expEntity;
+    if (sys && sys !== e.system) selectExpSystem(sys, name); else selectExpEntity(name);
+  }));
   const search = document.getElementById("exp-table-search");
   if (search) search.addEventListener("input", (ev) => {
     expState().tableSearch = ev.target.value;

@@ -317,6 +317,8 @@ export interface DeriveResult {
   /** Distinct aggregate instances that gained at least one event. */
   instances: number;
   events: DerivedEventSummary[];
+  /** Event-log rows deleted before re-deriving. Only set by rebuildFromData(). */
+  cleared?: number;
 }
 
 /** I/O wrapper: read the ingested rows from the store, plan the derivation, skip
@@ -387,4 +389,17 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
   }
 
   return { preview, totalEmitted, instances: touched.size, events: summaries };
+}
+
+/** Clear the active workflow's EventLog, then re-derive from the ingested rows
+ * (which are left untouched). This is the workflow designer's "regenerate after a
+ * model change": like deriveFromData() but without the idempotency floor, so a
+ * changed model / changed evidence rule actually takes effect instead of being
+ * skipped as already-present. Unlike genericDeleteAll() it does NOT clear the
+ * gen_ projection rows — those ARE the source. Lossy by design: events that leave
+ * no row trace (a login; see classify()'s "none") cannot be reconstructed. */
+export async function rebuildFromData(opts: { limit?: number } = {}): Promise<DeriveResult> {
+  const { count } = await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() });
+  const result = await deriveFromData({ preview: false, limit: opts.limit });
+  return { ...result, cleared: count };
 }

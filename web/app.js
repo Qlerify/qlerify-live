@@ -1168,6 +1168,29 @@ async function deriveFromIngested() {
   }
 }
 
+// Clear the event log and re-derive it from scratch off the ingested rows. Unlike
+// "Simulate from data" (which only fills gaps), this regenerates the whole history
+// — the designer's "I changed the model, show me the new results". The ingested
+// rows are kept; events that leave no row trace (e.g. a login) are not rebuilt.
+async function rebuildFromIngested() {
+  if (state.busy) return;
+  if (!confirm("Rebuild the event log from the ingested data?\n\nThe current event history is cleared and regenerated from the source rows (which are kept). Events that leave no data trace (e.g. a login) are not restored.")) return;
+  state.busy = true; render();
+  try {
+    const r = await api("/sim/rebuild", { method: "POST", body: "{}" });
+    await loadDashboard();
+    const fired = (r.events || [])
+      .filter((e) => e.emitted > 0)
+      .map((e) => `• ${e.name}: ${e.emitted}${e.sample ? `  (${e.sample})` : ""}`)
+      .join("\n");
+    alert(`Cleared ${r.cleared ?? 0} event(s); rebuilt ${r.totalEmitted} across ${r.instances} instance(s) from the ingested data:${fired ? `\n\n${fired}` : "\n\n(no row-state evidence to derive)"}`);
+  } catch (e) {
+    alert("Rebuild from data failed: " + e.message);
+  } finally {
+    state.busy = false; render();
+  }
+}
+
 async function deleteDemand(demandId, ev) {
   ev.stopPropagation();
   if (!confirm("Remove this item and all its data?")) return;
@@ -1225,6 +1248,7 @@ function dashboardView() {
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         <button id="btn-derive" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium" title="Replay the domain events your ingested data implies (Account Registered, Account Confirmed, …)">⚡ Simulate from data</button>
+        <button id="btn-rebuild" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium" title="Clear the event log and regenerate it from the ingested rows — use after changing the model">🔄 Rebuild from data</button>
         <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1266,6 +1290,7 @@ function dashboardView() {
 function bindDashboard() {
   document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
   document.getElementById("btn-derive")?.addEventListener("click", deriveFromIngested);
+  document.getElementById("btn-rebuild")?.addEventListener("click", rebuildFromIngested);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
   });

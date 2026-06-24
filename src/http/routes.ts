@@ -15,7 +15,7 @@ import {
   genericListInstances, genericInstanceDetail, genericDeleteInstance, genericDeleteAll, rebuildNeeded,
 } from "../twin/sim.js";
 import { provenanceMeta } from "../twin/provenance.js";
-import { deriveFromData } from "../twin/derive.js";
+import { deriveFromData, rebuildFromData } from "../twin/derive.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { ingestPull } from "../packs/ingest.js";
 import { registerBcRoutes } from "./bc-routes.js";
@@ -313,6 +313,20 @@ export function registerRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as { preview?: boolean; limit?: number };
     try {
       return await deriveFromData({ preview: body.preview, limit: body.limit });
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // REBUILD — clear the workflow's event log, then re-derive from the still-present
+  // ingested rows. The designer's "regenerate after a model change": like
+  // /sim/derive but without the idempotency floor, so changed evidence takes
+  // effect. Keeps the gen_ source rows; lossy for events that leave no row trace.
+  app.post("/sim/rebuild", async (req, reply) => {
+    const body = (req.body ?? {}) as { limit?: number };
+    try {
+      return await rebuildFromData({ limit: body.limit });
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

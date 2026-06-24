@@ -15,9 +15,10 @@ import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js";
 import {
-  createConnector, setConnectorCredentials, buildConnector, connectorInfo,
-  readConnectorCode, removeConnector,
+  createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
+  connectorInfo, readConnectorCode, removeConnector,
 } from "../packs/connector/orchestrate.js";
+import { appendNote, readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { ingestPull } from "../packs/ingest.js";
 
 export const TOOLS: Anthropic.Tool[] = [
@@ -286,6 +287,38 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "get_connector_history",
+    description:
+      "Return a connector's documentation: its one-line summary plus the timestamped update-notes log (created, credentials set, code built/repaired, rows ingested). This is the same history the user sees on the sidebar's History tab. Read it before building, repairing, or re-ingesting so you recall what's already been done and don't repeat work or contradict an earlier step. Identify the connector by adapterId, or by boundedContext + target.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        boundedContext: { type: "string" },
+        target: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "list_connector_credentials",
+    description:
+      "READ-ONLY — List every connector with the NAMES of its stored credential fields and whether credentials are present. Secret VALUES are never returned. Use to discover what credentials other connectors already have, e.g. when the user says 'use the same credentials as the other connector' — find the matching source here, then call copy_connector_credentials.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "copy_connector_credentials",
+    description:
+      "WRITE (destination only) — Reuse another connector's stored credentials for the connector you're building: copies the source's credential blob to the destination, server-side. Secret VALUES are never shown — only the field names are reported. Use for 'use the same credentials as the X connector'. State which source connector you're copying from before calling. The source is read-only; only the destination is written.",
+    input_schema: {
+      type: "object",
+      properties: {
+        fromAdapterId: { type: "string", description: "the connector to copy credentials FROM" },
+        toAdapterId: { type: "string", description: "the connector to copy credentials TO (the one you're building)" },
+      },
+      required: ["fromAdapterId", "toAdapterId"],
+    },
+  },
+  {
     name: "remove_connector",
     description:
       "WRITE — Delete a connector entirely (its code, stored credentials, and config). Use for 'delete this connector' or 'start over'. Rows already ingested into the table are left as-is. Requires confirmation: ask 'Shall I delete it?', wait for yes, then call with confirmed:true.",
@@ -367,6 +400,12 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleIngestConnector(args);
       case "view_connector_code":
         return ok(handleViewConnectorCode(String(args.adapterId ?? "")));
+      case "get_connector_history":
+        return handleGetConnectorHistory(args);
+      case "list_connector_credentials":
+        return ok(handleListConnectorCredentials());
+      case "copy_connector_credentials":
+        return handleCopyConnectorCredentials(args);
       case "remove_connector":
         return handleRemoveConnector(args);
       default:
@@ -654,6 +693,7 @@ async function handleIngestConnector(args: Record<string, any>) {
   if (!id) return err("adapterId required");
   const limit = Number(args.limit ?? 25);
   const summary = await ingestPull(id, { limit: limit > 0 ? limit : 25 });
+  appendNote(id, "ingested", `Ingested ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}.`);
   return ok({
     ingested: true, ...summary,
     note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.`,
@@ -665,6 +705,37 @@ function handleViewConnectorCode(id: string) {
   const info = connectorInfo(id);
   if (!info) return { error: `no connector "${id}"` };
   return { adapterId: id, target: info.target, targetKind: info.targetKind, dependencies: info.deps, hasCode: info.hasCode, credentialKeys: info.credentialKeys, code: readConnectorCode(id) ?? null };
+}
+
+function handleGetConnectorHistory(args: Record<string, any>) {
+  let id = typeof args.adapterId === "string" && args.adapterId ? args.adapterId : "";
+  if (!id && typeof args.boundedContext === "string" && typeof args.target === "string") {
+    id = connectorChatId(args.boundedContext, args.target); // default connector id = slug(bc-target)
+  }
+  if (!id) return err("adapterId (or boundedContext + target) required");
+  const doc = readDoc(id);
+  if (!doc) return ok({ adapterId: id, summary: null, notes: [], note: "No update history recorded for this connector yet." });
+  return ok({ adapterId: id, summary: doc.summary ?? null, notes: doc.notes, updatedAt: doc.updatedAt });
+}
+
+// Read-only: every connector with its credential FIELD NAMES (never values), so
+// the agent can find a source to copy from for "use the same credentials as …".
+function handleListConnectorCredentials() {
+  const connectors = listAdapters()
+    .filter((a) => a.kind === "connector")
+    .map((a) => {
+      const fields = connectorInfo(a.id)?.credentialKeys ?? [];
+      return { adapterId: a.id, boundedContext: a.boundedContext, target: a.targetEntity, credentialFields: fields, hasCredentials: fields.length > 0 };
+    });
+  return { connectors };
+}
+
+function handleCopyConnectorCredentials(args: Record<string, any>) {
+  const from = String(args.fromAdapterId ?? "");
+  const to = String(args.toAdapterId ?? "");
+  if (!from || !to) return err("fromAdapterId and toAdapterId required");
+  const keys = copyConnectorCredentials(from, to); // throws on bad ids / no creds; values never returned
+  return ok({ copied: true, fromAdapterId: from, toAdapterId: to, credentialFields: keys, note: `Reused ${keys.length} credential field(s) from ${from}. Values were copied server-side and never shown.` });
 }
 
 function handleRemoveConnector(args: Record<string, any>) {

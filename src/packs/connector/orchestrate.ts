@@ -13,10 +13,20 @@ import {
   writeModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
   installDeps, deleteConnectorFiles, type InstallResult,
 } from "./runtime.js";
+import {
+  appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatId,
+} from "./journal.js";
 import type { AdapterConfig } from "../types.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
+}
+
+/** First non-empty line of a free-text blob, trimmed to a sentence-ish length —
+ * used to seed a connector's doc summary from the operator's build instructions. */
+function firstLine(s: string): string {
+  const line = (s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > 160 ? line.slice(0, 157) + "…" : line;
 }
 
 export interface CreateConnectorInput {
@@ -43,6 +53,7 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   };
   writeSidecar(cfg);
   registerAdapter(createConnectorAdapter(cfg));
+  appendNote(id, "created", `Created connector targeting ${input.target} (${targetKind}) in ${bc}.`);
   return cfg;
 }
 
@@ -51,7 +62,25 @@ export function setConnectorCredentials(id: string, creds: Record<string, unknow
   const cfg = readSidecar(id);
   if (!cfg) throw new Error(`no connector "${id}"`);
   writeCredentials(id, creds);
-  return credentialKeys(id);
+  const keys = credentialKeys(id);
+  appendNote(id, "credentials", `Stored credentials: ${keys.join(", ") || "(none)"}.`);
+  return keys;
+}
+
+/** Reuse another connector's stored credentials for THIS connector — copies the
+ * source's credential blob to the destination server-side. The secret VALUES are
+ * never returned (only the field names), so they never enter the chat/LLM. For
+ * "use the same credentials as the X connector". */
+export function copyConnectorCredentials(fromId: string, toId: string): string[] {
+  if (fromId === toId) throw new Error("source and destination are the same connector");
+  if (!readSidecar(toId)) throw new Error(`no connector "${toId}"`);
+  if (!readSidecar(fromId)) throw new Error(`no connector "${fromId}"`);
+  const creds = readCredentials(fromId);
+  if (!creds || Object.keys(creds).length === 0) throw new Error(`connector "${fromId}" has no stored credentials to copy`);
+  writeCredentials(toId, creds);
+  const keys = credentialKeys(toId);
+  appendNote(toId, "credentials", `Reused credentials from ${fromId}: ${keys.join(", ") || "(none)"}.`);
+  return keys;
 }
 
 export interface BuildConnectorResult {
@@ -84,6 +113,15 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   const next: AdapterConfig = { ...cfg, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps };
   writeSidecar(next);
   registerAdapter(createConnectorAdapter(next));
+  if (instr) setConnectorSummary(id, firstLine(instr));
+  const depsNote = gen.deps.length ? `, deps: ${gen.deps.join(", ")}` : "";
+  appendNote(
+    id,
+    errorReport ? "repaired" : "built",
+    errorReport
+      ? `Repaired connector code after an error (${gen.code.length} bytes${depsNote}).`
+      : `Built connector code (${gen.code.length} bytes${depsNote}).`,
+  );
   return { deps: gen.deps, install, bytes: gen.code.length, targetKind };
 }
 
@@ -121,10 +159,16 @@ export function connectorInfo(id: string): ConnectorInfo | null {
 export { readModule as readConnectorCode } from "./runtime.js";
 export { readCredentials as readConnectorCredentials } from "./runtime.js";
 
-/** Delete a connector entirely: module + creds + sidecar + registry entry. */
+/** Delete a connector entirely: module + creds + sidecar + registry entry, plus
+ * its journal (chat history + doc). Also clears the table-keyed chat thread in
+ * case the connector used a custom id that differs from slug(bc-target). */
 export function removeConnector(id: string): void {
-  if (!readSidecar(id) && !moduleExists(id)) throw new Error(`no connector "${id}"`);
+  const cfg = readSidecar(id);
+  if (!cfg && !moduleExists(id)) throw new Error(`no connector "${id}"`);
   deleteConnectorFiles(id);
   deleteSidecar(id);
   unregisterAdapter(id);
+  deleteChat(id);
+  deleteDoc(id);
+  if (cfg) deleteChat(connectorChatId(cfg.boundedContext, cfg.targetEntity));
 }

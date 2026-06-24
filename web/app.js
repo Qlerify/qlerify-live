@@ -103,11 +103,20 @@ const state = {
   bcBusy: false,
   // chat
   chatOpen: false,
-  chatMessages: [],      // Anthropic.MessageParam[]
+  chatMessages: [],      // Anthropic.MessageParam[] — the ACTIVE thread (advisor or connector)
   chatInput: "",
   chatBusy: false,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
+  // The connector builder keeps one thread per (system, table) so switching
+  // tables doesn't bleed history. state.chatMessages above is shared with the
+  // dashboard/detail "Process advisor", so we stash the advisor thread while a
+  // connector thread is active and restore it on leaving the explorer.
+  connectorChats: {},        // key `${system}::${entity}` -> Anthropic.MessageParam[] (working copy)
+  connectorChatKey: null,    // active connector key, or null when the advisor thread is active
+  inConnectorMode: false,    // true when state.chatMessages holds a connector thread
+  advisorChat: [],           // stashed advisor thread while a connector thread is active
+  connectorChatsHydrated: new Set(), // keys whose server-persisted thread has been loaded this session
   // registry health — non-null message means the active workflow's model couldn't
   // be built into the event registry; surfaced as a top banner.
   registryError: null,
@@ -222,7 +231,13 @@ async function sendChat() {
     const e = state.exp;
     const kind = expKindOf(e, e.entity) === "valueObject" ? "value object" : "entity";
     const conns = (e.adapters || []).map((a) => `${a.id} (${a.kind}/${a.mode}→${a.targetEntity})`).join(", ") || "none";
-    const ctx = `[Context: in the Systems explorer. System (bounded context): ${e.system}. Selected table: ${e.entity || "(none)"} — a model ${kind}. Existing connectors/adapters on this system: ${conns}. When the user says "this table", "this", "it", or "fill this", they mean the selected table — build or repair a connector that populates it, following the Connector Builder loop. Confirm before create/build/ingest.]`;
+    // Recent update notes for the connector targeting the selected table — the
+    // same History-tab log — so the assistant is aware of prior work without a
+    // tool call (get_connector_history gives the full log on demand).
+    const sel = (e.adapters || []).find((a) => a.targetEntity === e.entity);
+    const recent = (sel?.doc?.notes || []).slice(-3).map((n) => `${n.kind}: ${n.text}`).join("; ");
+    const hist = recent ? ` Recent activity on this table's connector — ${recent}. Call get_connector_history for the full log.` : "";
+    const ctx = `[Context: in the Systems explorer. System (bounded context): ${e.system}. Selected table: ${e.entity || "(none)"} — a model ${kind}. Existing connectors/adapters on this system: ${conns}.${hist} When the user says "this table", "this", "it", or "fill this", they mean the selected table — build or repair a connector that populates it, following the Connector Builder loop. Confirm before create/build/ingest.]`;
     content = [{ type: "text", text: ctx }, { type: "text", text }];
   } else {
     content = text;
@@ -243,7 +258,7 @@ async function sendChat() {
     // After an assistant turn the dashboard / current view may be stale (write tools).
     if (state.view === "dashboard") await loadDashboard();
     else if (state.view === "detail") await loadDetail();
-    else if (state.view === "bcs") await refreshExplorerAfterChat();
+    else if (state.view === "bcs") { await refreshExplorerAfterChat(); persistConnectorChat(); }
   } catch (e) {
     state.chatError = e.message;
   } finally {
@@ -254,9 +269,94 @@ async function sendChat() {
 }
 
 function clearChat() {
+  // Clears only the active thread (the selected table's connector thread in
+  // builder mode, or the advisor thread otherwise) since state.chatMessages IS
+  // that thread. In connector mode also drop the server-persisted copy so the
+  // cleared thread doesn't come back on reload.
+  if (state.inConnectorMode && state.connectorChatKey && state.exp?.system && state.exp?.entity) {
+    state.connectorChats[state.connectorChatKey] = [];
+    state.connectorChatsHydrated.add(state.connectorChatKey); // server now empty; don't re-hydrate
+    api(`/api/bc/${encodeURIComponent(state.exp.system)}/connector-chat?target=${encodeURIComponent(state.exp.entity)}`, { method: "DELETE" }).catch(() => {});
+  }
   state.chatMessages = [];
   state.chatError = null;
   render();
+}
+
+// --- Connector-builder threads: one per (system, table) ---------------------
+// state.chatMessages is shared with the dashboard/detail advisor, so we model
+// two stashes: per-(system,table) connector threads and a single advisor thread.
+// activate/deactivate swap the live thread in/out; stashActiveChat always saves
+// the LIVE state.chatMessages first (sendChat reassigns that array each turn, so
+// the map ref can be stale between turns — re-stashing on every swap keeps it
+// correct).
+function connectorChatKey(system, entity) {
+  return `${system || ""}::${entity || ""}`;
+}
+
+function stashActiveChat() {
+  if (state.inConnectorMode) state.connectorChats[state.connectorChatKey] = state.chatMessages;
+  else state.advisorChat = state.chatMessages;
+}
+
+// Make the connector thread for (system, entity) the active chat. No-op if it is
+// already active. Stashes whatever thread is currently live first, then lazily
+// hydrates from the server-persisted copy.
+function activateConnectorChat(system, entity) {
+  const nk = connectorChatKey(system, entity);
+  if (state.inConnectorMode && state.connectorChatKey === nk) return;
+  stashActiveChat();
+  state.inConnectorMode = true;
+  state.connectorChatKey = nk;
+  state.chatMessages = state.connectorChats[nk] || [];
+  state.chatError = null;
+  hydrateConnectorChat(system, entity, nk);
+}
+
+// Load the server-persisted thread for a connector key the first time it becomes
+// active this session. Adopts the server copy only when we have no local thread
+// for it yet (never clobbers an in-progress conversation) and the key is still
+// the active one when the response lands.
+async function hydrateConnectorChat(system, entity, nk) {
+  if (!system || !entity) return;
+  if (state.connectorChatsHydrated.has(nk)) return;
+  state.connectorChatsHydrated.add(nk);
+  try {
+    const d = await api(`/api/bc/${encodeURIComponent(system)}/connector-chat?target=${encodeURIComponent(entity)}`);
+    const msgs = d.messages || [];
+    const local = state.connectorChats[nk];
+    if (msgs.length && (!local || local.length === 0)) {
+      state.connectorChats[nk] = msgs;
+      if (state.connectorChatKey === nk) state.chatMessages = msgs;
+      render();
+    }
+  } catch (_err) {
+    state.connectorChatsHydrated.delete(nk); // allow a retry on next activation
+  }
+}
+
+// Persist the active connector thread server-side (fire-and-forget). Called after
+// each connector-builder turn so the history survives a reload.
+function persistConnectorChat() {
+  if (!state.inConnectorMode || !state.connectorChatKey) return;
+  const e = state.exp;
+  if (!e || !e.system || !e.entity) return;
+  state.connectorChatsHydrated.add(state.connectorChatKey); // we are now the source of truth
+  api(`/api/bc/${encodeURIComponent(e.system)}/connector-chat`, {
+    method: "PUT",
+    body: JSON.stringify({ target: e.entity, messages: state.chatMessages }),
+  }).catch(() => {});
+}
+
+// Leave connector-builder mode: save the active connector thread and restore the
+// advisor thread. Called when navigating away from the explorer.
+function deactivateConnectorChat() {
+  if (!state.inConnectorMode) return;
+  stashActiveChat();
+  state.inConnectorMode = false;
+  state.connectorChatKey = null;
+  state.chatMessages = state.advisorChat || [];
+  state.chatError = null;
 }
 
 function scrollChatToBottom() {
@@ -431,6 +531,11 @@ function chatMessageHtml(m) {
 
 function chatPanel() {
   if (!state.chatOpen) return "";
+  // In the Systems explorer the panel is the SINGLE connector sidebar with two
+  // tabs — Chat (the builder conversation) and History (the connector's update
+  // notes). Other views keep the plain single-mode advisor panel.
+  const builder = state.view === "bcs";
+  const mode = builder ? (state.exp?.panelMode || "history") : "chat";
   const info = state.chatInfo;
   const apiOk = info?.apiKeyConfigured;
   const apiBadge = info
@@ -439,10 +544,35 @@ function chatPanel() {
         : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-800">no api key</span>`)
     : `<span class="text-[10px] text-stone-400">loading…</span>`;
 
+  const tabBtn = (m, label) => `<button id="cpanel-tab-${m}" class="flex-1 text-xs py-1 rounded ${mode === m ? "bg-white text-stone-900 shadow-sm font-medium" : "text-stone-500 hover:text-stone-700"}">${label}</button>`;
+  const tabs = builder ? `
+    <div class="flex gap-1 mt-2 bg-stone-100 rounded-md p-0.5">
+      ${tabBtn("history", "History")}${tabBtn("chat", "Chat")}
+    </div>` : "";
+
+  const header = `
+    <div class="px-4 py-3 border-b border-stone-200">
+      <div class="flex items-center gap-2">
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Assistant</div>
+          <div class="text-sm text-stone-800 font-medium">${builder ? "Connector builder" : "Process advisor"}</div>
+        </div>
+        ${mode === "chat" ? apiBadge : ""}
+        ${mode === "chat" ? `<button id="chat-clear" title="Clear conversation" class="text-stone-400 hover:text-stone-700 text-sm">↺</button>` : ""}
+        <button id="chat-close" title="Close" class="text-stone-400 hover:text-stone-700 text-lg leading-none">×</button>
+      </div>
+      ${tabs}
+    </div>`;
+
+  const shell = (body) => `
+    <aside class="fixed top-0 right-0 bottom-0 w-[420px] bg-white border-l border-stone-200 shadow-xl flex flex-col z-30">
+      ${header}${body}
+    </aside>`;
+
+  if (builder && mode === "history") return shell(connectorHistoryBody(state.exp || {}));
+
   const messagesHtml = state.chatMessages.map(chatMessageHtml).join("");
   const empty = state.chatMessages.length === 0;
-
-  const builder = state.view === "bcs";
   const examples = state.view === "detail" ? [
     "Explain the next step in this workflow!",
     "Explain the last thing that was completed on this workflow.",
@@ -460,18 +590,7 @@ function chatPanel() {
     "Create a new demand.",
   ];
 
-  return `
-    <aside class="fixed top-0 right-0 bottom-0 w-[420px] bg-white border-l border-stone-200 shadow-xl flex flex-col z-30">
-      <div class="px-4 py-3 border-b border-stone-200 flex items-center gap-2">
-        <div class="flex-1">
-          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Assistant</div>
-          <div class="text-sm text-stone-800 font-medium">${builder ? "Connector builder" : "Process advisor"}</div>
-        </div>
-        ${apiBadge}
-        <button id="chat-clear" title="Clear conversation" class="text-stone-400 hover:text-stone-700 text-sm">↺</button>
-        <button id="chat-close" title="Close" class="text-stone-400 hover:text-stone-700 text-lg leading-none">×</button>
-      </div>
-
+  return shell(`
       ${!apiOk && info ? `
         <div class="px-4 py-3 bg-amber-50 border-b border-amber-200 text-[12px] text-amber-900">
           <b>ANTHROPIC_API_KEY not configured.</b> Add it to <span class="mono">.env</span> and restart the server.
@@ -482,7 +601,7 @@ function chatPanel() {
         ${empty ? `
           <div class="text-stone-500 text-sm">
             ${builder
-              ? `Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and I'll write a connector to fill <b>${escapeHtml(state.exp?.entity || "this table")}</b>, test it, fix any errors, and populate it. I'll confirm before each change.`
+              ? `Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and I'll write a connector to fill <b>${escapeHtml(state.exp?.entity || "this table")}</b>, test it, fix any errors, and populate it. I'll confirm before each change. Past activity for this connector is on the <b>History</b> tab.`
               : "Ask about demands, the workflow, or have me advance a step. I'll always confirm before changing anything."}
             <div class="mt-3 flex flex-col gap-1.5">
               ${examples.map((q) => `<button class="text-left text-[12px] text-stone-700 hover:bg-stone-100 rounded px-2 py-1 border border-stone-200" data-example="${escapeHtml(q)}">${escapeHtml(q)}</button>`).join("")}
@@ -499,13 +618,22 @@ function chatPanel() {
           <div class="flex-1 text-[10px] text-stone-400">Enter to send · Shift+Enter for new line</div>
           <button id="chat-send" ${state.chatBusy || !state.chatInput.trim() ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Send →</button>
         </div>
-      </div>
-    </aside>
-  `;
+      </div>`);
 }
 
 function bindChat() {
   document.getElementById("chat-toggle")?.addEventListener("click", toggleChat);
+  // Connector sidebar tabs (Systems explorer): flip the one panel between the
+  // builder conversation and the connector's update-notes history.
+  document.getElementById("cpanel-tab-chat")?.addEventListener("click", () => {
+    if (state.exp) state.exp.panelMode = "chat";
+    render();
+    setTimeout(() => document.getElementById("chat-input")?.focus(), 30);
+  });
+  document.getElementById("cpanel-tab-history")?.addEventListener("click", () => {
+    if (state.exp) state.exp.panelMode = "history";
+    render();
+  });
   if (!state.chatOpen) return;
   const input = document.getElementById("chat-input");
   if (input) {
@@ -898,6 +1026,9 @@ async function onHashChange() {
   state.demandId = r.demandId ?? null;
   state.bc = r.bc ?? null;
   state.bcBusy = false; // never carry a stuck busy-flag across navigation
+  // Leaving the Systems explorer hands the chat panel back to the Process
+  // advisor (re-entering re-activates the table's connector thread).
+  if (r.view !== "bcs") deactivateConnectorChat();
 
   if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
 
@@ -1628,7 +1759,7 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, sidebarOpen: false, sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], tableSearch: "", filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
   return state.exp;
 }
 
@@ -1651,12 +1782,15 @@ async function selectExpSystem(name) {
     const def = d.defaultEntity || (e.entities[0] && e.entities[0].name) || (e.valueObjects[0] && e.valueObjects[0].name);
     if (def) { await selectExpEntity(def); return; }
   } catch (_err) { e.entities = []; e.valueObjects = []; e.adapters = []; }
+  activateConnectorChat(e.system, e.entity); // no table → this system's empty thread
   render();
 }
 
 async function selectExpEntity(name) {
   const e = expState();
-  e.entity = name; e.page = 0; e.filters = []; e.busy = true; render();
+  e.entity = name; e.page = 0; e.filters = []; e.busy = true;
+  activateConnectorChat(e.system, name); // swap in this table's own connector thread
+  render();
   try {
     const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(name)}&limit=300`);
     e.items = d.rows || [];
@@ -1679,7 +1813,8 @@ function expKindOf(e, name) {
 // Configure-Adapter sidebar first so the two right panels don't stack.
 function openConnectorChat() {
   const e = expState();
-  e.sidebarOpen = false;
+  e.panelMode = "chat";
+  activateConnectorChat(e.system, e.entity); // ensure the selected table's thread is live
   state.chatOpen = true;
   if (!state.chatInfo) loadChatInfo().then(render);
   render();
@@ -1731,7 +1866,6 @@ function explorerView() {
       ${expSystemsCol(e)}
       ${expTablesCol(e)}
       ${expMain(e)}
-      ${e.sidebarOpen ? expAdapterSidebar(e) : ""}
     </div>`;
 }
 
@@ -1816,7 +1950,7 @@ function expMain(e) {
     <div class="flex-1 flex flex-col min-w-0 bg-white">
       <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
-        <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${e.sidebarOpen ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Configure Adapter</button>
+        <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
       </div>
       <div class="px-6 py-3 border-b border-stone-200">${expFiltersPanel(e, cols)}</div>
       <div class="px-6 pt-3 pb-1 flex items-center justify-between">
@@ -1869,28 +2003,62 @@ function expFiltersPanel(e, cols) {
     </details>`;
 }
 
-function expAdapterSidebar(e) {
-  const adapters = e.adapters || [];
+// Colour chip per update-note kind (for the connector doc timeline).
+const NOTE_BADGE = {
+  created: "bg-sky-100 text-sky-800",
+  built: "bg-emerald-100 text-emerald-800",
+  repaired: "bg-amber-100 text-amber-800",
+  credentials: "bg-violet-100 text-violet-800",
+  ingested: "bg-teal-100 text-teal-800",
+  removed: "bg-rose-100 text-rose-800",
+  note: "bg-stone-100 text-stone-700",
+};
+
+// One connector card: id + shape, the doc summary, and the most recent update
+// notes (newest first). doc rides along on the adapter from /api/bc/:bc.
+function connectorCard(a) {
+  const doc = a.doc;
+  const summary = doc?.summary
+    ? `<div class="text-xs text-stone-600 mt-1 italic">${escapeHtml(doc.summary)}</div>`
+    : "";
+  const notes = (doc?.notes || []).slice(-6).reverse();
+  const notesHtml = notes.length
+    ? `<div class="mt-2 border-t border-stone-100 pt-2 space-y-1.5">
+        ${notes.map((n) => `<div class="flex items-baseline gap-1.5 text-[11px]">
+          <span class="px-1 py-0.5 rounded ${NOTE_BADGE[n.kind] || NOTE_BADGE.note} shrink-0">${escapeHtml(n.kind)}</span>
+          <span class="flex-1 text-stone-600">${escapeHtml(n.text)}</span>
+          <span class="text-stone-400 shrink-0">${escapeHtml(formatVersionDate(n.at))}</span>
+        </div>`).join("")}
+      </div>`
+    : "";
+  return `<div class="rounded-md border border-stone-200 p-2.5">
+    <div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div>
+    <div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div>
+    ${summary}${notesHtml}
+  </div>`;
+}
+
+// The History tab body of the connector sidebar (rendered inside chatPanel's
+// fixed aside, so NO outer panel here). Scoped to the SELECTED table (entity/VO)
+// to match the per-(system,table) chat thread: shows the connector(s) targeting
+// it with their summary + update-notes timeline, plus the Build-with-AI call to
+// action (which flips the same panel to the Chat tab).
+function connectorHistoryBody(e) {
+  const adapters = (e.adapters || []).filter((a) => a.targetEntity === e.entity);
   const list = adapters.length
-    ? adapters.map((a) => `<div class="rounded-md border border-stone-200 p-2.5"><div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div><div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div></div>`).join("")
-    : '<div class="text-sm text-stone-400">No adapter yet for this system.</div>';
+    ? adapters.map(connectorCard).join("")
+    : '<div class="text-sm text-stone-400">No connector yet for this table — build one below.</div>';
   return `
-    <div class="w-96 shrink-0 border-l border-stone-200 bg-white flex flex-col">
-      <div class="px-4 py-3 border-b border-stone-200 flex items-center justify-between">
-        <span class="font-semibold text-stone-900">Configure Adapter</span>
-        <button id="exp-sidebar-close" class="text-stone-400 hover:text-stone-700">✕</button>
+    <div class="p-4 overflow-y-auto flex-1 space-y-3">
+      <div class="text-xs text-stone-500">System <b>${escapeHtml(e.system || "")}</b> → ${expKindOf(e, e.entity) === "valueObject" ? "value object" : "table"} <b>${escapeHtml(e.entity || "")}</b></div>
+      ${list}
+      <div class="rounded-lg border border-sky-200 bg-sky-50/60 p-4 text-center">
+        <div class="text-2xl mb-1">✨</div>
+        <div class="text-sm font-medium text-stone-800">Build a connector with AI</div>
+        <div class="text-xs text-stone-500 mt-1">Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and the assistant writes, tests, and runs a connector to fill this table.</div>
+        <button id="exp-build-ai" class="w-full mt-3 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 font-medium">Build connector with AI →</button>
       </div>
-      <div class="p-4 overflow-y-auto flex-1 space-y-3">
-        <div class="text-xs text-stone-500">System <b>${escapeHtml(e.system || "")}</b> → ${expKindOf(e, e.entity) === "valueObject" ? "value object" : "table"} <b>${escapeHtml(e.entity || "")}</b></div>
-        ${list}
-        <div class="rounded-lg border border-sky-200 bg-sky-50/60 p-4 text-center">
-          <div class="text-2xl mb-1">✨</div>
-          <div class="text-sm font-medium text-stone-800">Build a connector with AI</div>
-          <div class="text-xs text-stone-500 mt-1">Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and the assistant writes, tests, and runs a connector to fill this table.</div>
-          <button id="exp-build-ai" class="w-full mt-3 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 font-medium">Build connector with AI →</button>
-        </div>
-        <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full adapter workbench →</a>
-      </div>
+      <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full adapter workbench →</a>
     </div>`;
 }
 
@@ -1919,8 +2087,13 @@ function bindExplorer() {
   document.getElementById("exp-reset")?.addEventListener("click", () => { expState().filters = []; expState().page = 0; render(); });
   document.getElementById("exp-prev")?.addEventListener("click", () => { const e = expState(); if (e.page > 0) { e.page--; render(); } });
   document.getElementById("exp-next")?.addEventListener("click", () => { expState().page++; render(); });
-  document.getElementById("exp-config-adapter")?.addEventListener("click", () => { const e = expState(); e.sidebarOpen = !e.sidebarOpen; render(); });
-  document.getElementById("exp-sidebar-close")?.addEventListener("click", () => { expState().sidebarOpen = false; render(); });
+  // "Connectors" pill: toggle the single sidebar on its History tab.
+  document.getElementById("exp-config-adapter")?.addEventListener("click", () => {
+    const e = expState();
+    if (state.chatOpen && e.panelMode === "history") { state.chatOpen = false; }
+    else { e.panelMode = "history"; state.chatOpen = true; if (!state.chatInfo) loadChatInfo().then(render); }
+    render();
+  });
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
 }
 

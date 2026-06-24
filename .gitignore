@@ -20,6 +20,9 @@ src/packs/*/generated/
 # AI-built connectors (Part 2.4) — generated module + plaintext POC creds + per-
 # workspace node_modules; throwaway, never source-controlled.
 .qlerify/connectors/
+# Per-connector journal — persisted builder chat history + doc/update-notes;
+# runtime data (may contain pasted secrets in the chat log), never committed.
+.qlerify/connector-journal/
 # Per-organization content-addressed blob store (ontology version bodies).
 # Generated/regenerable; the relational metadata is the system of record.
 .qlerify/orgs/

@@ -11,6 +11,7 @@ import { isHandledError } from "../errors.js";
 import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/model.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
+import { readDoc, readChat, writeChat, deleteChat, connectorChatId } from "../packs/connector/journal.js";
 import { provenanceMeta } from "../twin/provenance.js";
 import * as store from "../twin/projection-store.js";
 
@@ -58,7 +59,9 @@ function slimEvent(e: OntologyEvent) {
 }
 
 function serializeAdapter(a: ReturnType<typeof listAdapters>[number]) {
-  return { id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode };
+  // The doc (summary + update notes) rides along so the explorer's Configure
+  // Adapter sidebar can show it with no extra request. null when none recorded.
+  return { id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode, doc: readDoc(a.id) };
 }
 
 /** Grade a pulled batch against the model entity: per-required-field coverage,
@@ -197,5 +200,40 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return grouped
       .map((g) => ({ eventName: g.eventName, provenance: g.provenance, count: g._count._all, lastAt: g._max.occurredAt }))
       .sort((a, b) => String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")));
+  });
+
+  // ---- Connector-builder chat history, persisted per (system, table) --------
+  // Keyed by slug(bc-target) so a thread survives reloads and exists before the
+  // connector is created. The /chat turn endpoint stays stateless; the client
+  // loads on table-select and saves after each turn.
+  app.get("/api/bc/:bc/connector-chat", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const target = String((req.query as any)?.target ?? "");
+    if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
+    const id = connectorChatId(bc, target);
+    const chat = readChat(id);
+    return { id, messages: chat?.messages ?? [], updatedAt: chat?.updatedAt ?? null };
+  });
+
+  app.put("/api/bc/:bc/connector-chat", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const body = (req.body ?? {}) as any;
+    const target = String(body.target ?? (req.query as any)?.target ?? "");
+    if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
+    if (!Array.isArray(body.messages)) return reply.code(400).send({ error: "NO_MESSAGES", message: "messages[] required" });
+    const id = connectorChatId(bc, target);
+    writeChat(id, body.messages);
+    return { ok: true, id };
+  });
+
+  app.delete("/api/bc/:bc/connector-chat", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const target = String((req.query as any)?.target ?? "");
+    if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
+    deleteChat(connectorChatId(bc, target));
+    return { ok: true };
   });
 }

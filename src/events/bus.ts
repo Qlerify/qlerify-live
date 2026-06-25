@@ -8,6 +8,7 @@ import { getBusinessClock } from "./clock.js";
 import { getOntology } from "../ontology/model.js";
 import { provenanceFor, type ProvMode } from "../twin/provenance.js";
 import { currentOrgId, currentWorkflowId } from "../platform/tenancy/context.js";
+import { correlateCaseId } from "../twin/correlate.js";
 import type { Role } from "../auth.js";
 
 export interface EmittedEvent {
@@ -19,16 +20,11 @@ export interface EmittedEvent {
   // omitted → defaults to the emitting bounded context's configured mode
   // (`simulated` until an adapter claims the BC). See twin/provenance.ts.
   provenance?: ProvMode;
-}
-
-// Fallback event scope, used only when no explicit withScope() is active (e.g. a
-// one-off command dispatched straight through the HTTP generic route). The
-// generic simulator pins each run's root-instance id via withScope, so the rich
-// per-model aggregate-walk is no longer needed: scope to an explicit demandId
-// carried in the payload, otherwise to the aggregate's own id.
-function fallbackScopeId(aggregateId: string, payload: Record<string, unknown>): string | null {
-  if (typeof payload.demandId === "string" && payload.demandId) return payload.demandId;
-  return aggregateId || null;
+  // Why this event fired, when it was derived from ingested data (twin/derive.ts):
+  // the scenario (create/status/fields/none) and a human-readable reason. Omitted
+  // for synthetic/simulator-stepped events, which have no row-state evidence.
+  evidenceKind?: string;
+  evidence?: string;
 }
 
 type Subscriber = (ev: EmittedEvent) => Promise<void> | void;
@@ -38,7 +34,8 @@ const wildcardSubscribers: Subscriber[] = [];
 
 // Scope override: the generic simulator runs every command of one "run" with the
 // run's root-instance id set here, so emitted events are grouped by that id
-// (written to EventLog.demandId). null → fall back to fallbackScopeId.
+// (written to EventLog.caseId). null → fall back to model-driven case correlation
+// (twin/correlate.ts), which links an aggregate to the case its FK references.
 let scopeOverride: string | null = null;
 export function setScopeOverride(id: string | null): void {
   scopeOverride = id;
@@ -129,7 +126,10 @@ function businessDateFromPayload(def: EventDef, payload: Record<string, unknown>
 
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
-  const demandId = scopeOverride ?? fallbackScopeId(ev.aggregateId, ev.payload);
+  // The case this event belongs to: the simulator's explicit run scope when set,
+  // otherwise model-driven correlation that links an aggregate the workflow moved
+  // into back to the case its FK references (instead of starting a new case).
+  const caseId = scopeOverride ?? (await correlateCaseId(def.aggregateRoot, ev.aggregateId, ev.payload));
   const provenance = ev.provenance ?? (await provenanceFor(def.boundedContext));
 
   await prisma.eventLog.create({
@@ -139,11 +139,13 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       boundedContext: def.boundedContext,
       aggregateRoot: def.aggregateRoot,
       aggregateId: ev.aggregateId,
-      demandId,
+      caseId,
       role: ev.role,
       payload: JSON.stringify(ev.payload),
       businessAt: getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date(),
       provenance,
+      evidenceKind: ev.evidenceKind ?? null,
+      evidence: ev.evidence ?? null,
       // Multi-tenant spine: stamp the resolved org + workflow at the single
       // EventLog write chokepoint (system org/workflow for the demo + non-request
       // contexts). workflowId scopes the simulator's per-workflow data plane.

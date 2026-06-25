@@ -312,7 +312,7 @@ Goal: the dashboard's "+ New" / step-through / detail work for ANY loaded model,
   exampleData + an **FK-by-name heuristic** `xxxId`→instance-of-`Xxx`, inject the run's id for
   update-shaped events, dispatch via the generic base command, soft-fail one step on error),
   `genericListInstances`, `genericInstanceDetail`, `genericCurrentStep`, `isEricssonModel()`.
-- **`/sim` routes branched** — `/sim/demands` (GET+POST), `/sim/next`, `/sim/current-step`,
+- **`/sim` routes branched** — `/sim/cases` (GET+POST), `/sim/next`, `/sim/current-step`,
   `/sim/run-all`, `/sim/reset` use the generic sim when `!isEricssonModel()`; new `/sim/instance/:id`;
   `/sim/meta` carries an `ericsson` flag. Ericsson path unchanged.
 - **Generic dashboard UI** `web/app.js` — when `meta.ericsson===false`: list columns derived from the
@@ -355,7 +355,7 @@ by a 3-stance + adversarial-synthesis workflow (`generic-base-command-design`).
   **UPDATE** patches only the command's own non-id/non-status fields under an optimistic lock and
   **never advances `status`** (lifecycle transitions stay authored logic). Everything emits via the
   existing `emit()`, so log/fan-out/scope are identical to authored commands (unknown aggregate →
-  `demandId` null, no crash).
+  `caseId` null, no crash).
 - **Generator change** — `emit.ts` `logicStubContent` now writes a thin **delegating** stub
   (`return genericApply(COMMAND, ctx)`), not a throwing one. Authoring a real `.logic.ts` (importing
   nothing from base) cleanly overrides it; the generator never overwrites an existing logic file.

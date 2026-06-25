@@ -1,8 +1,8 @@
 // Model-driven workflow demo UI — vanilla JS + Tailwind.
 // Two views:
-//   1. Dashboard:  table of demands with status + progress, "+ New demand" button.
-//   2. Detail:     per-demand timeline + 7 BC panels, step-forward controls.
-// Navigation is hash-based: "#" → dashboard, "#demand/<id>" → detail.
+//   1. Dashboard:  table of cases with status + progress, "+ New case" button.
+//   2. Detail:     per-case timeline + 7 BC panels, step-forward controls.
+// Navigation is hash-based: "#" → dashboard, "#case/<id>" → detail.
 
 const API = "";
 const role = "Automation";
@@ -65,6 +65,21 @@ function provChip(mode) {
   const s = PROV_STYLE[mode] || PROV_STYLE.simulated;
   return `<span class="text-[9px] font-semibold px-1 py-px rounded ${s.chip}" title="${s.title}">${s.label}</span>`;
 }
+
+// Why a derived event fired (twin/derive.ts evidence rules). The `kind` is the
+// scenario the data matched; `headline` phrases it for the event log. Null kind =
+// a synthetic/simulator-stepped event, which carries no row-state evidence.
+const EVIDENCE_KIND = {
+  create: { label: "NEW ROW",   icon: "🆕", chip: "bg-emerald-100 text-emerald-700 border border-emerald-200", headline: "A new record was created with its required fields" },
+  status: { label: "STATUS",    icon: "🔀", chip: "bg-violet-100 text-violet-700 border border-violet-200",     headline: "The record reached the status this event represents" },
+  fields: { label: "NEW FIELD", icon: "✏️", chip: "bg-amber-100 text-amber-700 border border-amber-200",       headline: "This event introduced new field values on the record" },
+  none:   { label: "SEQUENCE",  icon: "↪",  chip: "bg-stone-100 text-stone-500 border border-stone-200",       headline: "No row-state evidence — derived from sequence position" },
+};
+function evidenceChip(kind) {
+  const e = EVIDENCE_KIND[kind];
+  if (!e) return "";
+  return `<span class="text-[9px] font-semibold px-1 py-px rounded ${e.chip}" title="${e.headline}">${e.label}</span>`;
+}
 // Faint diagonal hatch so simulated step cards read as "ghosted" vs solid real
 // data (Tailwind has no hatch utility → inline style). "" for real modes.
 function provHatch(mode) {
@@ -80,14 +95,14 @@ function provModeForBC(bc) {
 const state = {
   // global
   view: "dashboard",     // "dashboard" | "detail"
-  demands: [],
+  cases: [],
   events: [],
   busy: false,
   // model-derived UI labels (filled from /sim/meta); defaults keep the UI sane
   // before the first fetch / if the endpoint is unavailable.
   meta: { title: "Workflow", rootAggregate: "Item", rootAggregatePlural: "Items", boundedContextCount: 0, aggregateCount: 0, eventCount: 0 },
   // detail view
-  demandId: null,
+  caseId: null,
   instance: null,   // per-run detail from /sim/instance
   prevInstance: null, // the instance snapshot before the last step (per-run diff)
   log: [],
@@ -108,6 +123,7 @@ const state = {
   chatBusy: false,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
+  detailPanelMode: "chat",   // detail-view sidebar tab: "chat" (advisor) | "log" (event log)
   // The connector builder keeps one thread per (system, table) so switching
   // tables doesn't bleed history. state.chatMessages above is shared with the
   // dashboard/detail "Process advisor", so we stash the advisor thread while a
@@ -203,15 +219,15 @@ async function sendChat() {
   const text = state.chatInput.trim();
   if (!text || state.chatBusy) return;
 
-  // When the user is on a detail page, the URL holds which demand they're
+  // When the user is on a detail page, the URL holds which case they're
   // looking at — but the assistant never sees the URL. Inject a context
-  // block so phrases like "this demand" or "the next step" resolve correctly.
+  // block so phrases like "this case" or "the next step" resolve correctly.
   let content;
-  if (state.view === "detail" && state.demandId) {
-    const cur = state.demands.find((d) => d.id === state.demandId);
+  if (state.view === "detail" && state.caseId) {
+    const cur = state.cases.find((d) => d.id === state.caseId);
     const desc = cur ? `status ${cur.status ?? "—"}` : "(unknown)";
     content = [
-      { type: "text", text: `[Context: viewing demand ${state.demandId} — ${desc}. When the user says "this demand", "it", or refers to a step without naming a demand, they mean this one.]` },
+      { type: "text", text: `[Context: viewing case ${state.caseId} — ${desc}. When the user says "this case", "it", or refers to a step without naming a case, they mean this one.]` },
       { type: "text", text },
     ];
   } else if (state.view === "bc" && state.bc) {
@@ -504,7 +520,7 @@ function chatMessageHtml(m) {
     if (b.type === "tool_use") {
       const args = JSON.stringify(b.input, null, 2);
       const argsPreview = args.length > 120 ? args.slice(0, 120) + "…" : args;
-      const WRITE_TOOLS = ["next_step", "create_demand", "regenerate_adapter_body", "reset_adapter", "create_connector", "build_connector", "ingest_connector", "remove_connector"];
+      const WRITE_TOOLS = ["next_step", "create_case", "regenerate_adapter_body", "reset_adapter", "create_connector", "build_connector", "ingest_connector", "remove_connector"];
       const writeTone = WRITE_TOOLS.includes(b.name) ? "border-amber-300 bg-amber-50" : "border-stone-200 bg-stone-50";
       return `
         <details class="text-[11px] ${writeTone} border rounded px-2 py-1 my-1">
@@ -535,7 +551,10 @@ function chatPanel() {
   // tabs — Chat (the builder conversation) and History (the connector's update
   // notes). Other views keep the plain single-mode advisor panel.
   const builder = state.view === "bcs";
-  const mode = builder ? (state.exp?.panelMode || "history") : "chat";
+  const detail = state.view === "detail";
+  const mode = builder ? (state.exp?.panelMode || "history")
+             : detail  ? (state.detailPanelMode || "chat")
+             : "chat";
   const info = state.chatInfo;
   const apiOk = info?.apiKeyConfigured;
   const apiBadge = info
@@ -548,6 +567,10 @@ function chatPanel() {
   const tabs = builder ? `
     <div class="flex gap-1 mt-2 bg-stone-100 rounded-md p-0.5">
       ${tabBtn("history", "History")}${tabBtn("chat", "Chat")}
+    </div>`
+    : detail ? `
+    <div class="flex gap-1 mt-2 bg-stone-100 rounded-md p-0.5">
+      ${tabBtn("chat", "Assistant")}${tabBtn("log", "Event log")}
     </div>` : "";
 
   const header = `
@@ -555,7 +578,7 @@ function chatPanel() {
       <div class="flex items-center gap-2">
         <div class="flex-1">
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">Assistant</div>
-          <div class="text-sm text-stone-800 font-medium">${builder ? "Connector builder" : "Process advisor"}</div>
+          <div class="text-sm text-stone-800 font-medium">${builder ? "Connector builder" : (detail && mode === "log") ? "Event log" : "Process advisor"}</div>
         </div>
         ${mode === "chat" ? apiBadge : ""}
         ${mode === "chat" ? `<button id="chat-clear" title="Clear conversation" class="text-stone-400 hover:text-stone-700 text-sm">↺</button>` : ""}
@@ -570,24 +593,25 @@ function chatPanel() {
     </aside>`;
 
   if (builder && mode === "history") return shell(connectorHistoryBody(state.exp || {}));
+  if (detail && mode === "log") return shell(eventLogBody());
 
   const messagesHtml = state.chatMessages.map(chatMessageHtml).join("");
   const empty = state.chatMessages.length === 0;
   const examples = state.view === "detail" ? [
     "Explain the next step in this workflow!",
     "Explain the last thing that was completed on this workflow.",
-    "Why hasn't this demand moved forward yet?",
-    "Move this demand forward one step.",
+    "Why hasn't this case moved forward yet?",
+    "Move this case forward one step.",
   ] : builder ? [
     "Fill this table from our DynamoDB users table",
     "Connect this to a REST API and pull the records",
     "Populate this from a Postgres query",
     "Show me the connector code",
   ] : [
-    "How many demands haven't moved in 24h?",
-    "Which demand is closest to being delivered?",
-    "Are any demands stuck at the same step?",
-    "Create a new demand.",
+    "How many cases haven't moved in 24h?",
+    "Which case is closest to being delivered?",
+    "Are any cases stuck at the same step?",
+    "Create a new case.",
   ];
 
   return shell(`
@@ -602,7 +626,7 @@ function chatPanel() {
           <div class="text-stone-500 text-sm">
             ${builder
               ? `Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and I'll write a connector to fill <b>${escapeHtml(state.exp?.entity || "this table")}</b>, test it, fix any errors, and populate it. I'll confirm before each change. Past activity for this connector is on the <b>History</b> tab.`
-              : "Ask about demands, the workflow, or have me advance a step. I'll always confirm before changing anything."}
+              : "Ask about cases, the workflow, or have me advance a step. I'll always confirm before changing anything."}
             <div class="mt-3 flex flex-col gap-1.5">
               ${examples.map((q) => `<button class="text-left text-[12px] text-stone-700 hover:bg-stone-100 rounded px-2 py-1 border border-stone-200" data-example="${escapeHtml(q)}">${escapeHtml(q)}</button>`).join("")}
             </div>
@@ -613,7 +637,7 @@ function chatPanel() {
       </div>
 
       <div class="border-t border-stone-200 p-3">
-        <textarea id="chat-input" rows="2" class="w-full text-sm border border-stone-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400 resize-none" placeholder="Ask anything about demands or the workflow…">${escapeHtml(state.chatInput)}</textarea>
+        <textarea id="chat-input" rows="2" class="w-full text-sm border border-stone-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400 resize-none" placeholder="Ask anything about cases or the workflow…">${escapeHtml(state.chatInput)}</textarea>
         <div class="flex items-center gap-2 mt-2">
           <div class="flex-1 text-[10px] text-stone-400">Enter to send · Shift+Enter for new line</div>
           <button id="chat-send" ${state.chatBusy || !state.chatInput.trim() ? "disabled" : ""} class="px-3 py-1.5 text-xs rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Send →</button>
@@ -621,17 +645,70 @@ function chatPanel() {
       </div>`);
 }
 
+// The "Event log" tab of the detail-view assistant sidebar: every event this
+// case has fired, oldest → newest (state.log is newest-first, so reverse it),
+// reading top-down like the timeline left-to-right.
+function eventLogBody() {
+  const log = (state.log || []).slice().reverse();
+  if (log.length === 0) {
+    return `<div class="flex-1 overflow-y-auto px-4 py-6 text-sm text-stone-500">
+      No events yet — press <b>Step forward</b> to advance this case through the workflow.
+    </div>`;
+  }
+  const rows = log.map((e, i) => {
+    // payload is JSON-serialized command args; pretty-print it, fall back to the
+    // raw string if it isn't valid JSON (legacy rows).
+    let payloadStr = "";
+    try { payloadStr = JSON.stringify(JSON.parse(e.payload ?? "null"), null, 2); }
+    catch { payloadStr = String(e.payload ?? ""); }
+    const hasPayload = payloadStr && !["null", "{}", '""'].includes(payloadStr);
+    const biz = e.businessAt ? new Date(e.businessAt).toLocaleDateString() : null;
+    // "Why it fired": the derivation scenario (kind) gives the headline, the
+    // persisted evidence reason gives the specifics. Absent for synthetic events.
+    const km = EVIDENCE_KIND[e.evidenceKind];
+    const why = km
+      ? `<div class="text-[11px] mb-2 rounded border border-stone-200 bg-white px-2 py-1.5">
+           <div class="text-stone-700"><span class="mr-1">${km.icon}</span><b>Why it fired:</b> ${km.headline}</div>
+           ${e.evidence ? `<div class="text-stone-500 mono text-[10px] mt-0.5">${escapeHtml(e.evidence)}</div>` : ""}
+         </div>`
+      : `<div class="text-[11px] text-stone-400 italic mb-2">No derivation evidence recorded — a simulator step, or derived before evidence was tracked (re-derive to populate).</div>`;
+    return `
+      <details class="border-b border-stone-100">
+        <summary class="px-4 py-2.5 cursor-pointer select-none hover:bg-stone-50">
+          <span class="text-[11px] tabular-nums text-stone-400 mr-1">${i + 1}</span>
+          <span class="font-medium text-stone-900">${e.eventName}</span> ${provChip(e.provenance)} ${evidenceChip(e.evidenceKind)}
+          <div class="text-xs text-stone-500 mt-0.5 ml-5">
+            <span class="mono">${e.boundedContext}</span> · ${e.role} · ${new Date(e.occurredAt).toLocaleTimeString()}${biz ? ` · <span title="business date">${biz}</span>` : ""}
+          </div>
+        </summary>
+        <div class="px-4 pb-3 pl-9">
+          ${why}
+          ${hasPayload
+            ? `<pre class="mono text-[11px] whitespace-pre-wrap bg-stone-50 border border-stone-200 rounded p-2 text-stone-600">${escapeHtml(payloadStr)}</pre>`
+            : `<div class="text-[11px] text-stone-400 italic">No payload</div>`}
+          <div class="text-[10px] text-stone-400 mt-1 mono">${escapeHtml(e.aggregateRoot || "")} · ${escapeHtml(e.aggregateId || "")}</div>
+        </div>
+      </details>`;
+  }).join("");
+  return `<div class="flex-1 overflow-y-auto text-sm">${rows}</div>`;
+}
+
 function bindChat() {
   document.getElementById("chat-toggle")?.addEventListener("click", toggleChat);
   // Connector sidebar tabs (Systems explorer): flip the one panel between the
   // builder conversation and the connector's update-notes history.
   document.getElementById("cpanel-tab-chat")?.addEventListener("click", () => {
-    if (state.exp) state.exp.panelMode = "chat";
+    if (state.view === "detail") state.detailPanelMode = "chat";
+    else if (state.exp) state.exp.panelMode = "chat";
     render();
     setTimeout(() => document.getElementById("chat-input")?.focus(), 30);
   });
   document.getElementById("cpanel-tab-history")?.addEventListener("click", () => {
     if (state.exp) state.exp.panelMode = "history";
+    render();
+  });
+  document.getElementById("cpanel-tab-log")?.addEventListener("click", () => {
+    state.detailPanelMode = "log";
     render();
   });
   if (!state.chatOpen) return;
@@ -996,7 +1073,7 @@ function parseHash() {
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#model")) return { view: "model" };
   if (h.startsWith("#bcs")) return { view: "bcs" };
-  if ((m = h.match(/^#demand\/([\w-]+)/))) return { view: "detail", demandId: m[1] };
+  if ((m = h.match(/^#case\/([\w-]+)/))) return { view: "detail", caseId: m[1] };
   return { view: "dashboard" };
 }
 
@@ -1023,7 +1100,7 @@ async function ensureWorkflowSelected() {
 async function onHashChange() {
   const r = parseHash();
   state.view = r.view;
-  state.demandId = r.demandId ?? null;
+  state.caseId = r.caseId ?? null;
   state.bc = r.bc ?? null;
   state.bcBusy = false; // never carry a stuck busy-flag across navigation
   // Leaving the Systems explorer hands the chat panel back to the Process
@@ -1114,8 +1191,8 @@ function isNoModelErr(e) {
 // ---------------------------------------------------------------------------
 
 async function loadDashboard() {
-  const [demands, events] = await Promise.all([api("/sim/demands"), api("/sim/events"), loadRegistryStatus(), loadMeta()]);
-  state.demands = demands;
+  const [cases, events] = await Promise.all([api("/sim/cases"), api("/sim/events"), loadRegistryStatus(), loadMeta()]);
+  state.cases = cases;
   state.events = events;
   render();
 }
@@ -1129,14 +1206,14 @@ async function loadMeta() {
   } catch { /* keep defaults */ }
 }
 
-async function createDemand() {
+async function createCase() {
   if (state.busy) return;
   state.busy = true; render();
   try {
-    const d = await api("/sim/demands", { method: "POST", body: "{}" });
+    const d = await api("/sim/cases", { method: "POST", body: "{}" });
     await loadDashboard();
-    // Auto-navigate into the new demand's detail view.
-    navigate(`#demand/${d.id}`);
+    // Auto-navigate into the new case's detail view.
+    navigate(`#case/${d.id}`);
   } catch (e) {
     alert(e.message);
   } finally {
@@ -1166,12 +1243,12 @@ async function rebuildFromIngested() {
   }
 }
 
-async function deleteDemand(demandId, ev) {
+async function deleteCase(caseId, ev) {
   ev.stopPropagation();
   if (!confirm("Remove this item and all its data?")) return;
   state.busy = true; render();
   try {
-    await api("/sim/delete", { method: "POST", body: JSON.stringify({ demandId }) });
+    await api("/sim/delete", { method: "POST", body: JSON.stringify({ caseId }) });
     await loadDashboard();
   } catch (e) {
     alert("Delete failed: " + e.message);
@@ -1185,7 +1262,7 @@ function dashboardRow(d, cols) {
   // Columns derived from the root-aggregate row's own fields (model-generic).
   const cells = (cols || []).map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
   return `
-    <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#demand/${d.id}">
+    <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#case/${d.id}">
       <td class="px-4 py-3"><span class="inline-block w-2 h-2 rounded-full bg-stone-300"></span></td>
       <td class="px-4 py-3 mono text-stone-500 text-xs">${d.id.slice(0, 16)}…</td>
       ${cells}
@@ -1210,9 +1287,9 @@ function genericColumns(rows) {
 
 function dashboardView() {
   const m = state.meta;
-  const cols = genericColumns(state.demands);
-  const rows = state.demands.map((d) => dashboardRow(d, cols)).join("");
-  const empty = state.demands.length === 0;
+  const cols = genericColumns(state.cases);
+  const rows = state.cases.map((d) => dashboardRow(d, cols)).join("");
+  const empty = state.cases.length === 0;
   const plural = prettyEntity(m.rootAggregatePlural), singular = prettyEntity(m.rootAggregate);
   const headerCells = cols.map((c) => `<th class="px-4 py-2 font-medium">${escapeHtml(c)}</th>`).join("");
   return `
@@ -1223,7 +1300,7 @@ function dashboardView() {
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         <button id="btn-rebuild" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium" title="Clear the event log and regenerate it from the ingested rows — use after changing the model">🔄 Rebuild from data</button>
-        <button id="btn-new-demand" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
+        <button id="btn-new-case" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
@@ -1262,13 +1339,13 @@ function dashboardView() {
 }
 
 function bindDashboard() {
-  document.getElementById("btn-new-demand")?.addEventListener("click", createDemand);
+  document.getElementById("btn-new-case")?.addEventListener("click", createCase);
   document.getElementById("btn-rebuild")?.addEventListener("click", rebuildFromIngested);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
   });
   document.querySelectorAll("[data-delete]").forEach((el) => {
-    el.addEventListener("click", (ev) => deleteDemand(el.dataset.delete, ev));
+    el.addEventListener("click", (ev) => deleteCase(el.dataset.delete, ev));
   });
 }
 
@@ -1365,9 +1442,9 @@ function orgTimelinessPanel(o) {
     const late = r.kind === "overdue";
     const sub = late ? `due ${escapeHtml(r.dueDate)}` : `due ${escapeHtml(r.dueDate)} · projected ${escapeHtml(r.predictedFinish || "—")}`;
     return `
-    <button data-ex-go="${r.workflowId}|${r.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
+    <button data-ex-go="${r.workflowId}|${r.caseId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
       <span class="inline-block w-2 h-2 rounded-full ${late ? "bg-rose-500" : "bg-amber-400"} shrink-0"></span>
-      <div class="flex-1 min-w-0"><div class="text-sm text-stone-800 truncate">${escapeHtml(r.workflowName)} · ${escapeHtml(r.demandId.slice(0, 12))}…</div><div class="text-[11px] text-stone-500">${sub}</div></div>
+      <div class="flex-1 min-w-0"><div class="text-sm text-stone-800 truncate">${escapeHtml(r.workflowName)} · ${escapeHtml(r.caseId.slice(0, 12))}…</div><div class="text-[11px] text-stone-500">${sub}</div></div>
       <span class="text-[11px] font-medium ${late ? "text-rose-700" : "text-amber-700"} tabular-nums shrink-0">${late ? r.days + "d late" : "~" + r.days + "d slip"}</span>
     </button>`;
   }).join("");
@@ -1422,11 +1499,11 @@ function orgCard(w) {
 function orgExceptionRow(x) {
   const dot = { at_risk: "bg-rose-600", overdue: "bg-rose-500", rework: "bg-rose-400", soft_fail: "bg-stone-400", aging: "bg-amber-400" }[x.kind] || "bg-stone-400";
   return `
-    <button data-ex-go="${x.workflowId}|${x.demandId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
+    <button data-ex-go="${x.workflowId}|${x.caseId}" class="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50">
       <span class="inline-block w-2 h-2 rounded-full ${dot} shrink-0"></span>
       <div class="flex-1 min-w-0">
         <div class="text-sm text-stone-800 truncate"><span class="font-medium">${escapeHtml(x.title)}</span> — ${escapeHtml(x.detail)}</div>
-        <div class="text-[11px] text-stone-500 truncate">${escapeHtml(x.workflowName)} · ${escapeHtml(x.demandId.slice(0, 12))}…</div>
+        <div class="text-[11px] text-stone-500 truncate">${escapeHtml(x.workflowName)} · ${escapeHtml(x.caseId.slice(0, 12))}…</div>
       </div>
       <span class="text-[11px] text-stone-400 tabular-nums shrink-0">${x.ageDays}d</span>
     </button>`;
@@ -1608,8 +1685,8 @@ function bindOrg() {
   document.querySelectorAll("[data-wf-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-wf-go"), "#")));
   document.querySelectorAll("[data-bn-go]").forEach((el) => el.addEventListener("click", () => orgGotoWorkflow(el.getAttribute("data-bn-go"), "#")));
   document.querySelectorAll("[data-ex-go]").forEach((el) => el.addEventListener("click", () => {
-    const [wf, demand] = (el.getAttribute("data-ex-go") || "").split("|");
-    orgGotoWorkflow(wf, `#demand/${demand}`);
+    const [wf, caseId] = (el.getAttribute("data-ex-go") || "").split("|");
+    orgGotoWorkflow(wf, `#case/${caseId}`);
   }));
   document.querySelectorAll("[data-sys]").forEach((el) => el.addEventListener("click", () => navigate("#bcs")));
   document.querySelectorAll("[data-org-map-open]").forEach((el) => el.addEventListener("click", openOrgMap));
@@ -2511,9 +2588,9 @@ async function loadDetail() {
   await loadMeta();
   // Per-run detail from the model-generic simulator.
   const [instance, events, cur] = await Promise.all([
-    api("/sim/instance/" + encodeURIComponent(state.demandId)),
+    api("/sim/instance/" + encodeURIComponent(state.caseId)),
     api("/sim/events"),
-    api("/sim/current-step?demandId=" + encodeURIComponent(state.demandId)),
+    api("/sim/current-step?caseId=" + encodeURIComponent(state.caseId)),
     loadRegistryStatus(),
   ]);
   // Keep the pre-step instance so the detail view can mark what this step
@@ -2521,7 +2598,8 @@ async function loadDetail() {
   state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
   state.instance = instance;
   state.events = events;
-  // newest-first so lastEventCaption() / businessByStep read the latest first.
+  // newest-first so lastEventInline() / businessByStep read the latest first
+  // (the Event log tab reverses it back to chronological order).
   state.log = (instance.events || []).slice().reverse();
   state.currentIndex = cur.index;
   render();
@@ -2533,7 +2611,7 @@ async function doNext() {
   try {
     await api("/sim/next", {
       method: "POST",
-      body: JSON.stringify({ demandId: state.demandId }),
+      body: JSON.stringify({ caseId: state.caseId }),
     });
     await loadDetail();
   } catch (e) {
@@ -2549,7 +2627,7 @@ async function doRunAll() {
   try {
     await api("/sim/run-all", {
       method: "POST",
-      body: JSON.stringify({ demandId: state.demandId }),
+      body: JSON.stringify({ caseId: state.caseId }),
     });
     await loadDetail();
   } catch (e) {
@@ -2561,11 +2639,11 @@ async function doRunAll() {
 
 async function doReset() {
   if (state.busy) return;
-  if (!confirm("Reset this demand and start over?")) return;
+  if (!confirm("Reset this case and start over?")) return;
   state.busy = true; render();
   try {
-    await api("/sim/reset", { method: "POST", body: JSON.stringify({ demandId: state.demandId }) });
-    // demand was deleted; go back to dashboard
+    await api("/sim/reset", { method: "POST", body: JSON.stringify({ caseId: state.caseId }) });
+    // case was deleted; go back to dashboard
     navigate("#");
   } finally {
     state.busy = false;
@@ -2806,13 +2884,15 @@ function timeline() {
         </svg>` : "";
 
   const prov = state.meta.provenance;
-  const legend = prov ? `
+  const legend = `
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
+        ${prov ? `
         <span class="font-semibold text-stone-600">${prov.steps.real} of ${prov.steps.total} steps from a real source</span>
         <span class="flex items-center gap-1">${provChip("live")} live</span>
         <span class="flex items-center gap-1">${provChip("recorded")} recorded</span>
-        <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>
-      </div>` : "";
+        <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>` : ""}
+        ${lastEventInline()}
+      </div>`;
   return `
     <section class="border-b border-stone-200 bg-stone-50">
       ${legend}
@@ -2831,27 +2911,26 @@ function timeline() {
   `;
 }
 
-function lastEventCaption() {
-  if (!state.log || state.log.length === 0) return `
-    <div class="px-6 py-3 bg-white border-b border-stone-200 text-sm text-stone-500">
-      Press <b>Step forward</b> to advance this demand through the workflow.
-    </div>
-  `;
+// Compact "Last event" summary, folded onto the right of the timeline legend
+// row (was its own full-width band). The full chronological history now lives in
+// the assistant sidebar's "Event log" tab.
+function lastEventInline() {
+  if (!state.log || state.log.length === 0) {
+    return `<span class="ml-auto text-stone-400 italic">No events yet — press <b class="not-italic font-semibold">Step forward</b></span>`;
+  }
   const last = state.log[0];
   return `
-    <div class="px-6 py-3 bg-white border-b border-stone-200">
-      <div class="flex items-start gap-4">
-        <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold pt-0.5">Last event</div>
-        <div class="flex-1">
-          <div class="font-medium text-stone-900 flex items-center gap-2">${last.eventName} ${provChip(last.provenance)}</div>
-          <div class="text-sm text-stone-600 mt-0.5">
-            <span class="mono text-stone-500">${last.boundedContext}</span> · ${last.role} ·
-            <span class="text-stone-500">${new Date(last.occurredAt).toLocaleTimeString()}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
+    <span class="ml-auto flex items-center gap-1.5 min-w-0">
+      <span class="uppercase tracking-widest text-stone-400 font-semibold">Last event</span>
+      <span class="font-medium text-stone-800 truncate">${last.eventName}</span>
+      ${provChip(last.provenance)}
+      <span class="text-stone-300">·</span>
+      <span class="mono text-stone-500">${last.boundedContext}</span>
+      <span class="text-stone-300">·</span>
+      <span class="text-stone-500">${last.role}</span>
+      <span class="text-stone-300">·</span>
+      <span class="text-stone-400">${new Date(last.occurredAt).toLocaleTimeString()}</span>
+    </span>`;
 }
 
 function detailView() {
@@ -3086,7 +3165,6 @@ function genericDetailView() {
       </div>
     </header>
     ${timeline()}
-    ${lastEventCaption()}
     <main class="flex-1 overflow-auto p-6 flex flex-col gap-4">
       ${rootCard}
       ${otherCards ? `<div class="grid gap-4 items-start" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${otherCards}</div>` : ""}

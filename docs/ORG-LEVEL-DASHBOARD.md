@@ -13,7 +13,7 @@ Build a **portfolio control tower**: a third dashboard level above the per-workf
 
 The single highest-leverage *technical* move is to build the **derived per-`(workflowId, eventRef)` P50 `businessAt`-gap baseline** — a single `groupBy` over data that exists today — because it is the keystone that unlocks Cycle-Time Index, Aging-vs-percentile, At-Risk, Bottleneck over-run, Commitment Confidence and Slack *simultaneously*. Without it the board is just raw counts, which this product's own normalization rule forbids. The single highest-leverage *product* move is to shift from lagging OTIF to **forward-looking Commitment Confidence and Aging-WIP**, the only indicators that give a leader time to intervene *before* a miss locks in.
 
-What is genuinely computable today is narrower than it first appears, and this document marks it honestly. The **EventLog spine** (`businessAt`, `eventRef`, `demandId`, `provenance`, `boundedContext`, `role`, `workflowId`, `organizationId`) plus per-workflow `linearOrder()` give us active counts, throughput, aging, rework loops, role-queue depth and provenance mix **today**. But three things the draft-era thinking assumed are *not* free: (a) every cross-workflow roll-up needs a **new multi-ontology-resolution path** because `getOntology()` is a process-global singleton swapped per active workflow; (b) **Commitment Confidence and At-Risk depend on the derived baseline AND a reliable per-instance commit date** — neither is a point-in-time free read, so they are P0 *only because we pull the baseline into P0*, and the commit-date question is a P0 *blocker*, not a refinement; (c) the **entire AI panel needs new instrumentation** — there is no actor-origin tag on `EventLog`, chat write-tools share the identical `genericStep` path as a human step-forward, and the PDP governs control-plane resource access only and is **never invoked on runtime/chat writes**, so "Guardrail Block Rate" requires *building the guardrail first*.
+What is genuinely computable today is narrower than it first appears, and this document marks it honestly. The **EventLog spine** (`businessAt`, `eventRef`, `caseId`, `provenance`, `boundedContext`, `role`, `workflowId`, `organizationId`) plus per-workflow `linearOrder()` give us active counts, throughput, aging, rework loops, role-queue depth and provenance mix **today**. But three things the draft-era thinking assumed are *not* free: (a) every cross-workflow roll-up needs a **new multi-ontology-resolution path** because `getOntology()` is a process-global singleton swapped per active workflow; (b) **Commitment Confidence and At-Risk depend on the derived baseline AND a reliable per-instance commit date** — neither is a point-in-time free read, so they are P0 *only because we pull the baseline into P0*, and the commit-date question is a P0 *blocker*, not a refinement; (c) the **entire AI panel needs new instrumentation** — there is no actor-origin tag on `EventLog`, chat write-tools share the identical `genericStep` path as a human step-forward, and the PDP governs control-plane resource access only and is **never invoked on runtime/chat writes**, so "Guardrail Block Rate" requires *building the guardrail first*.
 
 The product's unique differentiators — **provenance (simulated/recorded/live) as a first-class twin-trust score** and an **AI assistant that can write back** — still become dedicated panels no generic process-mining tool can show, but the AI panel is honestly sequenced behind its real prerequisites. Architecturally, the P0 slice is a new cross-workflow aggregation endpoint that resolves each workflow's ontology without globally swapping it, folds the org's `EventLog` into one normalized view, and renders as a new hash route (`#org`) in the existing vanilla-JS SPA.
 
@@ -50,7 +50,7 @@ Priority key: **P0** = thin-slice MVP (computable from data that exists today, *
 
 | Indicator | Question it answers | Computed from this product | Viz | Pri | Data |
 |---|---|---|---|---|---|
-| **Active instances per type** | How much live work, where? | Distinct `demandId` with ≥1 event, no terminal event, per workflow | Big number per card | P0 | HAVE NOW |
+| **Active instances per type** | How much live work, where? | Distinct `caseId` with ≥1 event, no terminal event, per workflow | Big number per card | P0 | HAVE NOW |
 | **Throughput / completions per period** | Is output rising, flat, or collapsing? | Count instances reaching terminal `eventRef` (last in `linearOrder()`), bucketed by `businessAt` week | Weekly bars per type | P0 | HAVE NOW (per-wf ontology for terminal `eventRef`) |
 | **Throughput Balance (started ÷ completed) + WIP-trend** | Is work flowing or piling up? | Arrivals = root-create events/wk; departures = terminal events/wk; ratio per type, with open-WIP-count sparkline | Dual-bar + ratio tile (red <1.0) | P0 | HAVE NOW |
 | **Portfolio Health roll-up** | Which workflow TYPE needs attention now? | Transparent weighted blend of normalized components (Confidence, At-Risk %, Exception rate, Aging-vs-history); drill-able, not a black box | Traffic-light tile per type + master tile | P1 | NEEDS BASELINE (composes baseline-dependent inputs) |
@@ -77,7 +77,7 @@ Priority key: **P0** = thin-slice MVP (computable from data that exists today, *
 
 | Indicator | Question | Computed | Viz | Pri | Data |
 |---|---|---|---|---|---|
-| **Rework / loop rate** | Where is pure waste? | Back-edges in realized path: repeated `eventRef` for one `demandId`; rate = instances with ≥1 loop; intensity = avg repeats | Rework heatmap (type × step) | P0 | HAVE NOW |
+| **Rework / loop rate** | Where is pure waste? | Back-edges in realized path: repeated `eventRef` for one `caseId`; rate = instances with ≥1 loop; intensity = avg repeats | Rework heatmap (type × step) | P0 | HAVE NOW |
 | **Synthesis soft-fail rate** | Where did the *twin* fail to advance? | Instances with payload `{skipped,error}` soft-fail marker (`sim.ts` genericStep catch). **Explicitly NOT a business exception** — it means the simulator could not synthesize a command | Soft-fail trend per type | P0 | HAVE NOW (labelled honestly) |
 | **At-Risk / Stuck rate** | Is the portfolio getting healthier or sicker? | % open where dwell-in-step > k×baseline OR cumulative age > Σ baseline(steps-so-far) OR predicted-late; trend | At-risk % trend (stacked area) | P1 | NEEDS BASELINE |
 | **Stuck-cohort detection** | Systemic or one-off? | Group open instances by (workflow, `eventRef`); flag steps where ≥N stall simultaneously | "Systemic stalls" callout | P1 | NEEDS BASELINE (stall = dwell > baseline) |
@@ -222,23 +222,23 @@ Three tiers; every KPI is a navigation handle, never a dead number.
   │
   │  North-star tile (Aging-WIP past-85th) ───────►  # pre-filtered to past-85th cohort
   │
-  │  Exception feed row ──────────────────────────►  #demand/<id>  (existing Instance Detail)
+  │  Exception feed row ──────────────────────────►  #case/<id>  (existing Instance Detail)
   │     "AIR-3239 +18d"                                28-step timeline + per-BC cards
   │
   │  Bottleneck / role-queue row ─────────────────►  #  filtered to instances stuck at that eventRef
   │     "SAP PO approval · 34 waiting"                 (cohort drill)
   │
-  │  Aging-WIP dot ───────────────────────────────►  #demand/<id>
+  │  Aging-WIP dot ───────────────────────────────►  #case/<id>
   │
   │  Freshness strip chip ("SAP · 4m ago") ───────►  #bc/SAP  (existing adapter workbench)
   │
-  └─ AI approval inbox (once it exists) ──────────►  #demand/<id> with chat open + proposal context
+  └─ AI approval inbox (once it exists) ──────────►  #case/<id> with chat open + proposal context
 ```
 
 Per-KPI link contract:
 - **Portfolio grid card / role-queue head** → existing **Workflow-Type Overview** (`#`), active workflow switched via `currentWorkflowId`.
 - **Aging-WIP past-85th / Predicted breaches / Commitment Confidence** → overview filtered to the at-risk cohort.
-- **Exception feed / Aging-WIP dot / Oldest** → existing **Instance Detail** (`#demand/<id>`) — the 28-step timeline already visualizes the disruption.
+- **Exception feed / Aging-WIP dot / Oldest** → existing **Instance Detail** (`#case/<id>`) — the 28-step timeline already visualizes the disruption.
 - **Bottleneck / role-queue row** → overview filtered to instances at that `eventRef` (cohort).
 - **Freshness / Connector chip** → existing **Adapter workbench** (`#bc/<name>`).
 - **AI approval inbox** → Instance Detail with `chatPanel()` open and the pending proposal in context.
@@ -265,7 +265,7 @@ Per-KPI link contract:
 2. **Derive the keystone baseline IN P0** (zero new capture, pure aggregation): a **rolling P50 of the `businessAt` gap per `(workflowId, eventRef)`** over completed instances. The chat prompt already defines per-step duration as `businessAt[i+1] − businessAt[i]` (`src/chat/system-prompt.ts:70-76`). Materialize it in a small cached map / `_app_meta`-style table keyed by `(workflowId, eventRef)`. **Guard survivorship bias** by including censored ages of still-open instances. This single `groupBy` unlocks Cycle-Time Index, Aging-vs-percentile, At-Risk, Bottleneck over-run, Commitment Confidence and Slack.
 3. **Compute today, no new capture:** active count, throughput (terminal-`eventRef` by `businessAt` week), throughput balance + open-WIP sparkline, rework loops (repeated `eventRef`), synthesis soft-fail rate (payload `{skipped,error}` from `sim.ts` genericStep catch — **labelled as twin-synthesis failure, NOT business exception**), Aging-WIP vs the type's own derived percentiles, **role-queue depth** (`EventLog.role` + current-step→role), **Data-Conformance** (`businessDateFromPayload()` null rate per `bus.ts`, orphan/path checks via the existing conformance test logic), and **Twin-Trust** summed across workflows.
 4. **Minimal daily-snapshot job IN P0** (small, cross-cutting): write one row per (org, day, KPI) so the north-star band can show *real* trends. Until it has accumulated history, **render point-in-time tiles with no sparklines** — do not draw trends over bunched-`occurredAt` recomputed-on-load data.
-5. **Frontend** (`web/app.js`): add `#org` to `parseHash()`/`onHashChange()`, a `portfolioView()` returning the wireframe HTML (reuse `STATUS_TONE`, `provChip()`, card/table/progress patterns), `loadPortfolio()` hitting the new endpoint, a `render()` branch wrapping `tenantBar()` + `portfolioView()` + `chatPanel()`, and `bindPortfolio()` for `data-go` drill-downs. Poll every 5s (mirror the existing `/sim/demands` poll). Add an **"All workflows"** entry to the switcher in `tenantBar()` routing to `#org`.
+5. **Frontend** (`web/app.js`): add `#org` to `parseHash()`/`onHashChange()`, a `portfolioView()` returning the wireframe HTML (reuse `STATUS_TONE`, `provChip()`, card/table/progress patterns), `loadPortfolio()` hitting the new endpoint, a `render()` branch wrapping `tenantBar()` + `portfolioView()` + `chatPanel()`, and `bindPortfolio()` for `data-go` drill-downs. Poll every 5s (mirror the existing `/sim/cases` poll). Add an **"All workflows"** entry to the switcher in `tenantBar()` routing to `#org`.
 
 ### Phase 1 — Commit date, at-risk engine, flow, capacity, AI actor tagging
 
@@ -398,7 +398,7 @@ Per-KPI link contract:
 - **Understanding Plan, Actual and Target Cost in Manufacturing Orders — SAP Community** — <https://community.sap.com/t5/enterprise-resource-planning-blog-posts-by-members/understanding-plan-actual-and-target-cost-in-manufacturing-orders/ba-p/13742110>  
   Planned vs actual production-order semantics (planned = estimate, actual = realized) — grounds the schedule-adherence plan-vs-actual diff against each step's expected baseline.
 - **qlerify-live event model (prisma/schema.prisma EventLog + src/twin/sim.ts + src/twin/provenance.ts)** — <file:///Users/staffanpalopaa/work/qlerify-live/.claude/worktrees/organisation-dashboard/prisma/schema.prisma>  
-  Verified the exact event-stream fields each indicator is computed from: demandId (instance), workflowId+boundedContext (type+source system), eventRef vs ont.linearOrder() (step progress), businessAt vs occurredAt (business vs wall-clock time), payload (source-system snapshot), provenance simulated|recorded|live, and the {skipped,error} soft-fail marker in sim.ts.
+  Verified the exact event-stream fields each indicator is computed from: caseId (instance), workflowId+boundedContext (type+source system), eventRef vs ont.linearOrder() (step progress), businessAt vs occurredAt (business vs wall-clock time), payload (source-system snapshot), provenance simulated|recorded|live, and the {skipped,error} soft-fail marker in sim.ts.
 - **Managing Work in Progress (WIP) / Aging WIP — Businessmap (Kanbanize)** — <https://businessmap.io/kanban-resources/kanban-analytics/kanban-aging-wip>  
   Aging WIP = days each task has spent in its current stage; plotted by stage with WIP counts; recommends automatic alerts when an item exceeds its usual time — basis for the percentile-band aging indicator.
 - **Portfolio Flow Metrics in SAFe: Deep Dive — agility-at-scale.com** — <https://agility-at-scale.com/safe/lpm/flow-metrics-deep-dive/>  
@@ -420,7 +420,7 @@ Per-KPI link contract:
 - **SAFe Flow Metrics: Six Measures of Value Delivery — agility-at-scale.com** — <https://agility-at-scale.com/safe/team-technical-agility/flow-metrics/>  
   The six flow measures and predictability/distribution framing used for the RAG rollup and flow-distribution indicators.
 - **Internal: EventLog schema + simulator step model (prisma/schema.prisma, src/twin/sim.ts, src/events/clock.ts)** — <file:///Users/staffanpalopaa/work/qlerify-live/.claude/worktrees/organisation-dashboard/prisma/schema.prisma>  
-  Confirms the computable substrate: per step-event eventRef/step-index, demandId (instance), businessAt (duration clock, NOT occurredAt), boundedContext/role, payload snapshot, provenance — every indicator above maps to a query over these fields.
+  Confirms the computable substrate: per step-event eventRef/step-index, caseId (instance), businessAt (duration clock, NOT occurredAt), boundedContext/role, payload snapshot, provenance — every indicator above maps to a query over these fields.
 - **Measuring Agentic AI: KPIs That Matter — Oteemo** — <https://oteemo.com/blog/kpis-measuring-agentic-ai/>  
   Names autonomous-completion rate as the single most important operational metric; lists task accuracy, capacity-without-headcount, error-cost reduction, and time/redeployment value.
 - **AI Governance Framework for Production Agents — Galileo** — <https://galileo.ai/blog/ai-governance-framework>  

@@ -32,12 +32,16 @@ model EventLog {
   boundedContext String  // the loaded model's bounded-context name
   aggregateRoot String   // the event's aggregate root, from the model
   aggregateId   String
-  demandId      String?  // the run/root-instance this event is scoped to (null only for a root-create event before write)
+  caseId        String?  // correlation id: the case (end-to-end run) this event belongs to. A case can span SEVERAL aggregates — the id is the instance that started the run; aggregates the workflow moves into inherit it (see twin/correlate.ts). Null only for a root-create event before write.
   role          String
   payload       String   // JSON-serialized command args
   occurredAt    DateTime @default(now())  // real wall-clock time the simulator recorded the event
   businessAt    DateTime?  // simulated business time — the date the event would have occurred in the real world
   provenance    String?  // simulated | recorded | live — where this fact came from (null = legacy → simulated)
+  // Why this event fired, from data derivation (twin/derive.ts). Null for
+  // synthetic/simulator-stepped events, which have no row-state evidence.
+  evidenceKind  String?  // derivation scenario: create | status | fields | none
+  evidence      String?  // human-readable evidence reason (e.g. "status=CONFIRMED (≥ CONFIRMED)")
   // Multi-tenant spine: the organization this fact belongs to. Stamped at the
   // single emit() chokepoint from the resolved tenant context (null = legacy
   // pre-tenancy rows, read as the system org). See src/platform/*.
@@ -48,7 +52,7 @@ model EventLog {
 
   @@index([occurredAt])
   @@index([eventRef])
-  @@index([demandId, occurredAt])
+  @@index([caseId, occurredAt])
   @@index([organizationId, occurredAt])
   @@index([workflowId, occurredAt])
 }

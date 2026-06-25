@@ -174,7 +174,7 @@ function isoWeekKey(d: Date): string {
 
 type EvtRow = {
   workflowId: string | null;
-  demandId: string | null;
+  caseId: string | null;
   eventRef: string;
   eventName: string;
   role: string;
@@ -186,7 +186,7 @@ type EvtRow = {
 };
 
 interface InstanceState {
-  demandId: string;
+  caseId: string;
   firstAt: Date; // occurredAt of earliest event
   lastAt: Date; // occurredAt of latest event
   firstBiz: Date | null; // earliest businessAt (business "started")
@@ -323,7 +323,7 @@ export interface WorkflowCard {
   reworkCount: number;
   softFailCount: number;
   twinTrust: { real: number; total: number; pct: number };
-  oldestActive: { demandId: string; ageDays: number; stepName: string } | null;
+  oldestActive: { caseId: string; ageDays: number; stepName: string } | null;
   topRoleQueue: { role: string; count: number } | null;
   cycleIndex: number | null; // actual÷expected cycle time, P50 over completed (null until a baseline exists)
   expectedDays: number | null; // derived end-to-end expected duration, in days
@@ -336,7 +336,7 @@ export interface ExceptionRow {
   severity: number;
   workflowId: string;
   workflowName: string;
-  demandId: string;
+  caseId: string;
   title: string;
   detail: string;
   ageDays: number;
@@ -370,7 +370,7 @@ export interface TimelinessPanel {
   slipDays: number; // Σ projected slip days over ALL predicted-late
   daysByWorkflow: { workflowId: string; overdueDays: number; slipDays: number }[];
   rows: {
-    workflowId: string; workflowName: string; demandId: string; dueDate: string;
+    workflowId: string; workflowName: string; caseId: string; dueDate: string;
     kind: "overdue" | "predicted"; days: number; predictedFinish?: string;
   }[];
   partial: { unmapped: { id: string; name: string }[] } | null;
@@ -411,7 +411,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
   const events = (await prisma.eventLog.findMany({
     where: { organizationId: orgId },
     select: {
-      workflowId: true, demandId: true, eventRef: true, eventName: true, role: true,
+      workflowId: true, caseId: true, eventRef: true, eventName: true, role: true,
       boundedContext: true, businessAt: true, occurredAt: true, provenance: true, aggregateId: true,
     },
     orderBy: { occurredAt: "asc" },
@@ -420,18 +420,18 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
   // Group events → per-workflow → per-instance state.
   const byWf = new Map<string, Map<string, InstanceState>>();
   for (const e of events) {
-    if (!e.workflowId || !e.demandId) continue;
+    if (!e.workflowId || !e.caseId) continue;
     const order = loaded.get(e.workflowId)?.order;
     let insts = byWf.get(e.workflowId);
     if (!insts) byWf.set(e.workflowId, (insts = new Map()));
-    let st = insts.get(e.demandId);
+    let st = insts.get(e.caseId);
     if (!st) {
       st = {
-        demandId: e.demandId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: null, lastBiz: null,
+        caseId: e.caseId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: null, lastBiz: null,
         termBiz: null, bizByRef: new Map(), firedRefs: new Set(), refCounts: new Map(), realEvents: 0,
         totalEvents: 0, softFails: 0, done: false, currentRef: null,
       };
-      insts.set(e.demandId, st);
+      insts.set(e.caseId, st);
     }
     if (e.occurredAt < st.firstAt) st.firstAt = e.occurredAt;
     if (e.occurredAt > st.lastAt) st.lastAt = e.occurredAt;
@@ -510,7 +510,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
         active++;
         const ageDays = daysBetween(st.firstAt, now);
         const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
-        if (!oldest || ageDays > oldest.ageDays) oldest = { demandId: st.demandId, ageDays, stepName };
+        if (!oldest || ageDays > oldest.ageDays) oldest = { caseId: st.caseId, ageDays, stepName };
         if (st.currentRef && ont) {
           const role = ont.eventByRef(st.currentRef)?.role ?? "—";
           roleQueue.set(role, (roleQueue.get(role) ?? 0) + 1);
@@ -572,18 +572,18 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       if (overP85) {
         const overBy = Math.round((st.lastBiz!.getTime() - st.firstBiz!.getTime() - bl!.p85!) / MS_DAY);
         const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
-        exceptions.push({ kind: "at_risk", severity: 4, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+        exceptions.push({ kind: "at_risk", severity: 4, workflowId: wf.id, workflowName: wf.name, caseId: st.caseId,
           title: "At risk", detail: `${overBy}d beyond the usual time, stuck at "${stepName}"`, ageDays });
       } else if ([...st.refCounts.values()].some((n) => n > 1)) {
         const loops = Math.max(...st.refCounts.values()) - 1;
-        exceptions.push({ kind: "rework", severity: 3, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+        exceptions.push({ kind: "rework", severity: 3, workflowId: wf.id, workflowName: wf.name, caseId: st.caseId,
           title: "Rework loop", detail: `a step repeated ${loops}× — work kicked back`, ageDays });
       } else if (st.softFails) {
-        exceptions.push({ kind: "soft_fail", severity: 2, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+        exceptions.push({ kind: "soft_fail", severity: 2, workflowId: wf.id, workflowName: wf.name, caseId: st.caseId,
           title: "Twin couldn't advance", detail: `${st.softFails} step(s) failed to synthesize from the source model`, ageDays });
       } else if (ageDays >= AGING_DAYS) {
         const stepName = st.currentRef && ont ? ont.eventByRef(st.currentRef)?.name ?? "—" : "—";
-        exceptions.push({ kind: "aging", severity: 1, workflowId: wf.id, workflowName: wf.name, demandId: st.demandId,
+        exceptions.push({ kind: "aging", severity: 1, workflowId: wf.id, workflowName: wf.name, caseId: st.caseId,
           title: "No activity", detail: `idle ${ageDays}d at "${stepName}"`, ageDays });
       }
     }
@@ -714,20 +714,20 @@ async function computeTimeliness(
   const scopeIds = scope.map((s) => s.id);
   const payloadRows = (await prisma.eventLog.findMany({
     where: { organizationId: orgId, workflowId: { in: scopeIds } },
-    select: { workflowId: true, demandId: true, payload: true, occurredAt: true },
+    select: { workflowId: true, caseId: true, payload: true, occurredAt: true },
     orderBy: { occurredAt: "asc" },
-  })) as { workflowId: string | null; demandId: string | null; payload: string; occurredAt: Date }[];
+  })) as { workflowId: string | null; caseId: string | null; payload: string; occurredAt: Date }[];
 
   // Latest mapped-field value per instance (asc order ⇒ last write wins).
   const dueByInstance = new Map<string, Date>();
   for (const r of payloadRows) {
-    if (!r.workflowId || !r.demandId) continue;
+    if (!r.workflowId || !r.caseId) continue;
     const field = scope.find((s) => s.id === r.workflowId)?.field;
     if (!field) continue;
     let payload: Record<string, unknown>;
     try { payload = JSON.parse(r.payload) as Record<string, unknown>; } catch { continue; }
     const d = asDate(payload[field]);
-    if (d) dueByInstance.set(`${r.workflowId}|${r.demandId}`, d);
+    if (d) dueByInstance.set(`${r.workflowId}|${r.caseId}`, d);
   }
 
   let overdue = 0, predictedLate = 0, onTime = 0, scorable = 0, unscorable = 0, overdueDays = 0, slipDays = 0;
@@ -743,10 +743,10 @@ async function computeTimeliness(
     const bl = baselines.get(s.id);
     for (const st of byWf.get(s.id)?.values() ?? []) {
       if (st.done) continue; // open commitments only
-      const due = dueByInstance.get(`${s.id}|${st.demandId}`);
+      const due = dueByInstance.get(`${s.id}|${st.caseId}`);
       if (!due) { unscorable++; continue; }
       scorable++;
-      const base = { workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, demandId: st.demandId, dueDate: due.toISOString().slice(0, 10) };
+      const base = { workflowId: s.id, workflowName: nameById.get(s.id) ?? s.id, caseId: st.caseId, dueDate: due.toISOString().slice(0, 10) };
       if (due.getTime() < now.getTime()) {
         const d = daysBetween(due, now);
         overdue++; overdueDays += d; bump(s.id, "overdueDays", d);

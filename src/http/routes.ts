@@ -148,9 +148,9 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/events", async () => events());
   app.get("/sim/event-log", async (req) => {
     const limit = Number((req.query as any)?.limit ?? 200);
-    const demandId = (req.query as any)?.demandId as string | undefined;
+    const caseId = (req.query as any)?.caseId as string | undefined;
     return prisma.eventLog.findMany({
-      where: demandId ? { demandId, ...eventLogOrgWhere() } : eventLogOrgWhere(),
+      where: caseId ? { caseId, ...eventLogOrgWhere() } : eventLogOrgWhere(),
       orderBy: { occurredAt: "desc" },
       take: limit,
     });
@@ -248,10 +248,10 @@ export function registerRoutes(app: FastifyInstance) {
 
   // List all runs with progress (the dashboard's main query) — the loaded model's
   // root-aggregate instances, via the generic simulator.
-  app.get("/sim/demands", async () => genericListInstances());
+  app.get("/sim/cases", async () => genericListInstances());
 
   // Create a fresh run of the loaded model (instantiates the root aggregate).
-  app.post("/sim/demands", async (_req, reply) => {
+  app.post("/sim/cases", async (_req, reply) => {
     try {
       const inst = await genericNewInstance();
       return { id: inst.id, template: { aggregate: inst.aggregate } };
@@ -262,16 +262,16 @@ export function registerRoutes(app: FastifyInstance) {
   });
 
   app.get("/sim/current-step", async (req) => {
-    const demandId = (req.query as any)?.demandId as string | undefined;
-    if (!demandId) return { error: "demandId required" };
-    return { ...(await genericCurrentStep(demandId)), demandId };
+    const caseId = (req.query as any)?.caseId as string | undefined;
+    if (!caseId) return { error: "caseId required" };
+    return { ...(await genericCurrentStep(caseId)), caseId };
   });
 
   app.post("/sim/next", async (req, reply) => {
-    const body = (req.body ?? {}) as { demandId?: string };
-    if (!body.demandId) throw new Error("demandId required");
+    const body = (req.body ?? {}) as { caseId?: string };
+    if (!body.caseId) throw new Error("caseId required");
     try {
-      return await genericStep(body.demandId);
+      return await genericStep(body.caseId);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;
@@ -280,26 +280,26 @@ export function registerRoutes(app: FastifyInstance) {
   // DELETE — remove a run entirely (the dashboard's ✕): its root row, every row
   // it created, and its event-log entries. Distinct from /sim/reset.
   app.post("/sim/delete", async (req) => {
-    const body = (req.body ?? {}) as { demandId?: string };
-    if (!body.demandId) throw new Error("demandId required");
-    await genericDeleteInstance(body.demandId);
+    const body = (req.body ?? {}) as { caseId?: string };
+    if (!body.caseId) throw new Error("caseId required");
+    await genericDeleteInstance(body.caseId);
     return { ok: true };
   });
 
-  // RESET — start over / clear (the detail view's Reset button). With a demandId
+  // RESET — start over / clear (the detail view's Reset button). With a caseId
   // this removes that one run; without one it clears all runs.
   app.post("/sim/reset", async (req) => {
-    const body = (req.body ?? {}) as { demandId?: string };
-    if (body.demandId) await genericDeleteInstance(body.demandId);
+    const body = (req.body ?? {}) as { caseId?: string };
+    if (body.caseId) await genericDeleteInstance(body.caseId);
     else await genericDeleteAll();
     return { ok: true };
   });
   app.post("/sim/run-all", async (req) => {
-    const body = (req.body ?? {}) as { demandId?: string };
-    if (!body.demandId) throw new Error("demandId required");
+    const body = (req.body ?? {}) as { caseId?: string };
+    if (!body.caseId) throw new Error("caseId required");
     const steps: any[] = [];
     for (let guard = 0; guard < 500; guard++) {
-      const step = await genericStep(body.demandId);
+      const step = await genericStep(body.caseId);
       steps.push(step);
       if (step.done) break;
     }

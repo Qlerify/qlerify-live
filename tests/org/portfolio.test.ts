@@ -60,7 +60,7 @@ const ROLE: Record<string, string> = { DemandCreated: "Planner", DemandPlanned: 
 
 async function ev(
   workflowId: string,
-  demandId: string,
+  caseId: string,
   key: string,
   opts: { provenance?: string | null; payload?: Record<string, unknown>; occurredAt?: Date; soft?: boolean } = {},
 ) {
@@ -72,7 +72,7 @@ async function ev(
       boundedContext: "Sales",
       aggregateRoot: "Demand",
       aggregateId: opts.soft ? "" : newId(),
-      demandId,
+      caseId,
       role: ROLE[key] ?? "Planner",
       payload: JSON.stringify(opts.payload ?? {}),
       occurredAt: opts.occurredAt ?? now,
@@ -172,9 +172,9 @@ describe("org portfolio aggregation", () => {
     const p = await computePortfolio(orgId);
     const kinds = p.exceptions.map((x) => x.kind).sort();
     expect(kinds).toEqual(["aging", "rework", "soft_fail"]);
-    expect(p.exceptions.find((x) => x.kind === "rework")!.demandId).toBe(i3);
-    expect(p.exceptions.find((x) => x.kind === "soft_fail")!.demandId).toBe(i4);
-    expect(p.exceptions.find((x) => x.kind === "aging")!.demandId).toBe(i5);
+    expect(p.exceptions.find((x) => x.kind === "rework")!.caseId).toBe(i3);
+    expect(p.exceptions.find((x) => x.kind === "soft_fail")!.caseId).toBe(i4);
+    expect(p.exceptions.find((x) => x.kind === "aging")!.caseId).toBe(i5);
   });
 
   it("ranks bottlenecks by the count of instances waiting at each step", async () => {
@@ -220,7 +220,7 @@ describe("capability gating + attribute mapping", () => {
     expect(t.onTime).toBe(1); // i3 (due in the future)
     expect(t.unscorable).toBe(1); // i4 (no due date)
     expect(t.scorable).toBe(2);
-    expect(t.rows[0]).toMatchObject({ demandId: i1 });
+    expect(t.rows[0]).toMatchObject({ caseId: i1 });
     expect(t.partial!.unmapped.map((w) => w.id)).toEqual([wf2]); // WF2 still unmapped
   });
 
@@ -245,11 +245,11 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
   // instances: completed baseline pair, an at-risk open one, a predicted-late open one, an on-time open one
   const c1 = newId(), c2 = newId(), aRisk = newId(), pLate = newId(), onT = newId();
 
-  async function ev2(demandId: string, key: string, businessAt: Date, opts: { payload?: Record<string, unknown> } = {}) {
+  async function ev2(caseId: string, key: string, businessAt: Date, opts: { payload?: Record<string, unknown> } = {}) {
     await prisma.eventLog.create({
       data: {
         id: newId(), eventName: key, eventRef: REF(key), boundedContext: "Sales", aggregateRoot: "Demand",
-        aggregateId: newId(), demandId, role: ROLE[key] ?? "Planner", payload: JSON.stringify(opts.payload ?? {}),
+        aggregateId: newId(), caseId, role: ROLE[key] ?? "Planner", payload: JSON.stringify(opts.payload ?? {}),
         occurredAt: now, businessAt, provenance: "live", organizationId: org2, workflowId: wf3,
       },
     });
@@ -310,7 +310,7 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
     expect(p.workflows.find((w) => w.id === wf3)!.atRisk).toBe(1);
     expect(p.northStar.atRisk).toBe(1);
     const ex = p.exceptions.find((x) => x.kind === "at_risk")!;
-    expect(ex.demandId).toBe(aRisk);
+    expect(ex.caseId).toBe(aRisk);
     expect(ex.severity).toBe(4); // ranks above rework/soft-fail/aging
   });
 
@@ -321,7 +321,7 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
     expect(t.overdue).toBe(0); // nothing past due yet
     expect(t.predictedLate).toBe(1); // pLate: due in 1d, ~2d of work remains
     expect(t.onTime).toBe(1); // onT: due in 10d
-    const row = t.rows.find((r) => r.demandId === pLate)!;
+    const row = t.rows.find((r) => r.caseId === pLate)!;
     expect(row.kind).toBe("predicted");
     expect(row.predictedFinish).toBeTruthy();
   });

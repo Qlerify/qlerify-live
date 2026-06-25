@@ -36,7 +36,7 @@
 // run the planner, skip events already in the log, and emit the rest.
 
 import { prisma } from "../db.js";
-import { emit, withScope } from "../events/bus.js";
+import { emit } from "../events/bus.js";
 import { setBusinessClock } from "../events/clock.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
@@ -358,15 +358,21 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
       if (!preview) {
         setBusinessClock(e.businessAt);
         try {
-          await withScope(e.aggregateId, () =>
-            emit({
-              ref: e.ref,
-              aggregateId: e.aggregateId,
-              role: e.role,
-              payload: e.payload,
-              ...(e.provenance ? { provenance: e.provenance } : {}),
-            }),
-          );
+          // No withScope here: emit() correlates the case itself, so an aggregate
+          // the workflow moved into (an Order carrying its accountId, say) inherits
+          // the case of the aggregate it references instead of starting a new one.
+          // The row's FK columns are in e.payload (buildPayload keeps them), and
+          // linearOrder guarantees the referenced parent's events are already
+          // logged by the time we reach the child.
+          await emit({
+            ref: e.ref,
+            aggregateId: e.aggregateId,
+            role: e.role,
+            payload: e.payload,
+            ...(e.provenance ? { provenance: e.provenance } : {}),
+            evidenceKind: plan.kind,
+            evidence: e.evidence,
+          });
         } finally {
           setBusinessClock(null);
         }

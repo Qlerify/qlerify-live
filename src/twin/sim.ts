@@ -146,7 +146,7 @@ function objectFieldValue(ef: EntitySchema["fields"][number], ont: Ontology): un
 /** Map aggregateRoot → its instance id already created in this run (from the log). */
 async function runInstances(scopeId: string): Promise<Map<string, string>> {
   const rows = await prisma.eventLog.findMany({
-    where: { demandId: scopeId, ...eventLogOrgWhere() },
+    where: { caseId: scopeId, ...eventLogOrgWhere() },
     select: { aggregateRoot: true, aggregateId: true },
     orderBy: { occurredAt: "asc" },
   });
@@ -223,7 +223,7 @@ export async function genericCurrentStep(instanceId: string): Promise<{ index: n
   const ont = getOntology();
   const order = ont.linearOrder();
   const fired = new Set(
-    (await prisma.eventLog.findMany({ where: { demandId: instanceId, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } })).map((r) => r.eventRef),
+    (await prisma.eventLog.findMany({ where: { caseId: instanceId, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } })).map((r) => r.eventRef),
   );
   for (let i = 0; i < order.length; i++) {
     const ev = ont.eventByKey(order[i]!)!;
@@ -255,7 +255,7 @@ export async function genericStep(instanceId: string): Promise<SimStepResult> {
     await prisma.eventLog.create({
       data: {
         eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
-        aggregateRoot: event.aggregateRoot, aggregateId: "", demandId: instanceId,
+        aggregateRoot: event.aggregateRoot, aggregateId: "", caseId: instanceId,
         role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
         provenance: await provenanceFor(event.boundedContext),
         organizationId: currentOrgId(),
@@ -279,7 +279,7 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
   }
   // Also delete child rows created in this run (from the log's aggregateIds).
   const rows = await prisma.eventLog.findMany({
-    where: { demandId: instanceId, ...eventLogOrgWhere() },
+    where: { caseId: instanceId, ...eventLogOrgWhere() },
     select: { aggregateRoot: true, aggregateId: true },
   });
   const seen = new Set<string>();
@@ -292,7 +292,7 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
       if (await store.tableExists(r.aggregateRoot)) await store.deleteById(r.aggregateRoot, r.aggregateId);
     } catch { /* one bad row must not abort the whole delete */ }
   }
-  await prisma.eventLog.deleteMany({ where: { demandId: instanceId, ...eventLogOrgWhere() } });
+  await prisma.eventLog.deleteMany({ where: { caseId: instanceId, ...eventLogOrgWhere() } });
 }
 
 /** Clear all runs: every projection row + the whole event log. */
@@ -311,8 +311,8 @@ export async function genericListInstances(): Promise<any[]> {
   const out: any[] = [];
   for (const row of rows) {
     const id = String(row.id);
-    const progressRows = await prisma.eventLog.findMany({ where: { demandId: id, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } });
-    const last = await prisma.eventLog.findFirst({ where: { demandId: id, ...eventLogOrgWhere() }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
+    const progressRows = await prisma.eventLog.findMany({ where: { caseId: id, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } });
+    const last = await prisma.eventLog.findFirst({ where: { caseId: id, ...eventLogOrgWhere() }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
     out.push({ ...row, progress: progressRows.length, total, lastEvent: last });
   }
   return out;
@@ -322,7 +322,7 @@ export async function genericListInstances(): Promise<any[]> {
 export async function genericInstanceDetail(instanceId: string): Promise<any> {
   const ont = getOntology();
   const rootRow = (await store.tableExists(ont.rootAggregate)) ? await store.findById(ont.rootAggregate, instanceId) : null;
-  const events = await prisma.eventLog.findMany({ where: { demandId: instanceId, ...eventLogOrgWhere() }, orderBy: { occurredAt: "asc" } });
+  const events = await prisma.eventLog.findMany({ where: { caseId: instanceId, ...eventLogOrgWhere() }, orderBy: { occurredAt: "asc" } });
   // Rows created in this run, grouped by aggregate (from the log's aggregateIds).
   const byAgg: Record<string, any[]> = {};
   const seen = new Map<string, Set<string>>();

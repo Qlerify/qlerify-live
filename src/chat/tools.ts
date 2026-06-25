@@ -1,6 +1,6 @@
 // Tools exposed to the LLM. Each maps onto an existing internal handler or
 // a small read against the DB / event log. Write tools (next_step,
-// create_demand) require an explicit `confirmed: true` argument — that check
+// create_case) require an explicit `confirmed: true` argument — that check
 // is enforced both in the tool handler here AND in the system prompt's
 // confirmation policy.
 
@@ -23,7 +23,7 @@ import { ingestPull } from "../packs/ingest.js";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
-    name: "list_demands",
+    name: "list_cases",
     description:
       "List every instance (run) currently in the simulator with its status, progress (steps fired of total), and dwellSeconds (real wall-clock idleness since the last event). Use this whenever the user asks 'how many are…', 'which ones…', 'show me everything', or needs an overview.",
     input_schema: {
@@ -32,13 +32,13 @@ export const TOOLS: Anthropic.Tool[] = [
         olderThanSeconds: {
           type: "number",
           description:
-            "Optional filter — only return demands whose dwellSeconds is at least this value. Use for 'stalled', 'stuck', 'haven't moved in N seconds/minutes' queries.",
+            "Optional filter — only return cases whose dwellSeconds is at least this value. Use for 'stalled', 'stuck', 'haven't moved in N seconds/minutes' queries.",
         },
       },
     },
   },
   {
-    name: "find_demand",
+    name: "find_case",
     description:
       "Resolve a human description of an instance to its id. Matches against any field on the instance's root aggregate row. Returns one or more matching summaries. Use this when the user references an instance by description rather than by id.",
     input_schema: {
@@ -53,28 +53,28 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: "get_demand_details",
+    name: "get_case_details",
     description:
       "Return the full per-instance state: the root aggregate row, the events that have fired, and the rows created across the run grouped by aggregate. Use when the user asks 'what's the state of X' or wants to see specific fields on an instance's aggregates.",
     input_schema: {
       type: "object",
       properties: {
-        demandId: { type: "string", description: "The instance id." },
+        caseId: { type: "string", description: "The instance id." },
       },
-      required: ["demandId"],
+      required: ["caseId"],
     },
   },
   {
     name: "get_event_log",
     description:
-      "Return the events that have fired for a demand, newest-first, with their business timestamps. Use when the user asks 'what's happened so far' or 'when did X fire'.",
+      "Return the events that have fired for a case, newest-first, with their business timestamps. Use when the user asks 'what's happened so far' or 'when did X fire'.",
     input_schema: {
       type: "object",
       properties: {
-        demandId: { type: "string", description: "Required — the demand id." },
+        caseId: { type: "string", description: "Required — the case id." },
         limit: { type: "number", description: "Max events to return (default 50)." },
       },
-      required: ["demandId"],
+      required: ["caseId"],
     },
   },
   {
@@ -95,13 +95,13 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_current_step",
     description:
-      "Return the next-step-to-fire for a demand. Pairs with 'next_step' for 'what happens if I click step forward on demand X?' questions.",
+      "Return the next-step-to-fire for a case. Pairs with 'next_step' for 'what happens if I click step forward on case X?' questions.",
     input_schema: {
       type: "object",
       properties: {
-        demandId: { type: "string" },
+        caseId: { type: "string" },
       },
-      required: ["demandId"],
+      required: ["caseId"],
     },
   },
   {
@@ -111,17 +111,17 @@ export const TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: "object",
       properties: {
-        demandId: { type: "string" },
+        caseId: { type: "string" },
         confirmed: {
           type: "boolean",
           description: "Must be `true`, set only after the user has explicitly confirmed the action.",
         },
       },
-      required: ["demandId", "confirmed"],
+      required: ["caseId", "confirmed"],
     },
   },
   {
-    name: "create_demand",
+    name: "create_case",
     description:
       "WRITE — Create a new instance of the loaded model (instantiates its root aggregate). Requires explicit user confirmation: summarize what will be created, ask 'Shall I proceed?', wait for yes, then call with `confirmed: true`.",
     input_schema: {
@@ -358,22 +358,22 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
   const args = (input ?? {}) as Record<string, any>;
   try {
     switch (name) {
-      case "list_demands":
-        return ok(await handleListDemands(args.olderThanSeconds));
-      case "find_demand":
-        return ok(await handleFindDemand(String(args.query ?? "")));
-      case "get_demand_details":
-        return ok(await handleGetDemandDetails(String(args.demandId ?? "")));
+      case "list_cases":
+        return ok(await handleListCases(args.olderThanSeconds));
+      case "find_case":
+        return ok(await handleFindCase(String(args.query ?? "")));
+      case "get_case_details":
+        return ok(await handleGetCaseDetails(String(args.caseId ?? "")));
       case "get_event_log":
-        return ok(await handleGetEventLog(String(args.demandId ?? ""), Number(args.limit ?? 50)));
+        return ok(await handleGetEventLog(String(args.caseId ?? ""), Number(args.limit ?? 50)));
       case "get_workflow_step":
         return ok(handleGetWorkflowStep(Number(args.index)));
       case "get_current_step":
-        return ok(await handleGetCurrentStep(String(args.demandId ?? "")));
+        return ok(await handleGetCurrentStep(String(args.caseId ?? "")));
       case "next_step":
         return await handleNextStep(args);
-      case "create_demand":
-        return await handleCreateDemand(args);
+      case "create_case":
+        return await handleCreateCase(args);
       case "list_adapters":
         return ok(handleListAdapters());
       case "get_adapter_config":
@@ -420,7 +420,7 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
 // Read handlers
 // ---------------------------------------------------------------------------
 
-async function handleListDemands(olderThanSeconds?: number) {
+async function handleListCases(olderThanSeconds?: number) {
   const now = Date.now();
   const instances = await genericListInstances();
   const out = instances
@@ -431,10 +431,10 @@ async function handleListDemands(olderThanSeconds?: number) {
       return { ...row, lastEventName: lastEvent?.eventName ?? null, dwellSeconds };
     })
     .filter((row: any) => olderThanSeconds == null || (row.dwellSeconds ?? 0) >= olderThanSeconds);
-  return { demands: out, count: out.length, threshold: olderThanSeconds ?? null };
+  return { cases: out, count: out.length, threshold: olderThanSeconds ?? null };
 }
 
-async function handleFindDemand(query: string) {
+async function handleFindCase(query: string) {
   const q = query.toLowerCase().trim();
   if (!q) return { matches: [] };
   const toks = q.split(/\s+/);
@@ -452,20 +452,20 @@ async function handleFindDemand(query: string) {
   };
 }
 
-async function handleGetDemandDetails(demandId: string) {
-  const detail = await genericInstanceDetail(demandId);
-  if (!detail.root) return { error: `no instance ${demandId}` };
+async function handleGetCaseDetails(caseId: string) {
+  const detail = await genericInstanceDetail(caseId);
+  if (!detail.root) return { error: `no instance ${caseId}` };
   return detail;
 }
 
-async function handleGetEventLog(demandId: string, limit: number) {
+async function handleGetEventLog(caseId: string, limit: number) {
   const log = await prisma.eventLog.findMany({
-    where: { demandId },
+    where: { caseId },
     orderBy: { occurredAt: "desc" },
     take: limit,
     select: { eventName: true, eventRef: true, boundedContext: true, role: true, businessAt: true, occurredAt: true },
   });
-  return { demandId, events: log };
+  return { caseId, events: log };
 }
 
 function handleGetWorkflowStep(index1Based: number) {
@@ -489,12 +489,12 @@ function handleGetWorkflowStep(index1Based: number) {
   };
 }
 
-async function handleGetCurrentStep(demandId: string) {
-  const { index, total } = await genericCurrentStep(demandId);
-  if (index >= total) return { demandId, done: true, completedSteps: total };
+async function handleGetCurrentStep(caseId: string) {
+  const { index, total } = await genericCurrentStep(caseId);
+  if (index >= total) return { caseId, done: true, completedSteps: total };
   const e = EVENTS[index]!;
   return {
-    demandId,
+    caseId,
     nextStep: index + 1,
     name: e.name,
     boundedContext: e.boundedContext,
@@ -511,9 +511,9 @@ async function handleNextStep(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. You must obtain an explicit user confirmation first, then call again with confirmed=true.");
   }
-  const demandId = String(args.demandId ?? "");
-  if (!demandId) return err("demandId required");
-  const result = await genericStep(demandId);
+  const caseId = String(args.caseId ?? "");
+  if (!caseId) return err("caseId required");
+  const result = await genericStep(caseId);
   return ok({
     stepFired: result.index + 1,
     eventName: result.eventName,
@@ -522,12 +522,12 @@ async function handleNextStep(args: Record<string, any>) {
   });
 }
 
-async function handleCreateDemand(args: Record<string, any>) {
+async function handleCreateCase(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. You must obtain an explicit user confirmation first, then call again with confirmed=true.");
   }
   const result = await genericNewInstance();
-  return ok({ demandId: result.id, aggregate: result.aggregate });
+  return ok({ caseId: result.id, aggregate: result.aggregate });
 }
 
 // ---------------------------------------------------------------------------

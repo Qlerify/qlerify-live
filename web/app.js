@@ -107,6 +107,14 @@ const state = {
   prevInstance: null, // the instance snapshot before the last step (per-run diff)
   log: [],
   currentIndex: 0,
+  // Refs whose ×N fired-count badge is expanded into one row per firing on the
+  // timeline (push-down reflow). Persists across Step forward within a run;
+  // cleared when a different case is loaded.
+  expandedFirings: new Set(),
+  // The one model event currently "split into branches": the shared spine runs
+  // up to it, then the downstream fans out into one full branch per execution
+  // (an FK-threaded instance tree). null = no split. Cleared on case switch.
+  splitRef: null,
   // per-BC adapter workbench (Part 2.3)
   bc: null,           // current bounded context (#bc/<Name>)
   bcList: null,       // /api/bc index
@@ -2596,6 +2604,9 @@ async function loadDetail() {
   // Keep the pre-step instance so the detail view can mark what this step
   // changed. Only diff within the same run — switching runs starts clean.
   state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
+  // New run (not just a step within the same run) → collapse any expanded
+  // fired-count badges and any active branch split so the next case starts clean.
+  if (state.prevInstance === null) { state.expandedFirings = new Set(); state.splitRef = null; }
   state.instance = instance;
   state.events = events;
   // newest-first so lastEventInline() / businessByStep read the latest first
@@ -2687,17 +2698,43 @@ function firedCountMap() {
   return counts;
 }
 
+// All firings of each event ref for the loaded case, oldest → newest. state.log
+// is newest-first, so prepending while iterating yields chronological order.
+// Each entry keeps its own businessAt/payload/evidence, so an expanded card can
+// give every firing its own row.
+function firingsByRefMap() {
+  const m = new Map(); // ref → [entry, …] oldest→newest
+  for (const entry of state.log || []) {
+    if (!m.has(entry.eventRef)) m.set(entry.eventRef, []);
+    m.get(entry.eventRef).unshift(entry);
+  }
+  return m;
+}
+
+// Rendered height (px) of a card whose ×N badge is expanded into one row per
+// firing. A header band (context/name/role + paddings) plus a slim row per
+// firing; the lane reflow uses this to push lower lanes down. Always taller than
+// a collapsed card (cardH 104) for any n ≥ 2.
+const FIRING_ROW_H = 16;
+function expandedCardHeight(n) {
+  return 84 + n * FIRING_ROW_H + 26; // +26 leaves room for the "Split into branches" button
+}
+
 // High-salience corner badge: a filled emerald bubble overlapping the card's
 // top-right corner, showing "×N" when an event fired more than once for this
 // case. Rendered as a SIBLING of the cards (not a child) so it can overhang the
 // card edge — the card itself clips children via overflow-hidden. (cx, cy) is the
 // card's top-right corner in the flow container; the translate centres the bubble
 // on that point. Hidden at 1 so the common single-firing case stays clean.
-function firedCountBadge(n, cx, cy) {
+// Clickable: toggles per-firing expansion for `ref` (push-down reflow). When
+// open it reads as pressed (amber ring) so the affordance to collapse is clear.
+function firedCountBadge(ref, n, cx, cy, isOpen) {
   if (!n || n <= 1) return "";
-  return `<div class="absolute z-10 flex items-center justify-center rounded-full bg-emerald-500 text-white text-[9px] font-bold leading-none shadow ring-2 ring-white"
+  const ring = isOpen ? "ring-amber-400" : "ring-white";
+  return `<div data-toggle-firings="${ref}" role="button" tabindex="0"
+       class="absolute z-10 flex items-center justify-center rounded-full bg-emerald-500 text-white text-[9px] font-bold leading-none shadow ring-2 ${ring} cursor-pointer hover:bg-emerald-600"
        style="left:${cx}px; top:${cy}px; transform:translate(-50%,-50%); min-width:20px; height:18px; padding:0 5px;"
-       title="Fired ${n}× for this case">×${n}</div>`;
+       title="${isOpen ? "Click to collapse" : "Fired " + n + "× for this case — click to expand each firing into its own row"}">×${n}</div>`;
 }
 
 // Readable business date. Rendered in UTC so it's stable regardless of the
@@ -2815,6 +2852,106 @@ function computeFlowLayout(events) {
 // SVG underneath can use exact coordinates; the column/row pitch leaves a gutter
 // for the connectors between cards.
 const FLOW = { cardW: 176, cardH: 104, colPitch: 224, rowPitch: 148 };
+// Denser geometry for the branched (split) view: many executions stack
+// vertically, so rows are tight and the container scrolls.
+const SPLIT_FLOW = { cardW: 184, cardH: 72, colPitch: 212, rowPitch: 86 };
+
+// ---------------------------------------------------------------------------
+// Branch split — turn the firings of a "split" model event into one full branch
+// per execution. Each firing of the split event is a branch root; downstream
+// firings thread onto it by FK ancestry (a payload field pointing back to a
+// parent aggregate) or by sharing an aggregateId (same entity, a later step).
+// The result is an instance forest: roots = executions, depth follows the real
+// parent→child fan-out (Org → its Projects → their Workflows). See twin/
+// correlate.ts for the server-side cousin of this FK heuristic.
+// ---------------------------------------------------------------------------
+
+// Parse a log entry's JSON payload defensively (returns {} on bad/empty data).
+function parsePayload(s) {
+  try { const o = JSON.parse(s ?? "null"); return o && typeof o === "object" ? o : {}; }
+  catch { return {}; }
+}
+
+// Per-firing records for the loaded case, oldest→newest, each tagged with its
+// model column (from the flow layout) and its cross-aggregate FK parent id (the
+// payload field — other than its own id — whose value is another firing's
+// aggregateId; *Id-suffixed fields win, mirroring the simulator's FK-by-name).
+function caseFirings(layout) {
+  const log = (state.log || []).slice().reverse(); // chronological
+  const firings = log.map((e, i) => ({
+    i,
+    ref: e.eventRef,
+    aggId: e.aggregateId || "",
+    payload: parsePayload(e.payload),
+    businessAt: e.businessAt,
+    col: layout.place.get(e.eventRef)?.col ?? 0,
+  }));
+  const aggIds = new Set(firings.map((f) => f.aggId).filter(Boolean));
+  for (const f of firings) {
+    let fk = null;
+    const keys = Object.keys(f.payload)
+      .filter((k) => k !== "id")
+      .sort((a, b) => (b.endsWith("Id") ? 1 : 0) - (a.endsWith("Id") ? 1 : 0));
+    for (const k of keys) {
+      const v = f.payload[k];
+      if (typeof v === "string" && v && v !== f.aggId && aggIds.has(v)) { fk = v; break; }
+    }
+    f.parentAgg = fk;
+  }
+  return firings;
+}
+
+// Forest of instance nodes rooted at the firings of `splitRef`. A firing in the
+// split subtree (col ≥ the split column) attaches to: its own earlier firing on
+// the same aggregate (same entity, prior step) if any; else the firing that owns
+// its FK parent. Anything that resolves outside the subtree becomes a root.
+function buildBranchForest(splitRef, layout, firings) {
+  const splitCol = layout.place.get(splitRef)?.col ?? 0;
+  const sub = firings.filter((f) => f.col >= splitCol);
+
+  // Earliest firing per aggregate (for FK parent resolution) and same-aggregate
+  // ordering (for the "later step on the same entity" chain).
+  const firstByAgg = new Map();
+  for (const f of firings) if (f.aggId && !firstByAgg.has(f.aggId)) firstByAgg.set(f.aggId, f);
+  const byAgg = new Map();
+  for (const f of sub) { if (!byAgg.has(f.aggId)) byAgg.set(f.aggId, []); byAgg.get(f.aggId).push(f); }
+  for (const arr of byAgg.values()) arr.sort((a, b) => a.col - b.col || a.i - b.i);
+
+  const nodeOf = new Map(sub.map((f) => [f, { f, children: [] }]));
+  const roots = [];
+  for (const f of sub) {
+    const node = nodeOf.get(f);
+    let parent = null;
+    const chain = byAgg.get(f.aggId);
+    const pos = chain.indexOf(f);
+    if (pos > 0) parent = chain[pos - 1];                       // same entity, earlier step
+    else if (f.parentAgg) {                                     // cross-aggregate FK
+      const p = firstByAgg.get(f.parentAgg);
+      if (p && p.col >= splitCol) parent = p;
+    }
+    if (parent && nodeOf.has(parent) && parent !== f) nodeOf.get(parent).children.push(node);
+    else roots.push(node);
+  }
+  return { roots, splitCol };
+}
+
+// Assign a row to every node: leaves take successive rows, a parent centres on
+// its children. Children are ordered by business time so branches read top-down
+// in the order they happened. Returns the total row count.
+function layoutForestRows(roots) {
+  const byTime = (a, b) => (a.f.businessAt || 0) - (b.f.businessAt || 0);
+  const sortKids = (n) => { n.children.sort(byTime); n.children.forEach(sortKids); };
+  roots.sort(byTime);
+  roots.forEach(sortKids);
+  let r = 0;
+  const assign = (n) => {
+    if (!n.children.length) { n.row = r++; return; }
+    n.children.forEach(assign);
+    n.row = (n.children[0].row + n.children[n.children.length - 1].row) / 2;
+  };
+  roots.forEach(assign);
+  return r;
+}
 
 function timeline() {
   const total = state.events.length;
@@ -2830,9 +2967,38 @@ function timeline() {
   let prevBizIso = null;
 
   const layout = computeFlowLayout(state.events);
+
+  // Branch split takes over the whole flow area: the shared spine up to the
+  // split event, then one full branch per execution downstream. Only honoured
+  // while that event actually fired more than once for this case.
+  if (state.splitRef && (firedCounts.get(state.splitRef) || 0) > 1) {
+    return splitTimelineView(layout, state.splitRef, firedCounts);
+  }
+
   const { cardW, cardH, colPitch, rowPitch } = FLOW;
+
+  // Per-firing expansion (push-down reflow): a ×N badge the user clicked grows
+  // its card downward into one row per firing, and the lanes below it shift down
+  // to clear it. The reflow is driven by per-lane heights — a lane is as tall as
+  // its tallest card, and each lane's Y is the cumulative height of those above
+  // plus the usual gutter. With nothing expanded this is exactly the old uniform
+  // rowPitch grid, so linear/collapsed flows are byte-identical.
+  const expandedSet = state.expandedFirings || new Set();
+  const firingsByRef = firingsByRefMap();
+  const laneGap = rowPitch - cardH; // gutter between lanes in the original grid
+  const isExpanded = (ref) => expandedSet.has(ref) && (firedCounts.get(ref) || 0) > 1;
+  const cardHeightFor = (ref) => isExpanded(ref) ? expandedCardHeight(firedCounts.get(ref)) : cardH;
+
+  const laneHeight = Array.from({ length: layout.lanes }, () => cardH);
+  for (const e of state.events) {
+    const pos = layout.place.get(e.ref);
+    if (pos) laneHeight[pos.lane] = Math.max(laneHeight[pos.lane], cardHeightFor(e.ref));
+  }
+  const laneTop = [];
+  for (let L = 0, acc = 0; L < layout.lanes; L++) { laneTop[L] = acc; acc += laneHeight[L] + laneGap; }
+
   const W = (layout.cols - 1) * colPitch + cardW;
-  const H = (layout.lanes - 1) * rowPitch + cardH;
+  const H = layout.lanes ? laneTop[layout.lanes - 1] + laneHeight[layout.lanes - 1] : cardH;
 
   // The most-recently-fired step (highest linear index that fired) — the cursor
   // we ring as "latest", replacing the old contiguous currentIndex-1.
@@ -2851,6 +3017,7 @@ function timeline() {
     // Every fired step is done → green. (No contiguous-frontier exclusion: a
     // derived run's fired set has gaps, and each fired box should read as done.)
     const isPast = fired;
+    const open = isExpanded(e.ref);
 
     const bizIso = biz.get(e.ref);
     const bizLabel = fired ? fmtBizDate(bizIso) : null;
@@ -2863,9 +3030,36 @@ function timeline() {
     // Each step's source mode = its bounded context's configured mode.
     const provMode = provModeForBC(e.boundedContext);
 
+    // Expanded: one row per firing (chronological), each with its own business
+    // date and the gap since the previous firing of THIS event. Collapsed: the
+    // original single-date footer.
+    let footer = "";
+    if (open) {
+      let prevIso = null;
+      const rows = (firingsByRef.get(e.ref) || []).map((f, k) => {
+        const d = fmtBizDate(f.businessAt) ?? "—";
+        const g = prevIso && f.businessAt ? minutesBetween(prevIso, f.businessAt) : null;
+        if (f.businessAt) prevIso = f.businessAt;
+        const gt = g != null && g >= 10 * 1440 ? "text-amber-700 font-semibold" : "text-stone-500";
+        return `<div class="flex items-baseline justify-between gap-1 leading-none py-0.5">
+            <span class="text-stone-700"><span class="text-stone-400 tabular-nums mr-1">${k + 1}.</span><span class="mono font-medium">${d}</span></span>
+            ${g != null && g > 0 ? `<span class="${gt}">${fmtGap(g)}</span>` : ""}
+          </div>`;
+      }).join("");
+      footer = `<div class="mt-1.5 pt-1.5 border-t border-stone-100 flex-1 min-h-0 overflow-y-auto text-[10px]">${rows}</div>
+        <button data-split-ref="${e.ref}" title="Give each execution its own full box and branch downstream"
+          class="mt-1 shrink-0 w-full text-[9px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded px-1 py-0.5 leading-none">⑂ Split into ${firedCounts.get(e.ref)} branches</button>`;
+    } else if (fired) {
+      footer = `
+          <div class="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
+            <span class="text-stone-700 font-medium mono">${bizLabel ?? "—"}</span>
+            ${gapMin != null && gapMin > 0 ? `<span class="${gapTone}">${fmtGap(gapMin)}</span>` : ""}
+          </div>`;
+    }
+
     return `
       <div data-step="${i}" class="absolute rounded-md border ${isPast ? "border-emerald-200" : phaseBorder} ${ringClass} ${isPast ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
-           style="left:${pos.col * colPitch}px; top:${pos.lane * rowPitch}px; width:${cardW}px; height:${cardH}px; ${provHatch(provMode)}">
+           style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardHeightFor(e.ref)}px; ${provHatch(provMode)}">
         <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
           <span class="truncate">${i+1}. ${e.boundedContext}</span>
           <span class="flex items-center gap-1 shrink-0">
@@ -2875,34 +3069,32 @@ function timeline() {
         </div>
         <div class="text-[12px] font-medium leading-tight text-stone-800">${e.name}</div>
         <div class="text-[10px] text-stone-500 mt-1">${e.role}</div>
-        ${fired ? `
-          <div class="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
-            <span class="text-stone-700 font-medium mono">${bizLabel ?? "—"}</span>
-            ${gapMin != null && gapMin > 0 ? `<span class="${gapTone}">${fmtGap(gapMin)}</span>` : ""}
-          </div>
-        ` : ""}
+        ${footer}
       </div>
     `;
   }).join("");
 
   // Fired-count badges as a separate overlay layer: each bubble overhangs its
   // card's top-right corner, so it must live alongside the cards in the (non-
-  // clipping) flow container rather than inside the overflow-hidden card.
+  // clipping) flow container rather than inside the overflow-hidden card. The
+  // badge is the click target that toggles this card's expansion.
   const badges = state.events.map((e, i) => {
     const n = firedCounts.get(e.ref) || 0;
     if (n <= 1) return "";
     const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
-    return firedCountBadge(n, pos.col * colPitch + cardW, pos.lane * rowPitch);
+    return firedCountBadge(e.ref, n, pos.col * colPitch + cardW, laneTop[pos.lane], isExpanded(e.ref));
   }).join("");
 
   // Connectors: a smooth S-curve from each predecessor's right edge to the
-  // event's left edge. Edges whose target has fired are drawn dark; pending
-  // edges stay faint, so the lit path tracks how far the run has progressed.
+  // event's left edge. Anchored to each card's header band (top + cardH/2) so an
+  // expanded card growing downward doesn't drag its edges off the header line.
+  // Edges whose target has fired are drawn dark; pending edges stay faint, so
+  // the lit path tracks how far the run has progressed.
   const paths = layout.edges.map(({ from, to }) => {
     const a = layout.place.get(from), b = layout.place.get(to);
     if (!a || !b) return "";
-    const sx = a.col * colPitch + cardW, sy = a.lane * rowPitch + cardH / 2;
-    const ex = b.col * colPitch,         ey = b.lane * rowPitch + cardH / 2;
+    const sx = a.col * colPitch + cardW, sy = laneTop[a.lane] + cardH / 2;
+    const ex = b.col * colPitch,         ey = laneTop[b.lane] + cardH / 2;
     const dx = Math.max(24, (ex - sx) * 0.5);
     const fired = firedRefs.has(to); // edge lit when its target event has fired (gap-safe)
     return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${fired ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
@@ -2918,19 +3110,9 @@ function timeline() {
           ${paths}
         </svg>` : "";
 
-  const prov = state.meta.provenance;
-  const legend = `
-      <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
-        ${prov ? `
-        <span class="font-semibold text-stone-600">${prov.steps.real} of ${prov.steps.total} steps from a real source</span>
-        <span class="flex items-center gap-1">${provChip("live")} live</span>
-        <span class="flex items-center gap-1">${provChip("recorded")} recorded</span>
-        <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>` : ""}
-        ${lastEventInline()}
-      </div>`;
   return `
     <section class="border-b border-stone-200 bg-stone-50">
-      ${legend}
+      ${timelineLegend()}
       <div id="timeline-scroll" class="px-6 py-3 overflow-x-auto">
         <div style="width:${W}px;">
           <div class="relative" style="width:${W}px; height:${H}px;">
@@ -2941,6 +3123,127 @@ function timeline() {
           <div class="h-1 bg-stone-200 rounded overflow-hidden mt-3" style="width:${W}px;">
             <div class="h-1 bg-amber-400 transition-all duration-300" style="width:${pct}%"></div>
           </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+// Provenance legend + "last event" strip shared by the flow and branch views.
+function timelineLegend() {
+  const prov = state.meta.provenance;
+  return `
+      <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
+        ${prov ? `
+        <span class="font-semibold text-stone-600">${prov.steps.real} of ${prov.steps.total} steps from a real source</span>
+        <span class="flex items-center gap-1">${provChip("live")} live</span>
+        <span class="flex items-center gap-1">${provChip("recorded")} recorded</span>
+        <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>` : ""}
+        ${lastEventInline()}
+      </div>`;
+}
+
+// Branch view: the shared spine up to the split event, then one full branch per
+// execution downstream (the FK-threaded instance forest from buildBranchForest).
+// Stacks vertically and scrolls — there can be many executions.
+function splitTimelineView(layout, splitRef, firedCounts) {
+  const { cardW, cardH, colPitch, rowPitch } = SPLIT_FLOW;
+  const eventByRef = new Map(state.events.map((e) => [e.ref, e]));
+  const splitEvent = eventByRef.get(splitRef);
+  const splitName = splitEvent ? splitEvent.name : splitRef.split("/").pop();
+
+  const firings = caseFirings(layout);
+  const { roots, splitCol } = buildBranchForest(splitRef, layout, firings);
+  const totalRows = Math.max(1, layoutForestRows(roots));
+
+  // Flatten the forest into positioned boxes + parent→child edges.
+  const fnodes = [];
+  const fedges = [];
+  const walk = (n) => { fnodes.push(n); for (const c of n.children) { fedges.push([n, c]); walk(c); } };
+  roots.forEach(walk);
+
+  // Spine = events left of the split column, kept on one shared row centred
+  // against the fan. The right-most spine event feeds every branch root.
+  const spineRow = (totalRows - 1) / 2;
+  const spineEvents = state.events
+    .filter((e) => (layout.place.get(e.ref)?.col ?? 0) < splitCol)
+    .map((e) => ({ e, col: layout.place.get(e.ref).col }))
+    .sort((a, b) => a.col - b.col);
+  const feeder = spineEvents[spineEvents.length - 1] || null;
+
+  const maxCol = Math.max(splitCol, ...fnodes.map((n) => n.f.col), ...spineEvents.map((s) => s.col));
+  const W = maxCol * colPitch + cardW;
+  const H = totalRows * rowPitch;
+  const xOf = (col) => col * colPitch;
+  const yOf = (row) => row * rowPitch + (rowPitch - cardH) / 2;
+  const rEdge = (col) => xOf(col) + cardW;
+  const midY = (row) => yOf(row) + cardH / 2;
+  const curve = (sx, sy, ex, ey, stroke) => {
+    const dx = Math.max(20, (ex - sx) * 0.5);
+    return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${stroke}" stroke-width="1.5" marker-end="url(#flow-arrow-split)"/>`;
+  };
+
+  // Each execution box: the model event it is, the entity's own name, its date.
+  const forestCards = fnodes.map((n) => {
+    const f = n.f;
+    const ev = eventByRef.get(f.ref);
+    const label = f.payload.name || f.payload.title || shortId(f.aggId);
+    const date = fmtBizDate(f.businessAt) ?? "—";
+    return `<div class="absolute rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 flex flex-col overflow-hidden shadow-sm"
+         style="left:${xOf(f.col)}px; top:${yOf(n.row)}px; width:${cardW}px; height:${cardH}px;">
+        <div class="text-[9px] text-stone-500 truncate">${ev ? escapeHtml(ev.name) : escapeHtml(f.ref.split("/").pop())}</div>
+        <div class="text-[11px] font-semibold leading-tight text-stone-800 truncate" title="${escapeHtml(String(label))}">${escapeHtml(String(label))}</div>
+        <div class="mt-auto text-[9px] text-stone-500 mono">${date}</div>
+      </div>`;
+  }).join("");
+
+  // Spine boxes: shared model steps, with a static ×N where the step fanned.
+  const spineCards = spineEvents.map(({ e, col }) => {
+    const n = firedCounts.get(e.ref) || 0;
+    const cnt = n > 1 ? `<span class="ml-1 text-emerald-700 font-bold">×${n}</span>` : "";
+    return `<div class="absolute rounded-md border border-stone-300 bg-white px-2.5 py-1.5 flex flex-col overflow-hidden"
+         style="left:${xOf(col)}px; top:${yOf(spineRow)}px; width:${cardW}px; height:${cardH}px;">
+        <div class="text-[9px] text-stone-500 truncate">${escapeHtml(e.boundedContext)}</div>
+        <div class="text-[11px] font-semibold leading-tight text-stone-800 truncate">${escapeHtml(e.name)}${cnt}</div>
+        <div class="mt-auto text-[9px] text-stone-400 truncate">${escapeHtml(e.role || "")}</div>
+      </div>`;
+  }).join("");
+
+  const fpaths = fedges.map(([p, c]) => curve(rEdge(p.f.col), midY(p.row), xOf(c.f.col), midY(c.row), "#34d399")).join("");
+  const spinePaths = spineEvents.slice(1).map((s, k) => {
+    const a = spineEvents[k]; // previous
+    return curve(rEdge(a.col), midY(spineRow), xOf(s.col), midY(spineRow), "#78716c");
+  }).join("");
+  const rootPaths = feeder
+    ? roots.map((rt) => curve(rEdge(feeder.col), midY(spineRow), xOf(rt.f.col), midY(rt.row), "#34d399")).join("")
+    : "";
+
+  const svg = `
+        <svg width="${W}" height="${H}" class="absolute top-0 left-0" style="pointer-events:none;">
+          <defs>
+            <marker id="flow-arrow-split" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e"/>
+            </marker>
+          </defs>
+          ${spinePaths}${rootPaths}${fpaths}
+        </svg>`;
+
+  const header = `
+      <div class="px-6 py-2 flex items-center gap-3 text-[11px] bg-emerald-50 border-b border-emerald-200">
+        <span class="font-semibold text-emerald-800">⑂ Branched by "${escapeHtml(splitName)}" — ${roots.length} execution${roots.length === 1 ? "" : "s"}</span>
+        <span class="text-stone-500">${fnodes.length} box${fnodes.length === 1 ? "" : "es"} · ${totalRows} branch row${totalRows === 1 ? "" : "s"}</span>
+        <button id="btn-merge-branches" class="ml-auto text-[11px] font-medium px-2.5 py-1 rounded-md border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-800">↩ Merge branches</button>
+      </div>`;
+
+  return `
+    <section class="border-b border-stone-200 bg-stone-50">
+      ${timelineLegend()}
+      ${header}
+      <div id="timeline-scroll" class="px-6 py-3 overflow-auto" style="max-height:72vh;">
+        <div class="relative" style="width:${W}px; height:${H}px;">
+          ${svg}
+          ${spineCards}
+          ${forestCards}
         </div>
       </div>
     </section>
@@ -3213,6 +3516,27 @@ function bindDetail() {
   document.getElementById("btn-next")?.addEventListener("click", doNext);
   document.getElementById("btn-all")?.addEventListener("click", doRunAll);
   document.getElementById("btn-reset")?.addEventListener("click", doReset);
+  // ×N fired-count badges: toggle per-firing expansion (push-down reflow). The
+  // expanded set persists across Step forward within a run; render() re-lays out.
+  document.querySelectorAll("[data-toggle-firings]").forEach((el) =>
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const ref = el.getAttribute("data-toggle-firings");
+      if (state.expandedFirings.has(ref)) state.expandedFirings.delete(ref);
+      else state.expandedFirings.add(ref);
+      render();
+    }));
+  // "Split into branches": fan this event's executions into full per-branch
+  // boxes. Collapse the row-expansion first so the flow doesn't fight the split.
+  document.querySelectorAll("[data-split-ref]").forEach((el) =>
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const ref = el.getAttribute("data-split-ref");
+      state.expandedFirings.delete(ref);
+      state.splitRef = ref;
+      render();
+    }));
+  document.getElementById("btn-merge-branches")?.addEventListener("click", () => { state.splitRef = null; render(); });
 }
 
 // ---------------------------------------------------------------------------

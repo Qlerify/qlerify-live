@@ -2676,6 +2676,30 @@ function firedRefSet() {
   return new Set((state.log || []).map((entry) => entry.eventRef));
 }
 
+// How many times each event ref fired for the loaded instance — one log entry
+// per firing, so an event replayed 10× (e.g. Project Created) maps to 10. Used
+// to surface a "×N" multiplier on the card without adding a row.
+function firedCountMap() {
+  const counts = new Map();
+  for (const entry of state.log || []) {
+    counts.set(entry.eventRef, (counts.get(entry.eventRef) || 0) + 1);
+  }
+  return counts;
+}
+
+// High-salience corner badge: a filled emerald bubble overlapping the card's
+// top-right corner, showing "×N" when an event fired more than once for this
+// case. Rendered as a SIBLING of the cards (not a child) so it can overhang the
+// card edge — the card itself clips children via overflow-hidden. (cx, cy) is the
+// card's top-right corner in the flow container; the translate centres the bubble
+// on that point. Hidden at 1 so the common single-firing case stays clean.
+function firedCountBadge(n, cx, cy) {
+  if (!n || n <= 1) return "";
+  return `<div class="absolute z-10 flex items-center justify-center rounded-full bg-emerald-500 text-white text-[9px] font-bold leading-none shadow ring-2 ring-white"
+       style="left:${cx}px; top:${cy}px; transform:translate(-50%,-50%); min-width:20px; height:18px; padding:0 5px;"
+       title="Fired ${n}× for this case">×${n}</div>`;
+}
+
 // Readable business date. Rendered in UTC so it's stable regardless of the
 // viewer's timezone (the businessAt value is a date carried in the event data).
 function fmtBizDate(iso) {
@@ -2800,6 +2824,7 @@ function timeline() {
   // not, leaving a gap), so colour each box by whether its own event is in the
   // log — every fired step then reads as done regardless of gaps.
   const firedRefs = firedRefSet();
+  const firedCounts = firedCountMap();
   const pct = total ? (firedRefs.size / total) * 100 : 0;
   const biz = businessByStep();
   let prevBizIso = null;
@@ -2860,6 +2885,16 @@ function timeline() {
     `;
   }).join("");
 
+  // Fired-count badges as a separate overlay layer: each bubble overhangs its
+  // card's top-right corner, so it must live alongside the cards in the (non-
+  // clipping) flow container rather than inside the overflow-hidden card.
+  const badges = state.events.map((e, i) => {
+    const n = firedCounts.get(e.ref) || 0;
+    if (n <= 1) return "";
+    const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
+    return firedCountBadge(n, pos.col * colPitch + cardW, pos.lane * rowPitch);
+  }).join("");
+
   // Connectors: a smooth S-curve from each predecessor's right edge to the
   // event's left edge. Edges whose target has fired are drawn dark; pending
   // edges stay faint, so the lit path tracks how far the run has progressed.
@@ -2901,6 +2936,7 @@ function timeline() {
           <div class="relative" style="width:${W}px; height:${H}px;">
             ${svg}
             ${cards}
+            ${badges}
           </div>
           <div class="h-1 bg-stone-200 rounded overflow-hidden mt-3" style="width:${W}px;">
             <div class="h-1 bg-amber-400 transition-all duration-300" style="width:${pct}%"></div>

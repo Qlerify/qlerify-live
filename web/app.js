@@ -1891,6 +1891,50 @@ async function selectExpEntity(name) {
   e.busy = false; render();
 }
 
+function expAdaptersForEntity(e) {
+  return (e.adapters || []).filter((a) => a.targetEntity === e.entity);
+}
+
+async function expFetchRows() {
+  const e = expState();
+  if (e.busy || !e.entity) return;
+  const adapters = expAdaptersForEntity(e);
+  if (!adapters.length) {
+    alert("No connector configured for this table. Open Connectors to build one first.");
+    return;
+  }
+  const adapter = adapters[0];
+  if (!confirm(`Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; rows with an id already in the table are skipped.`)) return;
+  e.busy = true; render();
+  try {
+    const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 1000 }) });
+    await selectExpEntity(e.entity);
+    await loadHealth();
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}`);
+  } catch (err) {
+    alert("Fetch failed: " + err.message);
+  } finally {
+    e.busy = false; render();
+  }
+}
+
+async function expClearRows() {
+  const e = expState();
+  if (e.busy || !e.entity || !e.system) return;
+  if (!confirm(`Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table only. Connectors and the event log are not removed.`)) return;
+  e.busy = true; render();
+  try {
+    const r = await api(`/api/bc/${encodeURIComponent(e.system)}/clear`, { method: "POST", body: JSON.stringify({ entity: e.entity }) });
+    await selectExpEntity(e.entity);
+    await loadHealth();
+    alert(r.deleted ? `Deleted ${r.deleted} row(s) from ${e.entity}.` : `No rows to delete in ${e.entity}.`);
+  } catch (err) {
+    alert("Delete failed: " + err.message);
+  } finally {
+    e.busy = false; render();
+  }
+}
+
 // Is the selected table an entity or a value object? (drives the chat context +
 // the sidebar label).
 function expKindOf(e, name) {
@@ -2075,6 +2119,7 @@ function expMain(e) {
     ? entity.fields.map((f) => f.name)
     : (e.items[0] ? Object.keys(e.items[0]).filter((k) => k !== "_provenance") : ["id"]);
   const rows = applyExpFilters(e.items, e.filters);
+  const tableAdapters = expAdaptersForEntity(e);
   const PAGE = 25;
   const pages = Math.max(1, Math.ceil(rows.length / PAGE));
   const page = Math.min(e.page, pages - 1);
@@ -2094,7 +2139,11 @@ function expMain(e) {
     <div class="flex-1 flex flex-col min-w-0 bg-white">
       <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
-        <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
+        <div class="flex items-center gap-2">
+          <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
+          <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table (connectors and event log are kept)">Delete all rows</button>
+          <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
+        </div>
       </div>
       <div class="px-6 py-3 border-b border-stone-200">${expFiltersPanel(e, cols)}</div>
       <div class="px-6 pt-3 pb-1 flex items-center justify-between">
@@ -2296,6 +2345,8 @@ function bindExplorer() {
     else { e.panelMode = "history"; state.chatOpen = true; if (!state.chatInfo) loadChatInfo().then(render); }
     render();
   });
+  document.getElementById("exp-fetch-rows")?.addEventListener("click", expFetchRows);
+  document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
 }
 
@@ -3162,9 +3213,10 @@ function splitTimelineView(layout, splitRef, firedCounts) {
   const walk = (n) => { fnodes.push(n); for (const c of n.children) { fedges.push([n, c]); walk(c); } };
   roots.forEach(walk);
 
-  // Spine = events left of the split column, kept on one shared row centred
-  // against the fan. The right-most spine event feeds every branch root.
-  const spineRow = (totalRows - 1) / 2;
+  // Spine = events left of the split column, kept on one shared row pinned to
+  // the top of the view (row 0). The right-most spine event feeds every branch
+  // root; the fan opens downward beneath it.
+  const spineRow = 0;
   const spineEvents = state.events
     .filter((e) => (layout.place.get(e.ref)?.col ?? 0) < splitCol)
     .map((e) => ({ e, col: layout.place.get(e.ref).col }))

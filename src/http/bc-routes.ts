@@ -169,6 +169,22 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return { entity, rows: await store.findMany(entity, limit), tableMissing: false };
   });
 
+  // Clear — delete every row in one gen_ table. The table itself is kept; connectors
+  // and the event log are untouched. Scoped to the active org when applicable.
+  app.post("/api/bc/:bc/clear", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const entity = String((req.body as any)?.entity ?? "");
+    if (!entity) return reply.code(400).send({ error: "NO_ENTITY", message: "entity required" });
+    const o = getOntology();
+    const inBc =
+      entitiesForBc(o, bc).some((e) => e.name === entity)
+      || valueObjectsForBc(o, bc).some((v) => v.name === entity);
+    if (!inBc) return reply.code(400).send({ error: "UNKNOWN_ENTITY", message: `"${entity}" is not a table in ${bc}` });
+    if (!(await store.tableExists(entity))) return { entity, deleted: 0, tableMissing: true };
+    return { entity, deleted: await store.clearTable(entity), tableMissing: false };
+  });
+
   // History — latest data updates per event (count + last timestamp + provenance).
   app.get("/api/bc/:bc/history", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);

@@ -303,6 +303,14 @@ export async function deleteById(table: string, id: string): Promise<void> {
   await prisma.$executeRawUnsafe(`DELETE FROM ${phys(table)} WHERE ${ident("id")} = ?${extra}`, id, ...f.params);
 }
 
+/** Delete all rows from one projection table (keeps the table). Scoped to the
+ * current org when the column exists. */
+export async function clearTable(table: string): Promise<number> {
+  const f = await orgFilterSql(table);
+  const where = f.clause ? ` WHERE ${f.clause}` : "";
+  return Number(await prisma.$executeRawUnsafe(`DELETE FROM ${phys(table)}${where}`, ...f.params));
+}
+
 /** Delete all rows from every projection table (keeps the tables). */
 export async function clearAll(): Promise<void> {
   for (const t of await listProjectionTables()) {

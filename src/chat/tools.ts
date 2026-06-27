@@ -18,7 +18,7 @@ import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
   connectorInfo, readConnectorCode, removeConnector,
 } from "../packs/connector/orchestrate.js";
-import { appendNote, readDoc, connectorChatId } from "../packs/connector/journal.js";
+import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { ingestPull } from "../packs/ingest.js";
 
 export const TOOLS: Anthropic.Tool[] = [
@@ -393,7 +393,7 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
       case "create_connector":
         return handleCreateConnector(args);
       case "set_connector_credentials":
-        return handleSetConnectorCredentials(args);
+        return await handleSetConnectorCredentials(args);
       case "build_connector":
         return await handleBuildConnector(args);
       case "ingest_connector":
@@ -405,7 +405,7 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
       case "list_connector_credentials":
         return ok(handleListConnectorCredentials());
       case "copy_connector_credentials":
-        return handleCopyConnectorCredentials(args);
+        return await handleCopyConnectorCredentials(args);
       case "remove_connector":
         return handleRemoveConnector(args);
       default:
@@ -655,12 +655,12 @@ function handleCreateConnector(args: Record<string, any>) {
   });
 }
 
-function handleSetConnectorCredentials(args: Record<string, any>) {
+async function handleSetConnectorCredentials(args: Record<string, any>) {
   const id = String(args.adapterId ?? "");
   if (!id) return err("adapterId required");
   const creds = args.credentials;
   if (!creds || typeof creds !== "object" || Array.isArray(creds)) return err("credentials must be a JSON object of fields");
-  const keys = setConnectorCredentials(id, creds as Record<string, unknown>);
+  const keys = await setConnectorCredentials(id, creds as Record<string, unknown>);
   return ok({ stored: true, adapterId: id, credentialKeys: keys, note: "Stored (plaintext, PoC). Values are never echoed back. Now build_connector." });
 }
 
@@ -692,8 +692,8 @@ async function handleIngestConnector(args: Record<string, any>) {
   const id = String(args.adapterId ?? "");
   if (!id) return err("adapterId required");
   const limit = Number(args.limit ?? 25);
+  // ingestPull journals the "ingested" note itself (one place for every caller).
   const summary = await ingestPull(id, { limit: limit > 0 ? limit : 25 });
-  appendNote(id, "ingested", `Ingested ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}.`);
   return ok({
     ingested: true, ...summary,
     note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.`,
@@ -730,11 +730,11 @@ function handleListConnectorCredentials() {
   return { connectors };
 }
 
-function handleCopyConnectorCredentials(args: Record<string, any>) {
+async function handleCopyConnectorCredentials(args: Record<string, any>) {
   const from = String(args.fromAdapterId ?? "");
   const to = String(args.toAdapterId ?? "");
   if (!from || !to) return err("fromAdapterId and toAdapterId required");
-  const keys = copyConnectorCredentials(from, to); // throws on bad ids / no creds; values never returned
+  const keys = await copyConnectorCredentials(from, to); // throws on bad ids / no creds; values never returned
   return ok({ copied: true, fromAdapterId: from, toAdapterId: to, credentialFields: keys, note: `Reused ${keys.length} credential field(s) from ${from}. Values were copied server-side and never shown.` });
 }
 

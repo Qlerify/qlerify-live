@@ -8,11 +8,12 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
 import { isHandledError } from "../errors.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/model.js";
 import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } from "../ontology/bc-helpers.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
-import { readDoc, readChat, writeChat, deleteChat, connectorChatId } from "../packs/connector/journal.js";
+import { readDoc, readChat, writeChat, deleteChat, connectorChatId, appendNote } from "../packs/connector/journal.js";
 import { provenanceMeta } from "../twin/provenance.js";
 import { computeSystemsHealth } from "../twin/systems-health.js";
 import * as store from "../twin/projection-store.js";
@@ -169,8 +170,14 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return { entity, rows: await store.findMany(entity, limit), tableMissing: false };
   });
 
-  // Clear — delete every row in one gen_ table. The table itself is kept; connectors
-  // and the event log are untouched. Scoped to the active org when applicable.
+  // Clear — delete every row in one gen_ table AND the simulated events derived
+  // from those rows. The event store is a best-effort simulation OF the static
+  // data (twin/derive.ts), not an independent source of truth, so when the rows
+  // go the events rooted at this aggregate go with them — otherwise the
+  // timeline/dashboard would keep showing events whose source data is gone. The
+  // table itself and the connectors are kept. Both deletes are scoped to the
+  // active workflow/org. Value objects are no aggregate's root, so the event
+  // delete is correctly a no-op for them.
   app.post("/api/bc/:bc/clear", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
@@ -181,8 +188,18 @@ export function registerBcRoutes(app: FastifyInstance): void {
       entitiesForBc(o, bc).some((e) => e.name === entity)
       || valueObjectsForBc(o, bc).some((v) => v.name === entity);
     if (!inBc) return reply.code(400).send({ error: "UNKNOWN_ENTITY", message: `"${entity}" is not a table in ${bc}` });
-    if (!(await store.tableExists(entity))) return { entity, deleted: 0, tableMissing: true };
-    return { entity, deleted: await store.clearTable(entity), tableMissing: false };
+    if (!(await store.tableExists(entity))) return { entity, deleted: 0, eventsDeleted: 0, tableMissing: true };
+    const deleted = await store.clearTable(entity);
+    const { count: eventsDeleted } = await prisma.eventLog.deleteMany({
+      where: { aggregateRoot: entity, ...eventLogOrgWhere() },
+    });
+    // Journal the clear onto the history of every connector targeting this table,
+    // mirroring how ingestPull records a "Fetch rows" so both actions show in the
+    // builder's notes timeline. No-op when no connector feeds the table.
+    for (const a of listAdapters().filter((a) => a.boundedContext === bc && a.targetEntity === entity)) {
+      appendNote(a.id, "cleared", `Cleared ${deleted} row(s) and ${eventsDeleted} derived event(s) from ${entity}.`);
+    }
+    return { entity, deleted, eventsDeleted, tableMissing: false };
   });
 
   // History — latest data updates per event (count + last timestamp + provenance).

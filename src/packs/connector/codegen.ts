@@ -87,6 +87,81 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
   ].join("\n");
 }
 
+// --- Connector description (doc summary) ------------------------------------
+// A second, read-only AI pass that documents a BUILT connector for the operator.
+// It reads the generated code (so filters/sort/limits it actually contains are
+// reported faithfully) plus the connector's metadata, and returns one short
+// factual paragraph. Kept separate from generateConnectorModule so the
+// code-gen contract (output ONLY the module) is never muddied.
+
+export interface ConnectorDescribeInput {
+  /** System / bounded context the connector belongs to. */
+  system: string;
+  /** The model kind it populates. */
+  target: EntitySchema;
+  targetKind: "entity" | "valueObject";
+  /** Operator's natural-language note on the source. */
+  instructions: string;
+  /** Credential FIELD NAMES configured (never values) — the access method. */
+  credentialKeys: string[];
+  /** Configured source endpoint, if any. */
+  endpoint?: string;
+  /** npm packages the module imports (hints at the protocol/driver). */
+  deps: string[];
+  /** Provenance mode (simulated | recorded | live). */
+  mode?: string;
+  /** The connector's current ESM source — the ground truth for filters/sort/limits. */
+  code: string;
+}
+
+export function buildDescribePrompt(input: ConnectorDescribeInput): string {
+  const { system, target, targetKind, instructions, credentialKeys, endpoint, deps, mode, code } = input;
+  return [
+    `Document a data CONNECTOR for an operator. Write a short, factual description of what it does, grounded in the metadata AND the source code below.`,
+    ``,
+    `## Metadata`,
+    `- System / bounded context: ${system}`,
+    `- Target table: ${target.name} (${targetKind})`,
+    `- Operator's note on the source: ${instructions || "(none given)"}`,
+    `- Configured credential field names: ${credentialKeys.length ? credentialKeys.join(", ") : "(none)"}`,
+    `- Configured endpoint: ${endpoint || "(none)"}`,
+    `- npm packages imported: ${deps.length ? deps.join(", ") : "(none — likely plain HTTP/fetch)"}`,
+    `- Data provenance mode: ${mode || "(unset)"}`,
+    ``,
+    `## Connector source code`,
+    code ? code.slice(0, 8000) : "(no code authored yet)",
+    ``,
+    `## What to write`,
+    `One short paragraph (1–3 sentences, plain text, no markdown, no preamble). State, where determinable from the code/metadata:`,
+    `  1. The source SYSTEM it connects to — name it, and the protocol/driver if clear (e.g. DynamoDB via @aws-sdk, Postgres via pg, a REST API over fetch).`,
+    `  2. The target TABLE it populates (${target.name}).`,
+    `  3. How it AUTHENTICATES — i.e. which KIND of credentials it uses, inferred from the credential field names and the code (e.g. API key, bearer token, basic username/password, AWS access keys, OAuth). If it uses none, say it is unauthenticated.`,
+    `  4. Any FILTERS, SORT ORDERS, or row LIMITS baked into the code — read the code carefully. If there are none beyond the caller-supplied limit, say so explicitly.`,
+    `  5. Anything else notable: pagination, embedded/nested value objects, or important data-shape handling.`,
+    `Describe only what the code and metadata actually show — do not invent. Output ONLY the description text.`,
+  ].join("\n");
+}
+
+/** Key-gated: document a built connector. Returns one short factual paragraph.
+ * Throws on no key / empty output so the caller can fall back deterministically. */
+export async function describeConnector(input: ConnectorDescribeInput): Promise<string> {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set — cannot describe a connector");
+  const client = new Anthropic();
+  const res = await client.messages.create({
+    model: MODEL,
+    max_tokens: 512,
+    system: "You write one short, factual paragraph documenting a data connector for an operator. Plain text only: no markdown, no preamble, no bullet points.",
+    messages: [{ role: "user", content: buildDescribePrompt(input) }],
+  });
+  const text = res.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  if (!text) throw new Error("empty description from model");
+  return text;
+}
+
 /** Key-gated: author (or repair) a connector module. Returns the ESM source and
  * the npm packages it imports. No file I/O here — the caller persists. */
 export async function generateConnectorModule(input: ConnectorGenInput): Promise<ConnectorGenResult> {

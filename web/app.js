@@ -1908,8 +1908,7 @@ async function expFetchRows() {
   e.busy = true; render();
   try {
     const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 1000 }) });
-    await selectExpEntity(e.entity);
-    await loadHealth();
+    await refreshExplorerAfterChat(); // re-pulls rows AND adapters so the new "ingested" note shows in the history
     alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}`);
   } catch (err) {
     alert("Fetch failed: " + err.message);
@@ -1921,13 +1920,13 @@ async function expFetchRows() {
 async function expClearRows() {
   const e = expState();
   if (e.busy || !e.entity || !e.system) return;
-  if (!confirm(`Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table only. Connectors and the event log are not removed.`)) return;
+  if (!confirm(`Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table AND the simulated events derived from it. Connectors are kept.`)) return;
   e.busy = true; render();
   try {
     const r = await api(`/api/bc/${encodeURIComponent(e.system)}/clear`, { method: "POST", body: JSON.stringify({ entity: e.entity }) });
-    await selectExpEntity(e.entity);
-    await loadHealth();
-    alert(r.deleted ? `Deleted ${r.deleted} row(s) from ${e.entity}.` : `No rows to delete in ${e.entity}.`);
+    await refreshExplorerAfterChat(); // re-pulls rows AND adapters so the new "cleared" note shows in the history
+    const evt = r.eventsDeleted ? ` and ${r.eventsDeleted} derived event(s)` : "";
+    alert(r.deleted ? `Deleted ${r.deleted} row(s)${evt} from ${e.entity}.` : `No rows to delete in ${e.entity}.`);
   } catch (err) {
     alert("Delete failed: " + err.message);
   } finally {
@@ -2141,7 +2140,7 @@ function expMain(e) {
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
         <div class="flex items-center gap-2">
           <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
-          <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table (connectors and event log are kept)">Delete all rows</button>
+          <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table and the simulated events derived from it (connectors are kept)">Delete all rows</button>
           <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
         </div>
       </div>
@@ -2203,6 +2202,7 @@ const NOTE_BADGE = {
   repaired: "bg-amber-100 text-amber-800",
   credentials: "bg-violet-100 text-violet-800",
   ingested: "bg-teal-100 text-teal-800",
+  cleared: "bg-orange-100 text-orange-800",
   removed: "bg-rose-100 text-rose-800",
   note: "bg-stone-100 text-stone-700",
 };

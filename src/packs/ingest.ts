@@ -14,6 +14,7 @@ import { setAdapterMode, type ProvMode } from "../twin/provenance.js";
 import * as store from "../twin/projection-store.js";
 import { getAdapter } from "./registry.js";
 import { applyFieldMap } from "./types.js";
+import { appendNote } from "./connector/journal.js";
 
 export interface IngestSummary {
   adapterId: string;
@@ -67,5 +68,9 @@ export async function ingestPull(adapterId: string, opts: { limit?: number } = {
   // The bounded context's data now comes from this adapter; the mode reflects the
   // ladder rung (simulated/recorded/live) so the UI badges follow automatically.
   await setAdapterMode(adapter.boundedContext, adapter.mode, adapter.id);
+  // Journal the pull onto the connector's history so it shows in the builder's
+  // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
+  // rows" button (every ingestPull caller is covered here — the single place).
+  appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present) into ${adapter.targetEntity}.`);
   return { adapterId: adapter.id, entity: adapter.targetEntity, inserted, skipped, mode: adapter.mode };
 }

@@ -8,9 +8,9 @@ import { getOntology } from "../../ontology/model.js";
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
-import { generateConnectorModule } from "./codegen.js";
+import { generateConnectorModule, describeConnector } from "./codegen.js";
 import {
-  writeModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
+  writeModule, readModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
   installDeps, deleteConnectorFiles, type InstallResult,
 } from "./runtime.js";
 import {
@@ -22,11 +22,42 @@ function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
 }
 
-/** First non-empty line of a free-text blob, trimmed to a sentence-ish length —
- * used to seed a connector's doc summary from the operator's build instructions. */
-function firstLine(s: string): string {
-  const line = (s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-  return line.length > 160 ? line.slice(0, 157) + "…" : line;
+/** Deterministic doc summary from metadata alone — the fallback when the AI
+ * describer is unavailable (no key) or errors, so a description always exists. */
+function fallbackSummary(cfg: AdapterConfig, keys: string[]): string {
+  const access = keys.length ? `authenticates with ${keys.join(", ")}` : "no credentials configured";
+  const ep = cfg.endpoint ? ` at ${cfg.endpoint}` : "";
+  return `Connector populating ${cfg.targetEntity} in ${cfg.boundedContext}${ep}; ${access}.`;
+}
+
+/** (Re)generate the connector's doc summary with the AI and store it. Reads the
+ * connector's current code + config so the description reflects the source system,
+ * target table, credential/access method, and any filters/sort/limits actually in
+ * the code. Best-effort: any failure falls back to a deterministic summary. Pass
+ * `codeOverride` right after a build to avoid a redundant disk read. */
+export async function regenerateConnectorSummary(id: string, codeOverride?: string): Promise<void> {
+  const cfg = readSidecar(id);
+  if (!cfg) return;
+  const target = resolveTargetSchema(cfg.targetEntity);
+  if (!target) return;
+  const keys = credentialKeys(id);
+  let summary: string;
+  try {
+    summary = await describeConnector({
+      system: cfg.boundedContext,
+      target,
+      targetKind: cfg.targetKind ?? (getOntology().entity(cfg.targetEntity) ? "entity" : "valueObject"),
+      instructions: (cfg.instructions ?? "").trim(),
+      credentialKeys: keys,
+      endpoint: cfg.endpoint,
+      deps: cfg.deps ?? [],
+      mode: cfg.mode,
+      code: codeOverride ?? readModule(id) ?? "",
+    });
+  } catch {
+    summary = fallbackSummary(cfg, keys);
+  }
+  setConnectorSummary(id, summary);
 }
 
 export interface CreateConnectorInput {
@@ -58,12 +89,15 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
 }
 
 /** Store the plaintext credentials blob (any shape). Returns the field NAMES. */
-export function setConnectorCredentials(id: string, creds: Record<string, unknown>): string[] {
+export async function setConnectorCredentials(id: string, creds: Record<string, unknown>): Promise<string[]> {
   const cfg = readSidecar(id);
   if (!cfg) throw new Error(`no connector "${id}"`);
   writeCredentials(id, creds);
   const keys = credentialKeys(id);
   appendNote(id, "credentials", `Stored credentials: ${keys.join(", ") || "(none)"}.`);
+  // Credentials are the "way of access" — refresh the description once code exists
+  // so it reflects the new auth. Before a build there's nothing to describe yet.
+  if (moduleExists(id)) await regenerateConnectorSummary(id);
   return keys;
 }
 
@@ -71,7 +105,7 @@ export function setConnectorCredentials(id: string, creds: Record<string, unknow
  * source's credential blob to the destination server-side. The secret VALUES are
  * never returned (only the field names), so they never enter the chat/LLM. For
  * "use the same credentials as the X connector". */
-export function copyConnectorCredentials(fromId: string, toId: string): string[] {
+export async function copyConnectorCredentials(fromId: string, toId: string): Promise<string[]> {
   if (fromId === toId) throw new Error("source and destination are the same connector");
   if (!readSidecar(toId)) throw new Error(`no connector "${toId}"`);
   if (!readSidecar(fromId)) throw new Error(`no connector "${fromId}"`);
@@ -80,6 +114,7 @@ export function copyConnectorCredentials(fromId: string, toId: string): string[]
   writeCredentials(toId, creds);
   const keys = credentialKeys(toId);
   appendNote(toId, "credentials", `Reused credentials from ${fromId}: ${keys.join(", ") || "(none)"}.`);
+  if (moduleExists(toId)) await regenerateConnectorSummary(toId);
   return keys;
 }
 
@@ -113,7 +148,10 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   const next: AdapterConfig = { ...cfg, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps };
   writeSidecar(next);
   registerAdapter(createConnectorAdapter(next));
-  if (instr) setConnectorSummary(id, firstLine(instr));
+  // Let the AI describe the freshly built connector (system, table, access method,
+  // and any filters/sort/limits in the code). Runs on every build AND repair, so
+  // the description stays in sync with the code.
+  await regenerateConnectorSummary(id, gen.code);
   const depsNote = gen.deps.length ? `, deps: ${gen.deps.join(", ")}` : "";
   appendNote(
     id,

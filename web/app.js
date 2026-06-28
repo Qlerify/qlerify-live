@@ -553,6 +553,36 @@ function chatMessageHtml(m) {
   `;
 }
 
+// The assistant follows a "confirm before any write" policy (see the connector
+// tool descriptions and system-prompt) — it asks "Shall I proceed?" / "Confirm?"
+// and stops, waiting for an explicit yes. When its most recent message is one of
+// these pauses, we offer one-click Yes/No replies instead of making the user type.
+const CONFIRM_RE = /\b(shall i (?:proceed|continue|go ahead)|should i (?:proceed|continue|go ahead)|do you want me to (?:proceed|continue|go ahead)|want me to (?:proceed|go ahead)|ready to proceed|proceed\?|confirm\?|go ahead\?)/i;
+
+function lastAssistantAsksConfirmation() {
+  const msgs = state.chatMessages;
+  if (!msgs || msgs.length === 0) return false;
+  const last = msgs[msgs.length - 1];
+  if (!last || last.role !== "assistant") return false;
+  const blocks = Array.isArray(last.content) ? last.content : [];
+  // A pending tool_use means the agent loop is still mid-flight (or already
+  // proceeded) — only offer the buttons when the turn ended on the question.
+  if (blocks.some((b) => b.type === "tool_use")) return false;
+  const text = blocks.filter((b) => b.type === "text").map((b) => b.text).join(" ");
+  return CONFIRM_RE.test(text);
+}
+
+// Quick-reply chips shown under a "Shall I proceed?" pause. The label is what the
+// user sees; data-quick-reply is the exact text sent as their answer (clear,
+// explicit phrasing the model reads as a yes/no per the confirmation policy).
+function confirmQuickReplies() {
+  return `
+    <div class="flex flex-wrap gap-2 pt-1">
+      <button data-quick-reply="Yes, proceed." class="px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 font-medium">Yes, proceed</button>
+      <button data-quick-reply="No, don't proceed." class="px-3 py-1.5 text-xs rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-stone-100 font-medium">No</button>
+    </div>`;
+}
+
 function chatPanel() {
   if (!state.chatOpen) return "";
   // In the Systems explorer the panel is the SINGLE connector sidebar with two
@@ -642,6 +672,7 @@ function chatPanel() {
         ` : messagesHtml}
         ${state.chatBusy ? `<div class="text-stone-500 text-xs italic">thinking…</div>` : ""}
         ${state.chatError ? `<div class="text-rose-700 text-xs">⚠ ${escapeHtml(state.chatError)}</div>` : ""}
+        ${!empty && !state.chatBusy && lastAssistantAsksConfirmation() ? confirmQuickReplies() : ""}
       </div>
 
       <div class="border-t border-stone-200 p-3">
@@ -740,6 +771,15 @@ function bindChat() {
       setTimeout(() => sendChat(), 30);
     });
   });
+  // Yes/No chips under a "Shall I proceed?" pause — send the canned answer as if
+  // the user typed it (same path as sendChat, so view context is still injected).
+  document.querySelectorAll("[data-quick-reply]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.chatInput = el.dataset.quickReply;
+      render();
+      setTimeout(() => sendChat(), 30);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -816,12 +856,12 @@ function bindWorkflowModel() {
     }
     state.projModelBusy = true; state.projModelErr = null; render();
     try {
-      await api("/v1/workflow/model", { method: "PUT", body: JSON.stringify(payload) });
+      const res = await api("/v1/workflow/model", { method: "PUT", body: JSON.stringify(payload) });
       state.projModelOpen = false; state.projModelBusy = false; state.projModelText = ""; state.projModelUrl = "";
-      state.modelMsg = { ok: true, text: "Workflow model updated — rebuilding this workflow." };
+      state.modelMsg = { ok: true, text: "Workflow model updated — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
       await ensureMe();
       onHashChange();
-      setTimeout(() => { state.modelMsg = null; render(); }, 2500);
+      setTimeout(() => { state.modelMsg = null; render(); }, 4000);
     } catch (e) {
       state.projModelBusy = false;
       state.projModelErr = (e && e.message) ? e.message : "Failed to set the model.";
@@ -996,14 +1036,24 @@ async function refreshModelPage() {
   render();
 }
 
+// One-line tail describing the post-rebuild re-ingest + derive (the `rebuild`
+// field every /v1/workflow/model* response now carries). Empty when the workflow
+// has no connectors to pull from — the rebuilt tables just start empty.
+function rebuildSummaryText(rebuild) {
+  if (!rebuild || !rebuild.connectors) return "";
+  const ev = rebuild.derived ? rebuild.derived.events : 0;
+  const failed = (rebuild.failures || []).length;
+  return ` Re-ingested ${rebuild.inserted} row(s) from ${rebuild.connectors} connector(s), derived ${ev} event(s)${failed ? ` — ${failed} connector(s) failed to pull (re-pull from the explorer)` : ""}.`;
+}
+
 // Re-pull the latest model from the current version's stored link, then rebuild
 // this workflow. Disabled in the UI when there is no link to pull from.
 async function reloadWorkflowModel() {
   if (state.modelBusy) return;
   state.modelBusy = true; render();
   try {
-    await api("/v1/workflow/model/reload", { method: "POST", body: "{}" });
-    state.modelMsg = { ok: true, text: "Reloaded the latest model from the source link — rebuilt this workflow." };
+    const res = await api("/v1/workflow/model/reload", { method: "POST", body: "{}" });
+    state.modelMsg = { ok: true, text: "Reloaded the latest model from the source link — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
     await refreshModelPage();
     await ensureMe();
     onHashChange();
@@ -1020,8 +1070,8 @@ async function restoreWorkflowVersion(versionId) {
   if (state.modelBusy || !versionId) return;
   state.modelBusy = true; render();
   try {
-    await api("/v1/workflow/model/restore", { method: "POST", body: JSON.stringify({ versionId }) });
-    state.modelMsg = { ok: true, text: "Restored that version — rebuilt this workflow." };
+    const res = await api("/v1/workflow/model/restore", { method: "POST", body: JSON.stringify({ versionId }) });
+    state.modelMsg = { ok: true, text: "Restored that version — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
     await refreshModelPage();
     await ensureMe();
     onHashChange();
@@ -1232,28 +1282,6 @@ async function createCase() {
   }
 }
 
-// Clear the event log and re-derive it from scratch off the ingested rows — the
-// designer's "I changed the model, show me the new results". The ingested rows are
-// kept; events that leave no row trace (e.g. a login) are not rebuilt.
-async function rebuildFromIngested() {
-  if (state.busy) return;
-  if (!confirm("Rebuild the event log from the ingested data?\n\nThe current event history is cleared and regenerated from the source rows (which are kept). Events that leave no data trace (e.g. a login) are not restored.")) return;
-  state.busy = true; render();
-  try {
-    const r = await api("/sim/rebuild", { method: "POST", body: "{}" });
-    await loadDashboard();
-    const fired = (r.events || [])
-      .filter((e) => e.emitted > 0)
-      .map((e) => `• ${e.name}: ${e.emitted}${e.sample ? `  (${e.sample})` : ""}`)
-      .join("\n");
-    alert(`Cleared ${r.cleared ?? 0} event(s); rebuilt ${r.totalEmitted} across ${r.instances} instance(s) from the ingested data:${fired ? `\n\n${fired}` : "\n\n(no row-state evidence to derive)"}`);
-  } catch (e) {
-    alert("Rebuild from data failed: " + e.message);
-  } finally {
-    state.busy = false; render();
-  }
-}
-
 async function deleteCase(caseId, ev) {
   ev.stopPropagation();
   if (!confirm("Remove this item and all its data?")) return;
@@ -1310,7 +1338,6 @@ function dashboardView() {
           <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — ${escapeHtml(plural)}</div>
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
-        <button id="btn-rebuild" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium" title="Clear the event log and regenerate it from the ingested rows — use after changing the model">🔄 Rebuild from data</button>
         <button id="btn-new-case" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
@@ -1351,7 +1378,6 @@ function dashboardView() {
 
 function bindDashboard() {
   document.getElementById("btn-new-case")?.addEventListener("click", createCase);
-  document.getElementById("btn-rebuild")?.addEventListener("click", rebuildFromIngested);
   document.querySelectorAll("[data-go]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.dataset.go));
   });
@@ -1845,7 +1871,7 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false, showEvents: false, rowEvents: {}, rowEventsBusy: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false, rowEvents: {}, rowEventsBusy: false };
   return state.exp;
 }
 
@@ -1892,7 +1918,7 @@ async function selectExpEntity(name) {
     e.tableMissing = !!d.tableMissing;
   } catch (_err) { e.items = []; e.tableMissing = true; }
   e.rowEvents = {}; // events belong to the previous table — drop them
-  if (e.showEvents) e.rowEvents = await fetchRowEvents(e);
+  e.rowEvents = await fetchRowEvents(e);
   e.busy = false; render();
 }
 
@@ -1906,15 +1932,6 @@ async function fetchRowEvents(e) {
   } catch (_err) { return {}; }
 }
 
-// Load (with a busy flag + render) the per-row events for the current table —
-// used when the "Events per row" toggle is flipped on.
-async function loadRowEvents() {
-  const e = expState();
-  e.rowEventsBusy = true; render();
-  e.rowEvents = await fetchRowEvents(e);
-  e.rowEventsBusy = false; render();
-}
-
 function expAdaptersForEntity(e) {
   return (e.adapters || []).filter((a) => a.targetEntity === e.entity);
 }
@@ -1924,7 +1941,7 @@ async function expFetchRows() {
   if (e.busy || !e.entity) return;
   const adapters = expAdaptersForEntity(e);
   if (!adapters.length) {
-    alert("No connector configured for this table. Open Connectors to build one first.");
+    alert("No connector configured for this table. Use the “Configure connector” button to build one first.");
     return;
   }
   const adapter = adapters[0];
@@ -1932,8 +1949,9 @@ async function expFetchRows() {
   e.busy = true; render();
   try {
     const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 1000 }) });
-    await refreshExplorerAfterChat(); // re-pulls rows AND adapters so the new "ingested" note shows in the history
-    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}`);
+    await refreshExplorerAfterChat(); // re-pulls rows, adapters AND (if shown) the per-row events so the auto-derived events land in the ⚡ Events column
+    const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}`);
   } catch (err) {
     alert("Fetch failed: " + err.message);
   } finally {
@@ -2022,7 +2040,7 @@ async function refreshExplorerAfterChat() {
       e.tableMissing = !!d.tableMissing;
     } catch (_e) { /* keep prior */ }
     // Ingest/clear changes the derived events too → refresh the per-row trail.
-    if (e.showEvents) e.rowEvents = await fetchRowEvents(e);
+    e.rowEvents = await fetchRowEvents(e);
   }
   // A create/build/ingest changes connection status → refresh the Tables-pane
   // status dots too so they update without a manual reload (caller renders).
@@ -2067,8 +2085,8 @@ const STATUS_DOT = {
 const STATUS_LABEL = {
   live: "Live data — connected to a live source",
   simulated: "Simulated / recorded data",
-  wired_empty: "Adapter configured, but no data pulled yet",
-  no_adapter: "No adapter — not connected to a source",
+  wired_empty: "Connector configured, but no data pulled yet",
+  no_adapter: "No connector — not connected to a source",
 };
 
 // One marker per table row: SHAPE encodes type (square = entity, diamond = value
@@ -2213,10 +2231,10 @@ function expMain(e) {
   const page = Math.min(e.page, pages - 1);
   const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
   const headerCells = cols.map((c) => `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200">${escapeHtml(c)}</th>`).join("")
-    + (e.showEvents ? `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200 border-l border-stone-100">⚡ Events</th>` : "");
-  // With the events column on, top-align every cell so a row that grows to fit
-  // several stacked events keeps its other values lined up at the top.
-  const tdAlign = e.showEvents ? "align-top" : "";
+    + `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200 border-l border-stone-100">⚡ Events</th>`;
+  // The events column is always on, so top-align every cell — a row that grows to
+  // fit several stacked events keeps its other values lined up at the top.
+  const tdAlign = "align-top";
   const bodyRows = pageRows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
       <td class="px-3 py-2 ${tdAlign}"><input type="checkbox" class="rounded border-stone-300" /></td>
       ${cols.map((c, ci) => {
@@ -2226,17 +2244,16 @@ function expMain(e) {
         const disp = empty ? '<span class="text-stone-300">—</span>' : escapeHtml(s.length > 44 ? s.slice(0, 44) + "…" : s);
         return `<td class="px-3 py-2 text-sm whitespace-nowrap ${tdAlign} ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}">${disp}</td>`;
       }).join("")}
-      ${e.showEvents ? rowEventsCell(e.rowEvents[r.id], e.rowEventsBusy) : ""}
+      ${rowEventsCell(e.rowEvents[r.id], e.rowEventsBusy)}
     </tr>`).join("");
   return `
     <div class="flex-1 flex flex-col min-w-0 bg-white">
       <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
         <div class="flex items-center gap-2">
-          <button id="exp-toggle-events" class="px-4 py-1.5 text-sm rounded-full border ${e.showEvents ? "border-violet-400 bg-violet-50 text-violet-700" : "border-stone-300 bg-white text-stone-600 hover:bg-stone-50"} font-medium" title="Show the domain events each row produced, inline beneath it">⚡ Events ${e.showEvents ? "on" : "off"}</button>
           <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
           <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table and the simulated events derived from it (connectors are kept)">Delete all rows</button>
-          <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
+          <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Configure connector</button>
         </div>
       </div>
       <div class="px-6 py-3 border-b border-stone-200">${expFiltersPanel(e, cols)}</div>
@@ -2250,7 +2267,7 @@ function expMain(e) {
       </div>
       <div class="flex-1 overflow-auto px-6 pb-6">
         ${e.busy ? '<div class="text-stone-400 text-sm py-10 text-center">Loading…</div>'
-          : e.tableMissing ? `<div class="text-stone-400 text-sm py-10 text-center">No data yet for <b>${escapeHtml(e.entity)}</b>. Run the simulator or connect an adapter to populate it.</div>`
+          : e.tableMissing ? `<div class="text-stone-400 text-sm py-10 text-center">No data yet for <b>${escapeHtml(e.entity)}</b>. Run the simulator or configure a connector to populate it.</div>`
           : rows.length === 0 ? '<div class="text-stone-400 text-sm py-10 text-center">No items match the filters.</div>'
           : `<div class="rounded-lg border border-stone-200 overflow-x-auto">
               <table class="min-w-full">
@@ -2354,7 +2371,7 @@ function connectorHistoryBody(e) {
         <div class="text-xs text-stone-500 mt-1">Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and the assistant writes, tests, and runs a connector to fill this table.</div>
         <button id="exp-build-ai" class="w-full mt-3 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 font-medium">Build connector with AI →</button>
       </div>
-      <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full adapter workbench →</a>
+      <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full connector workbench →</a>
     </div>`;
 }
 
@@ -2448,13 +2465,6 @@ function bindExplorer() {
     else { e.panelMode = "history"; state.chatOpen = true; if (!state.chatInfo) loadChatInfo().then(render); }
     render();
   });
-  // "Events" pill: toggle the per-row event trail. Turning it on fetches the
-  // trail for the current table; turning it off just re-renders without the band.
-  document.getElementById("exp-toggle-events")?.addEventListener("click", () => {
-    const e = expState();
-    e.showEvents = !e.showEvents;
-    if (e.showEvents) loadRowEvents(); else render();
-  });
   document.getElementById("exp-fetch-rows")?.addEventListener("click", expFetchRows);
   document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
@@ -2470,11 +2480,11 @@ function bcListView() {
         <div class="font-semibold text-stone-900">${escapeHtml(b.name)}</div>
         ${provChip(b.provenance && b.provenance.mode)}
       </div>
-      <div class="text-xs text-stone-500">${b.eventCount} events · ${b.entityCount} entities · ${b.adapterCount} adapter${b.adapterCount === 1 ? "" : "s"}</div>
+      <div class="text-xs text-stone-500">${b.eventCount} events · ${b.entityCount} entities · ${b.adapterCount} connector${b.adapterCount === 1 ? "" : "s"}</div>
       ${b.provenance && b.provenance.adapter ? `<div class="text-[11px] text-stone-400 mono">${escapeHtml(b.provenance.adapter)}</div>` : ""}
     </button>`).join("");
   return `
-    ${bcHeader("Bounded contexts", "Each system, its adapter, and its live data", "#")}
+    ${bcHeader("Bounded contexts", "Each system, its connector, and its live data", "#")}
     <main class="flex-1 overflow-auto p-6">
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards || `<div class="text-stone-400">No bounded contexts.</div>`}</div>
     </main>`;
@@ -2492,26 +2502,26 @@ function bcSection(title, body) {
 function bcWorkbenchView() {
   const d = state.bcData;
   if (!d) return bcHeader("Loading…", "", "#bcs");
-  if (d.error) return `${bcHeader(d.name || "Bounded context", "Adapter workbench", "#bcs")}<main class="p-6"><div class="text-rose-600">${escapeHtml(d.error)}</div></main>`;
+  if (d.error) return `${bcHeader(d.name || "Bounded context", "Connector workbench", "#bcs")}<main class="p-6"><div class="text-rose-600">${escapeHtml(d.error)}</div></main>`;
   const adapter = (d.adapters || [])[0];
   const subBar = `
     <div class="px-6 py-2 border-b border-stone-200 bg-white flex items-center gap-2 text-sm text-stone-600">
       <span>data source</span> ${provChip(d.provenance && d.provenance.mode)}
-      ${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no adapter</span>`}
+      ${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no connector</span>`}
     </div>`;
   // Stacked sections (no tabs). With no adapter, show one "Connect a system"
   // prompt + the model overview rather than the empty per-tab panels.
   const sections = adapter
     ? [
         bcSection("Connection", bcConnectionPanel(d, adapter)),
-        bcSection("Adapter code", bcCodePanel(d, adapter)),
+        bcSection("Connector code", bcCodePanel(d, adapter)),
         bcSection("Test", bcTestPanel(d, adapter)),
         bcSection("Raw data", bcRawPanel(d, adapter)),
         bcSection("Overview", bcOverviewPanel(d)),
       ].join("")
     : `${bcNoAdapter(d)}${bcSection("Overview", bcOverviewPanel(d))}`;
   return `
-    ${bcHeader(d.name, "Adapter workbench", "#bcs")}
+    ${bcHeader(d.name, "Connector workbench", "#bcs")}
     ${subBar}
     <main class="flex-1 overflow-auto p-6 space-y-8">${sections}</main>`;
 }
@@ -2521,7 +2531,7 @@ function bcNoAdapter(d) {
   return `
     <div class="max-w-xl rounded-lg border border-dashed border-stone-300 bg-white p-6 text-center">
       <div class="text-stone-400 text-4xl mb-2">🔌</div>
-      <div class="text-stone-700 font-medium">No adapter for this system yet</div>
+      <div class="text-stone-700 font-medium">No connector for this system yet</div>
       <div class="text-sm text-stone-500 mt-1">Create one to pull <span class="mono">${escapeHtml(prettyEntity(String(entity)))}</span> records from the real source. It starts simulated; then configure the endpoint + credentials and let AI author the live connector.</div>
       <button id="bc-add-adapter" ${state.bcBusy ? "disabled" : ""} class="mt-4 px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Connect a system</button>
     </div>`;
@@ -2583,16 +2593,16 @@ function bcConnectionPanel(d, adapter) {
           <button id="bc-config-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Save endpoint</button>
           <button id="bc-cred-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Set credential</button>
         </div>
-        <div class="text-[11px] text-stone-400">The secret is never echoed, written to disk, or sent to chat — only the key name is remembered (dev: kept in process env; encrypted-at-rest store is the next increment). The AI-authored adapter reads it as <span class="mono">ctx.secret</span>.</div>
+        <div class="text-[11px] text-stone-400">The secret is never echoed, written to disk, or sent to chat — only the key name is remembered (dev: kept in process env; encrypted-at-rest store is the next increment). The AI-authored connector reads it as <span class="mono">ctx.secret</span>.</div>
       </div>
 
       <div class="rounded-lg border border-rose-200 bg-rose-50 p-4 space-y-2">
         <div class="text-xs uppercase tracking-wide text-rose-600 font-semibold">Danger zone</div>
         <div class="flex gap-2 flex-wrap">
-          <button id="bc-reset" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Reset adapter</button>
-          <button id="bc-remove" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Remove adapter</button>
+          <button id="bc-reset" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Reset connector</button>
+          <button id="bc-remove" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Remove connector</button>
         </div>
-        <div class="text-[11px] text-rose-700/80"><b>Reset</b> wipes the AI-authored code + stored credentials back to a clean simulated draft (keeps the adapter, so you can build it from scratch). <b>Remove</b> deletes it entirely.</div>
+        <div class="text-[11px] text-rose-700/80"><b>Reset</b> wipes the AI-authored code + stored credentials back to a clean simulated draft (keeps the connector, so you can build it from scratch). <b>Remove</b> deletes it entirely.</div>
       </div>
     </div>`;
 }
@@ -2609,12 +2619,12 @@ function bcCodePanel(d, adapter) {
         <button id="bc-generate" ${(!hasKey || state.bcBusy) ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">${genLabel}</button>
         <span class="text-xs text-stone-400">${hasKey
           ? "AI writes fetchRows(ctx) from the model attributes; it is shown here and only runs when you Test it (stop-and-show)."
-          : "set ANTHROPIC_API_KEY in .env to let AI author the adapter live."}</span>
+          : "set ANTHROPIC_API_KEY in .env to let AI author the connector live."}</span>
       </div>
       ${c && c.bodyPath ? `<div class="text-[11px] mono text-stone-400">${escapeHtml(c.bodyPath)}</div>` : ""}
       ${src
         ? `<pre class="rounded-lg border border-stone-200 bg-stone-50 p-3 text-[11px] leading-relaxed overflow-auto mono text-stone-800" style="max-height:60vh">${escapeHtml(src)}</pre>`
-        : `<div class="text-stone-400 text-sm">No adapter body yet${hasKey ? " — click Generate to have AI write one against the PurchaseOrder schema." : "."}</div>`}
+        : `<div class="text-stone-400 text-sm">No connector body yet${hasKey ? " — click Generate to have AI write one against the PurchaseOrder schema." : "."}</div>`}
     </div>`;
 }
 
@@ -2642,7 +2652,7 @@ function bcTestPanel(d, adapter) {
   return `
     <div class="max-w-4xl">
       <div class="flex items-center gap-3 flex-wrap">
-        <button id="bc-test" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Test adapter (dry run)</button>
+        <button id="bc-test" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Test connector (dry run)</button>
         <button id="bc-ingest" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Ingest for real →</button>
         <span class="text-xs text-stone-400">dry run pulls + grades against the model without writing; ingest lands rows in the projection store</span>
       </div>
@@ -2688,7 +2698,7 @@ function bindBcWorkbench() {
   });
   document.getElementById("bc-reset")?.addEventListener("click", async () => {
     if (!adapter) return;
-    if (!confirm("Reset this adapter to a clean simulated draft? Its AI-authored code and stored credentials will be deleted.")) return;
+    if (!confirm("Reset this connector to a clean simulated draft? Its AI-authored code and stored credentials will be deleted.")) return;
     state.bcBusy = true; render();
     try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/reset`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
     catch (e) { alert("Reset failed: " + e.message); }
@@ -2696,7 +2706,7 @@ function bindBcWorkbench() {
   });
   document.getElementById("bc-remove")?.addEventListener("click", async () => {
     if (!adapter) return;
-    if (!confirm("Remove this adapter entirely? This deletes its code, credentials, and configuration.")) return;
+    if (!confirm("Remove this connector entirely? This deletes its code, credentials, and configuration.")) return;
     state.bcBusy = true; render();
     try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}`, { method: "DELETE" }); await loadBc(state.bc); }
     catch (e) { alert("Remove failed: " + e.message); }
@@ -4223,7 +4233,7 @@ function sectionBar() {
       <div class="px-6 flex items-center gap-6">
         ${sectionTab("#", "Overview", overviewActive, "Live ops — instances in flight for this workflow")}
         ${sectionTab("#model", "Model", modelActive, "Qlerify model — versions, source link, and workflow.json")}
-        ${sectionTab("#bcs", "Systems", systemsActive, "Data sources and adapters for this workflow")}
+        ${sectionTab("#bcs", "Systems", systemsActive, "Data sources and connectors for this workflow")}
         ${sectionTab("#connectors", "Connectors", connectorsActive, "All data connectors for this workflow — details, re-point, delete")}
       </div>
     </div>`;

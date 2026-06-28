@@ -694,9 +694,12 @@ async function handleIngestConnector(args: Record<string, any>) {
   const limit = Number(args.limit ?? 25);
   // ingestPull journals the "ingested" note itself (one place for every caller).
   const summary = await ingestPull(id, { limit: limit > 0 ? limit : 25 });
+  const ev = summary.derived && summary.derived.events
+    ? ` Derived ${summary.derived.events} domain event(s) across ${summary.derived.instances} instance(s) from the new rows.`
+    : "";
   return ok({
     ingested: true, ...summary,
-    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.`,
+    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.${ev}`,
   });
 }
 

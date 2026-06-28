@@ -1080,6 +1080,7 @@ function parseHash() {
   if (h.startsWith("#org")) return { view: "org" };
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#model")) return { view: "model" };
+  if (h.startsWith("#connectors")) return { view: "connectors" };
   if (h.startsWith("#bcs")) return { view: "bcs" };
   if ((m = h.match(/^#case\/([\w-]+)/))) return { view: "detail", caseId: m[1] };
   return { view: "dashboard" };
@@ -1096,7 +1097,7 @@ function navigate(hash) {
 
 let dashboardTimer = null;
 
-const WORKFLOW_SCOPED_VIEWS = new Set(["dashboard", "detail", "model", "bcs", "bc"]);
+const WORKFLOW_SCOPED_VIEWS = new Set(["dashboard", "detail", "model", "bcs", "bc", "connectors"]);
 
 async function ensureWorkflowSelected() {
   if (AUTH.workflow()) return;
@@ -1159,6 +1160,8 @@ async function onHashChange() {
       await loadAdmin();
     } else if (r.view === "bcs") {
       await loadExplorer();
+    } else if (r.view === "connectors") {
+      await loadConnectors();
     } else if (r.view === "bc") {
       await loadBc(r.bc);
     } else if (r.view === "model") {
@@ -1842,7 +1845,7 @@ function bcHeader(title, subtitle, back) {
 // ===========================================================================
 
 function expState() {
-  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false };
+  if (!state.exp) state.exp = { systems: [], system: null, entities: [], valueObjects: [], entity: null, items: [], adapters: [], health: null, filters: [], page: 0, panelMode: "history", sysCollapsed: false, tablesCollapsed: false, busy: false, tableMissing: false, showEvents: false, rowEvents: {}, rowEventsBusy: false };
   return state.exp;
 }
 
@@ -1888,7 +1891,28 @@ async function selectExpEntity(name) {
     e.items = d.rows || [];
     e.tableMissing = !!d.tableMissing;
   } catch (_err) { e.items = []; e.tableMissing = true; }
+  e.rowEvents = {}; // events belong to the previous table — drop them
+  if (e.showEvents) e.rowEvents = await fetchRowEvents(e);
   e.busy = false; render();
+}
+
+// Fetch the per-row event trail for the selected table: { rowId: [event, …] }.
+// Returns the map (no render) so callers control when the UI updates.
+async function fetchRowEvents(e) {
+  if (!e.system || !e.entity) return {};
+  try {
+    const d = await api(`/api/bc/${encodeURIComponent(e.system)}/row-events?entity=${encodeURIComponent(e.entity)}&limit=2000`);
+    return d.byRow || {};
+  } catch (_err) { return {}; }
+}
+
+// Load (with a busy flag + render) the per-row events for the current table —
+// used when the "Events per row" toggle is flipped on.
+async function loadRowEvents() {
+  const e = expState();
+  e.rowEventsBusy = true; render();
+  e.rowEvents = await fetchRowEvents(e);
+  e.rowEventsBusy = false; render();
 }
 
 function expAdaptersForEntity(e) {
@@ -1934,11 +1958,11 @@ async function expClearRows() {
   }
 }
 
-async function expResetConnector(id) {
+async function expDeleteConnector(id) {
   const e = expState();
   if (e.busy || !e.system) return;
   if (!confirm(
-    `Completely reset connector "${id}"?\n\n` +
+    `Completely delete connector "${id}"?\n\n` +
     `This permanently deletes EVERYTHING for this connector:\n` +
     `• its code & stored credentials\n` +
     `• ALL ingested rows in table "${e.entity}"\n` +
@@ -1948,11 +1972,11 @@ async function expResetConnector(id) {
   )) return;
   e.busy = true; render();
   try {
-    const r = await api(`/api/bc/${encodeURIComponent(e.system)}/connector/${encodeURIComponent(id)}/reset`, { method: "POST", body: "{}" });
+    const r = await api(`/api/bc/${encodeURIComponent(e.system)}/connector/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" });
     await refreshExplorerAfterChat(); // connector is gone → card disappears, table empties
-    alert(`Connector "${id}" reset.\n\nDeleted ${r.deletedRows} row(s) and ${r.deletedEvents} event(s); code, credentials, and history removed.`);
+    alert(`Connector "${id}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s), plus its code, credentials, and history.`);
   } catch (err) {
-    alert("Reset failed: " + err.message);
+    alert("Delete failed: " + err.message);
   } finally {
     e.busy = false; render();
   }
@@ -1997,6 +2021,8 @@ async function refreshExplorerAfterChat() {
       e.items = d.rows || [];
       e.tableMissing = !!d.tableMissing;
     } catch (_e) { /* keep prior */ }
+    // Ingest/clear changes the derived events too → refresh the per-row trail.
+    if (e.showEvents) e.rowEvents = await fetchRowEvents(e);
   }
   // A create/build/ingest changes connection status → refresh the Tables-pane
   // status dots too so they update without a manual reload (caller renders).
@@ -2134,6 +2160,45 @@ function expTablesCol(e) {
     </div>`;
 }
 
+// Provenance → dot colour for the per-row event chips (same scheme as the table
+// status dots: live = emerald, recorded = violet, simulated = sky).
+const EVENT_PROV_DOT = { live: "bg-emerald-500", recorded: "bg-violet-500", simulated: "bg-sky-500" };
+const EVENT_PROV_LABEL = { live: "Live", recorded: "Recorded", simulated: "Simulated" };
+
+// One event chip: name + provenance dot + business time, with a hover title
+// spelling out provenance, role, evidence, and time.
+function eventChip(ev) {
+  const prov = ev.provenance || "simulated";
+  const when = ev.businessAt || ev.occurredAt;
+  const tip = [
+    `${EVENT_PROV_LABEL[prov] || prov} event`,
+    ev.role ? `Role: ${ev.role}` : "",
+    ev.evidence ? `Evidence: ${ev.evidence}` : "",
+    when ? `When: ${formatVersionDate(when)}` : "",
+  ].filter(Boolean).join(" · ");
+  const time = when ? `<span class="text-stone-400 ml-0.5 shrink-0">${escapeHtml(formatVersionDate(when))}</span>` : "";
+  return `<span title="${escapeHtml(tip)}" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-stone-200 bg-white text-[11px] text-stone-700 max-w-full">
+    <span class="w-1.5 h-1.5 rounded-full shrink-0 ${EVENT_PROV_DOT[prov] || EVENT_PROV_DOT.simulated}"></span>
+    <span class="font-medium truncate">${escapeHtml(ev.eventName)}</span>${time}
+  </span>`;
+}
+
+// The rightmost "Events" cell for a row when the toggle is on: the row's events
+// stacked vertically (one chip per line). A single event keeps the row near its
+// normal height; more events grow the row to fit. Busy/empty states keep the
+// cell from looking broken while the trail is loading or genuinely empty.
+function rowEventsCell(events, busy) {
+  let inner;
+  if (busy && (!events || !events.length)) {
+    inner = '<span class="text-[11px] text-stone-400 italic">Loading…</span>';
+  } else if (!events || !events.length) {
+    inner = '<span class="text-[11px] text-stone-400 italic">No events fired</span>';
+  } else {
+    inner = events.map(eventChip).join("");
+  }
+  return `<td class="px-3 py-2 align-top border-l border-stone-100"><div class="flex flex-col items-start gap-1">${inner}</div></td>`;
+}
+
 function expMain(e) {
   if (!e.system) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Loading systems…</div>`;
   if (!e.entity) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Select a table to explore its items.</div>`;
@@ -2147,22 +2212,28 @@ function expMain(e) {
   const pages = Math.max(1, Math.ceil(rows.length / PAGE));
   const page = Math.min(e.page, pages - 1);
   const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
-  const headerCells = cols.map((c) => `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200">${escapeHtml(c)}</th>`).join("");
+  const headerCells = cols.map((c) => `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200">${escapeHtml(c)}</th>`).join("")
+    + (e.showEvents ? `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200 border-l border-stone-100">⚡ Events</th>` : "");
+  // With the events column on, top-align every cell so a row that grows to fit
+  // several stacked events keeps its other values lined up at the top.
+  const tdAlign = e.showEvents ? "align-top" : "";
   const bodyRows = pageRows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
-      <td class="px-3 py-2"><input type="checkbox" class="rounded border-stone-300" /></td>
+      <td class="px-3 py-2 ${tdAlign}"><input type="checkbox" class="rounded border-stone-300" /></td>
       ${cols.map((c, ci) => {
         const val = r[c];
         const empty = val === null || val === undefined || val === "";
         const s = empty ? "" : String(val);
         const disp = empty ? '<span class="text-stone-300">—</span>' : escapeHtml(s.length > 44 ? s.slice(0, 44) + "…" : s);
-        return `<td class="px-3 py-2 text-sm whitespace-nowrap ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}">${disp}</td>`;
+        return `<td class="px-3 py-2 text-sm whitespace-nowrap ${tdAlign} ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}">${disp}</td>`;
       }).join("")}
+      ${e.showEvents ? rowEventsCell(e.rowEvents[r.id], e.rowEventsBusy) : ""}
     </tr>`).join("");
   return `
     <div class="flex-1 flex flex-col min-w-0 bg-white">
       <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
         <div class="flex items-center gap-2">
+          <button id="exp-toggle-events" class="px-4 py-1.5 text-sm rounded-full border ${e.showEvents ? "border-violet-400 bg-violet-50 text-violet-700" : "border-stone-300 bg-white text-stone-600 hover:bg-stone-50"} font-medium" title="Show the domain events each row produced, inline beneath it">⚡ Events ${e.showEvents ? "on" : "off"}</button>
           <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
           <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table and the simulated events derived from it (connectors are kept)">Delete all rows</button>
           <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Connectors</button>
@@ -2227,6 +2298,7 @@ const NOTE_BADGE = {
   credentials: "bg-violet-100 text-violet-800",
   ingested: "bg-teal-100 text-teal-800",
   cleared: "bg-orange-100 text-orange-800",
+  repointed: "bg-indigo-100 text-indigo-800",
   removed: "bg-rose-100 text-rose-800",
   note: "bg-stone-100 text-stone-700",
 };
@@ -2250,15 +2322,15 @@ function connectorCard(a) {
     : "";
   // Destructive, connector-scoped, rarely used → a small, low-emphasis link at the
   // bottom of the card rather than a prominent button up in the table header.
-  const resetBtn = a.kind === "connector"
+  const deleteBtn = a.kind === "connector"
     ? `<div class="mt-2 pt-2 border-t border-stone-100 text-right">
-        <button data-reset-connector="${escapeHtml(a.id)}" class="text-[11px] text-rose-600 hover:text-rose-700 hover:underline" title="Completely reset this connector — its code, credentials, ingested data, derived events, and history. Cannot be undone.">⟲ Reset connector</button>
+        <button data-delete-connector="${escapeHtml(a.id)}" class="text-[11px] text-rose-600 hover:text-rose-700 hover:underline" title="Completely delete this connector — its code, credentials, ingested data, derived events, and history. Cannot be undone.">🗑 Delete connector</button>
       </div>`
     : "";
   return `<div class="rounded-md border border-stone-200 p-2.5">
     <div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div>
     <div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div>
-    ${summary}${notesHtml}${resetBtn}
+    ${summary}${notesHtml}${deleteBtn}
   </div>`;
 }
 
@@ -2376,11 +2448,18 @@ function bindExplorer() {
     else { e.panelMode = "history"; state.chatOpen = true; if (!state.chatInfo) loadChatInfo().then(render); }
     render();
   });
+  // "Events" pill: toggle the per-row event trail. Turning it on fetches the
+  // trail for the current table; turning it off just re-renders without the band.
+  document.getElementById("exp-toggle-events")?.addEventListener("click", () => {
+    const e = expState();
+    e.showEvents = !e.showEvents;
+    if (e.showEvents) loadRowEvents(); else render();
+  });
   document.getElementById("exp-fetch-rows")?.addEventListener("click", expFetchRows);
   document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
-  document.querySelectorAll("[data-reset-connector]").forEach((el) =>
-    el.addEventListener("click", () => expResetConnector(el.dataset.resetConnector)));
+  document.querySelectorAll("[data-delete-connector]").forEach((el) =>
+    el.addEventListener("click", () => expDeleteConnector(el.dataset.deleteConnector)));
 }
 
 function bcListView() {
@@ -3686,7 +3765,12 @@ function render() {
     root.innerHTML = wrap(explorerView());
     bindTenantBar();
     bindExplorer();
-    bindChat();  } else if (state.view === "bc") {
+    bindChat();  } else if (state.view === "connectors") {
+    root.innerHTML = wrap(connectorsView());
+    bindTenantBar();
+    bindConnectors();
+    bindChat();
+  } else if (state.view === "bc") {
     root.innerHTML = wrap(bcWorkbenchView());
     bindTenantBar();
     bindBcWorkbench();
@@ -3954,17 +4038,193 @@ function sectionTab(href, label, active, title) {
   return `<a href="${href}" class="py-2.5 -mb-px border-b-2 ${cls} whitespace-nowrap" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`;
 }
 
+// ---------------------------------------------------------------------------
+// Connectors tab (#connectors) — workflow-wide inventory of data connectors:
+// active + orphaned, with detail, re-point, and delete. This is the ONLY home for
+// orphaned connectors (whose target table was renamed/removed), and re-point is
+// the deliberate manual recovery path (no automatic rename detection).
+// ---------------------------------------------------------------------------
+
+async function loadConnectors() {
+  state.connBusy = true; render();
+  try {
+    const d = await api("/api/connectors");
+    state.connectors = d;
+    state.connError = null;
+    const ids = (d.connectors || []).map((c) => c.id);
+    if (state.connSel && !ids.includes(state.connSel)) state.connSel = null;
+    if (!state.connSel && ids.length) state.connSel = ids[0];
+  } catch (e) {
+    state.connectors = { connectors: [], tables: [] };
+    state.connError = e.message;
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+function connStatusDot(status) {
+  return status === "orphaned"
+    ? `<span class="inline-block w-2 h-2 rounded-full bg-rose-500 shrink-0" title="Orphaned — target table missing"></span>`
+    : `<span class="inline-block w-2 h-2 rounded-full bg-emerald-500 shrink-0" title="Active"></span>`;
+}
+
+function connListRow(c) {
+  const sel = state.connSel === c.id;
+  return `<button data-conn-row="${escapeHtml(c.id)}" class="w-full text-left px-3 py-2.5 border-b border-stone-100 ${sel ? "bg-sky-50" : "hover:bg-stone-50"}">
+    <div class="flex items-center gap-2">${connStatusDot(c.status)}<span class="text-sm font-medium text-stone-800 truncate">${escapeHtml(c.id)}</span></div>
+    <div class="text-[11px] text-stone-500 mt-0.5 truncate">${escapeHtml(c.boundedContext)} → ${escapeHtml(c.targetEntity)}${c.status === "orphaned" ? " (missing)" : ""} · ${c.rowCount} row(s)</div>
+  </button>`;
+}
+
+function connDetail(c) {
+  if (!c) return `<div class="p-8 text-sm text-stone-400">Select a connector to see its details.</div>`;
+  const tables = state.connectors?.tables || [];
+  // Re-point options: tables free in this workflow (plus the current target).
+  const free = tables.filter((t) => !t.occupiedBy || t.occupiedBy === c.id);
+  const opts = free.map((t) => `<option value="${escapeHtml(t.name)}" ${t.name === c.targetEntity ? "selected" : ""}>${escapeHtml(t.name)}${t.kind === "valueObject" ? " (value object)" : ""}${t.name === c.targetEntity ? " — current" : ""}</option>`).join("");
+  const notes = (c.notes || []).slice(-8).reverse();
+  const notesHtml = notes.length
+    ? notes.map((n) => `<div class="flex items-baseline gap-1.5 text-[11px] py-0.5">
+        <span class="px-1 py-0.5 rounded ${NOTE_BADGE[n.kind] || NOTE_BADGE.note} shrink-0">${escapeHtml(n.kind)}</span>
+        <span class="flex-1 text-stone-600">${escapeHtml(n.text)}</span>
+        <span class="text-stone-400 shrink-0">${escapeHtml(formatVersionDate(n.at))}</span>
+      </div>`).join("")
+    : `<div class="text-xs text-stone-400">No history recorded.</div>`;
+  const chip = (label, val) => `<div class="text-[11px]"><span class="text-stone-400">${label}</span> <span class="text-stone-700">${val}</span></div>`;
+  const orphan = c.status === "orphaned";
+  return `
+    <div class="p-6 overflow-y-auto flex-1">
+      <div class="flex items-center gap-2">
+        ${connStatusDot(c.status)}
+        <h2 class="text-xl font-semibold text-stone-900">${escapeHtml(c.id)}</h2>
+        <span class="px-2 py-0.5 text-[11px] rounded-full ${orphan ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}">${orphan ? "orphaned" : "active"}</span>
+      </div>
+      ${c.summary
+        ? `<div class="text-sm text-stone-600 mt-2 italic">${escapeHtml(c.summary)}</div>`
+        : `<div class="text-sm text-stone-400 mt-2 italic">No description yet — build the connector to generate one.</div>`}
+      ${orphan ? `<div class="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">Its target table <b>${escapeHtml(c.targetEntity)}</b> no longer exists in the model — likely renamed or removed. It can't ingest until you <b>re-point</b> it at a current table (or delete it).</div>` : ""}
+
+      <div class="grid grid-cols-2 gap-x-6 gap-y-1 mt-4">
+        ${chip("System", escapeHtml(c.boundedContext))}
+        ${chip("Table", `${escapeHtml(c.targetEntity)} (${escapeHtml(c.targetKind)})`)}
+        ${chip("Mode", escapeHtml(c.mode))}
+        ${chip("Rows", String(c.rowCount))}
+        ${chip("Code", c.hasCode ? "built" : "none")}
+        ${chip("Credentials", c.credentialKeys.length ? escapeHtml(c.credentialKeys.join(", ")) : "none")}
+        ${chip("Packages", c.deps.length ? escapeHtml(c.deps.join(", ")) : "none")}
+        ${chip("Endpoint", c.endpoint ? escapeHtml(c.endpoint) : "—")}
+        ${chip("Last pull", c.lastPullAt ? escapeHtml(formatVersionDate(c.lastPullAt)) : "never")}
+        ${c.owned ? "" : chip("Owner", "legacy (unassigned)")}
+      </div>
+
+      <div class="mt-5 rounded-lg border border-stone-200 p-4">
+        <div class="text-sm font-medium text-stone-800">Re-point</div>
+        <div class="text-xs text-stone-500 mt-0.5">Point this connector at a different table. Going forward only — existing rows in the old table stay put; the connector fills the new table on the next Fetch.</div>
+        <div class="flex items-center gap-2 mt-3">
+          <select id="conn-repoint-target" class="flex-1 text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white">${opts}</select>
+          <button id="conn-repoint-btn" ${state.connBusy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium">Re-point</button>
+        </div>
+      </div>
+
+      <div class="mt-4">
+        <div class="text-[11px] font-medium text-stone-500 uppercase tracking-wide mb-1">History</div>
+        <div class="rounded-lg border border-stone-100 p-3 space-y-0.5">${notesHtml}</div>
+      </div>
+
+      <div class="mt-5 rounded-lg border border-rose-200 bg-rose-50/40 p-4">
+        <div class="text-sm font-medium text-rose-800">Danger zone</div>
+        <div class="text-xs text-stone-600 mt-0.5">Completely delete this connector — its code, credentials, ingested data, derived events, and history. Cannot be undone.</div>
+        <button id="conn-delete-btn" ${state.connBusy ? "disabled" : ""} class="mt-3 px-4 py-1.5 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-40 font-medium">🗑 Delete connector</button>
+      </div>
+    </div>`;
+}
+
+function connectorsView() {
+  const data = state.connectors || { connectors: [], tables: [] };
+  const list = data.connectors || [];
+  if (state.connError) return `<main class="p-8"><div class="text-rose-600 text-sm">${escapeHtml(state.connError)}</div></main>`;
+  if (!list.length) {
+    return `<main class="flex-1 flex items-center justify-center p-10">
+      <div class="text-center max-w-md">
+        <div class="text-3xl mb-2">🔌</div>
+        <div class="text-lg font-semibold text-stone-800">No connectors yet</div>
+        <div class="text-sm text-stone-500 mt-1">Build one in <a href="#bcs" class="text-sky-700 hover:underline">Systems</a>: pick a table and choose “Build connector with AI”. Connectors show up here for management and re-pointing.</div>
+      </div>
+    </main>`;
+  }
+  const orphaned = list.filter((c) => c.status === "orphaned");
+  const active = list.filter((c) => c.status !== "orphaned");
+  const sel = list.find((c) => c.id === state.connSel) || null;
+  const section = (title, items, tone) => items.length
+    ? `<div class="px-3 py-1.5 text-[11px] uppercase tracking-wide ${tone} bg-stone-50 border-b border-stone-200">${title} (${items.length})</div>${items.map(connListRow).join("")}`
+    : "";
+  return `
+    <main class="flex-1 flex min-h-0">
+      <div class="w-[340px] border-r border-stone-200 overflow-y-auto bg-white">
+        ${section("Needs attention", orphaned, "text-rose-600 font-semibold")}
+        ${section("Active", active, "text-stone-500")}
+      </div>
+      <div class="flex-1 flex flex-col min-w-0 bg-white">${connDetail(sel)}</div>
+    </main>`;
+}
+
+function bindConnectors() {
+  document.querySelectorAll("[data-conn-row]").forEach((el) =>
+    el.addEventListener("click", () => { state.connSel = el.dataset.connRow; render(); }));
+  document.getElementById("conn-repoint-btn")?.addEventListener("click", connRepoint);
+  document.getElementById("conn-delete-btn")?.addEventListener("click", connDelete);
+}
+
+async function connRepoint() {
+  const id = state.connSel;
+  if (!id || state.connBusy) return;
+  const target = document.getElementById("conn-repoint-target")?.value;
+  const cur = (state.connectors?.connectors || []).find((c) => c.id === id);
+  if (!target || (cur && target === cur.targetEntity)) { alert("Pick a different table to re-point to."); return; }
+  if (!confirm(`Re-point connector "${id}" to table "${target}"?\n\nIt will fill "${target}" on the next Fetch. Existing rows in "${cur?.targetEntity}" are left untouched.`)) return;
+  state.connBusy = true; render();
+  try {
+    await api(`/api/connectors/${encodeURIComponent(id)}/repoint`, { method: "POST", body: JSON.stringify({ target }) });
+    await loadConnectors();
+    alert(`Re-pointed "${id}" to "${target}".`);
+  } catch (e) {
+    alert("Re-point failed: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+async function connDelete() {
+  const id = state.connSel;
+  if (!id || state.connBusy) return;
+  const cur = (state.connectors?.connectors || []).find((c) => c.id === id);
+  if (!confirm(`Completely delete connector "${id}"?\n\nThis permanently deletes its code, credentials, ALL ingested rows in "${cur?.targetEntity}", the derived events, and its entire history. The connector is removed. This cannot be undone.`)) return;
+  state.connBusy = true; render();
+  try {
+    const r = await api(`/api/connectors/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" });
+    state.connSel = null;
+    await loadConnectors();
+    alert(`Connector "${id}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s).`);
+  } catch (e) {
+    alert("Delete failed: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
 function sectionBar() {
   if (!showWorkflowSectionBar()) return "";
   const overviewActive = state.view === "dashboard" || state.view === "detail";
   const modelActive = state.view === "model";
   const systemsActive = state.view === "bcs" || state.view === "bc";
+  const connectorsActive = state.view === "connectors";
   return `
     <div class="bg-stone-50 text-sm border-b border-stone-200">
       <div class="px-6 flex items-center gap-6">
         ${sectionTab("#", "Overview", overviewActive, "Live ops — instances in flight for this workflow")}
         ${sectionTab("#model", "Model", modelActive, "Qlerify model — versions, source link, and workflow.json")}
         ${sectionTab("#bcs", "Systems", systemsActive, "Data sources and adapters for this workflow")}
+        ${sectionTab("#connectors", "Connectors", connectorsActive, "All data connectors for this workflow — details, re-point, delete")}
       </div>
     </div>`;
 }

@@ -21,7 +21,7 @@ const JOURNAL_DIR = join(QLERIFY_DIR, "connector-journal");
 const MAX_NOTES = 100; // keep the doc bounded; oldest notes roll off
 
 export type ConnectorNoteKind =
-  | "created" | "built" | "repaired" | "credentials" | "ingested" | "cleared" | "removed" | "note";
+  | "created" | "built" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "note";
 
 export interface ConnectorNote {
   at: string;              // ISO timestamp

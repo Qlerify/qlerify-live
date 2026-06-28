@@ -5,8 +5,9 @@
 // a normal registry entry), so they live in tools.ts / ingest.ts unchanged.
 
 import { getOntology } from "../../ontology/model.js";
+import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.js";
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
-import { readSidecar, writeSidecar, deleteSidecar } from "../sidecar.js";
+import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
 import { generateConnectorModule, describeConnector } from "./codegen.js";
 import {
@@ -20,6 +21,37 @@ import type { AdapterConfig } from "../types.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
+}
+
+/** Owning tenant for a connector, from the request context. Null off-request
+ * (boot / tests) — those connectors are adopted by model membership instead. */
+export function connectorOwner(): { workflowId: string | null; organizationId: string | null } {
+  try {
+    return { workflowId: currentWorkflowId(), organizationId: currentOrgId() };
+  } catch {
+    return { workflowId: null, organizationId: null };
+  }
+}
+
+/** Does this connector sidecar belong to the given workflow? A stamped owner is
+ * authoritative; a legacy (unstamped) connector is adopted by the workflow whose
+ * live model defines its target table. */
+export function connectorInWorkflow(cfg: AdapterConfig, workflowId: string | null): boolean {
+  if (cfg.kind !== "connector") return false;
+  if ((cfg.workflowId ?? null) === workflowId) return true;
+  return !cfg.workflowId && !!resolveTargetSchema(cfg.targetEntity);
+}
+
+/** Every connector in the active workflow's scope. The Connectors tab's source. */
+export function connectorsInWorkflow(workflowId: string | null): AdapterConfig[] {
+  return listSidecars().filter((s) => connectorInWorkflow(s, workflowId));
+}
+
+/** The connector (if any) already populating `target` in `workflowId` — the
+ * one-connector-per-table invariant, enforced at create and re-point. */
+export function connectorForTarget(target: string, workflowId: string | null, exceptId?: string): AdapterConfig | undefined {
+  return listSidecars().find((s) =>
+    s.kind === "connector" && s.targetEntity === target && s.id !== exceptId && connectorInWorkflow(s, workflowId));
 }
 
 /** Deterministic doc summary from metadata alone — the fallback when the AI
@@ -78,9 +110,16 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   const targetKind: "entity" | "valueObject" = o.entity(input.target) ? "entity" : "valueObject";
   const id = slug(input.id || `${bc}-${input.target}`);
   if (getAdapter(id) || readSidecar(id)) throw new Error(`a connector/adapter "${id}" already exists`);
+  // One connector per table (within this workflow). Catches the custom-id and
+  // legacy-adoption paths the id check alone would miss.
+  const { workflowId, organizationId } = connectorOwner();
+  const clash = connectorForTarget(input.target, workflowId, id);
+  if (clash) {
+    throw new Error(`A connector already populates "${input.target}" in this workflow: "${clash.id}". Delete that connector first (Connectors tab → Delete), or choose a different table.`);
+  }
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: bc, targetEntity: input.target, targetKind,
-    phase: "draft", mode: "live",
+    phase: "draft", mode: "live", workflowId, organizationId,
   };
   writeSidecar(cfg);
   registerAdapter(createConnectorAdapter(cfg));

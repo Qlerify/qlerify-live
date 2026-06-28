@@ -8,13 +8,14 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../db.js";
 import { isHandledError } from "../errors.js";
-import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/model.js";
 import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } from "../ontology/bc-helpers.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatId, appendNote } from "../packs/connector/journal.js";
 import { removeConnector } from "../packs/connector/orchestrate.js";
+import { purgeEntityData } from "../twin/purge.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { provenanceMeta } from "../twin/provenance.js";
 import { computeSystemsHealth } from "../twin/systems-health.js";
 import * as store from "../twin/projection-store.js";
@@ -25,19 +26,6 @@ async function eventCounts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const r of rows) out[r.boundedContext] = r._count._all;
   return out;
-}
-
-/** Wipe one entity's ingested data: its gen_ rows (org-scoped) AND the simulated
- * events derived from them (rooted at this aggregate, workflow/org-scoped). The
- * shared core of "Delete all rows" and "Reset connector". Returns the counts and
- * whether the table existed. Value objects are no aggregate's root, so events is 0. */
-async function purgeEntityData(entity: string): Promise<{ rows: number; events: number; tableExisted: boolean }> {
-  const tableExisted = await store.tableExists(entity);
-  const rows = tableExisted ? await store.clearTable(entity) : 0;
-  const { count: events } = await prisma.eventLog.deleteMany({
-    where: { aggregateRoot: entity, ...eventLogOrgWhere() },
-  });
-  return { rows, events, tableExisted };
 }
 
 function slimEvent(e: OntologyEvent) {
@@ -184,6 +172,32 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return { entity, rows: await store.findMany(entity, limit), tableMissing: false };
   });
 
+  // Row-level event trail — every domain event produced for each row of one gen_
+  // table, grouped by the row id (EventLog.aggregateId == gen_<Entity>.id). Powers
+  // the explorer's "Events per row" toggle: the events that an ingested/simulated
+  // row gave rise to, shown inline beneath it. Pure projection over the EventLog,
+  // scoped to the active workflow/org (same scope as the /raw rows it annotates).
+  // Value objects are no aggregate's root, so this is an empty map for them.
+  app.get("/api/bc/:bc/row-events", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const entity = String((req.query as any)?.entity ?? "");
+    if (!entity) return reply.code(400).send({ error: "NO_ENTITY", message: "entity required" });
+    const limit = Math.max(1, Math.min(5000, Number((req.query as any)?.limit ?? 2000)));
+    const rows = await prisma.eventLog.findMany({
+      where: { aggregateRoot: entity, ...eventLogOrgWhere() },
+      orderBy: { occurredAt: "asc" },
+      take: limit,
+      select: {
+        eventName: true, aggregateId: true, role: true, provenance: true,
+        evidence: true, evidenceKind: true, occurredAt: true, businessAt: true, caseId: true,
+      },
+    });
+    const byRow: Record<string, any[]> = {};
+    for (const r of rows) (byRow[r.aggregateId] ??= []).push(r);
+    return { entity, byRow, total: rows.length };
+  });
+
   // Clear — delete every row in one gen_ table AND the simulated events derived
   // from those rows. The event store is a best-effort simulation OF the static
   // data (twin/derive.ts), not an independent source of truth, so when the rows
@@ -212,13 +226,13 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return { entity, deleted, eventsDeleted, tableMissing: !tableExisted };
   });
 
-  // Reset connector — the full teardown for ONE connector: delete its code +
+  // Delete connector — the full teardown for ONE connector: delete its code +
   // credentials + config + registry entry + entire history (chat & notes), AND
   // purge the data it produced (the target table's rows + the events derived from
   // them). Nothing is left behind — the table returns to the "no connector yet"
   // state. Distinct from "Delete all rows" (data only) and the workbench "Remove
   // adapter" (no data/events). Connector-kind only.
-  app.post("/api/bc/:bc/connector/:id/reset", async (req, reply) => {
+  app.post("/api/bc/:bc/connector/:id/delete", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
     const id = String((req.params as any).id ?? "");

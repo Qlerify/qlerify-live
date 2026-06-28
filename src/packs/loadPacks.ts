@@ -66,7 +66,24 @@ export async function loadPacks(log?: Logger): Promise<number> {
   // registration is LAZY (createAuthoredAdapter does NOT import the body), so a
   // broken body can never poison boot. Per-sidecar try/catch so one malformed
   // sidecar can't abort the rest (Trap 1 from the design review).
-  for (const cfg of listSidecars()) {
+  // Defense in depth for the one-connector-per-table invariant: never let the
+  // registry hold two CONNECTORS for the same (workflow, system, table). New dupes
+  // are blocked at createConnector; this collapses any that already exist on disk,
+  // keeping one deterministically (lowest id) and warning about the rest.
+  const sidecars = listSidecars();
+  const seenTargets = new Set<string>();
+  const skip = new Set<string>();
+  for (const cfg of [...sidecars].filter((c) => c.kind === "connector").sort((a, b) => a.id.localeCompare(b.id))) {
+    const key = `${cfg.workflowId ?? ""}::${cfg.boundedContext}::${cfg.targetEntity}`;
+    if (seenTargets.has(key)) {
+      skip.add(cfg.id);
+      log?.warn?.({ adapter: cfg.id, target: cfg.targetEntity }, "duplicate connector for table — skipped (one-per-table)");
+    } else {
+      seenTargets.add(key);
+    }
+  }
+  for (const cfg of sidecars) {
+    if (skip.has(cfg.id)) continue;
     try {
       registerAdapter(
         cfg.kind === "connector"

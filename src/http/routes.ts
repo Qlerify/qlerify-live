@@ -20,6 +20,7 @@ import { listAdapters, getAdapter } from "../packs/registry.js";
 import { ingestPull } from "../packs/ingest.js";
 import { registerBcRoutes } from "./bc-routes.js";
 import { registerAdapterCodeRoutes } from "./adapter-routes.js";
+import { registerConnectorRoutes } from "./connector-routes.js";
 import { registerOrgRoutes } from "./org-routes.js";
 
 import { prisma } from "../db.js";
@@ -216,6 +217,7 @@ export function registerRoutes(app: FastifyInstance) {
   // ---------------- Per-BC workbench (Part 2.3) ----------------
   registerBcRoutes(app);
   registerAdapterCodeRoutes(app);
+  registerConnectorRoutes(app);
 
   // ---------------- Organisation portfolio dashboard ----------------
   // The tier above the per-workflow overview: spans every workflow type in the org.

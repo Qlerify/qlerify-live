@@ -72,6 +72,12 @@ export interface AdapterConfig {
   targetEntity: string;
   phase: AdapterPhase;
   mode: ProvMode;
+  /** Owning tenant — stamped at create from the request context so the Connectors
+   * tab and the one-connector-per-table rule are scoped per workflow. Null/absent
+   * on legacy sidecars created before scoping; those are adopted by the workflow
+   * whose model defines their target table. */
+  workflowId?: string | null;
+  organizationId?: string | null;
   connectionOptionId?: string;
   credentialsRef?: string;
   fieldMap?: FieldMap;

@@ -4310,7 +4310,46 @@ function bindDetail() {
 // Render dispatcher
 // ---------------------------------------------------------------------------
 
+// Every render() rebuilds the view via root.innerHTML, which destroys whatever
+// element the user was typing in. The 5s background polls (loadFlow/loadDashboard/
+// loadOrg/...) call render() too, so an open input loses focus and its caret every
+// few seconds. Snapshot the focused editable element (by id) + its selection before
+// the rebuild and restore it afterward so typing is never interrupted.
+function captureFocus() {
+  const el = document.activeElement;
+  if (!el || !el.id) return null;
+  const tag = el.tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !el.isContentEditable) return null;
+  const snap = { id: el.id };
+  try {
+    if (tag === "INPUT" || tag === "TEXTAREA") {
+      snap.start = el.selectionStart;
+      snap.end = el.selectionEnd;
+    }
+  } catch { /* some input types disallow selection access */ }
+  return snap;
+}
+
+function restoreFocus(snap) {
+  if (!snap) return;
+  const el = document.getElementById(snap.id);
+  if (!el || el === document.activeElement) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (snap.start != null && el.setSelectionRange) el.setSelectionRange(snap.start, snap.end);
+  } catch { /* element may no longer be focusable */ }
+}
+
 function render() {
+  const focusSnap = captureFocus();
+  try {
+    renderView();
+  } finally {
+    restoreFocus(focusSnap);
+  }
+}
+
+function renderView() {
   const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant shell (scope bar + workflow

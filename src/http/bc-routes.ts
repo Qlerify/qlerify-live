@@ -14,6 +14,7 @@ import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } fro
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatId, appendNote } from "../packs/connector/journal.js";
+import { removeConnector } from "../packs/connector/orchestrate.js";
 import { provenanceMeta } from "../twin/provenance.js";
 import { computeSystemsHealth } from "../twin/systems-health.js";
 import * as store from "../twin/projection-store.js";
@@ -24,6 +25,19 @@ async function eventCounts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const r of rows) out[r.boundedContext] = r._count._all;
   return out;
+}
+
+/** Wipe one entity's ingested data: its gen_ rows (org-scoped) AND the simulated
+ * events derived from them (rooted at this aggregate, workflow/org-scoped). The
+ * shared core of "Delete all rows" and "Reset connector". Returns the counts and
+ * whether the table existed. Value objects are no aggregate's root, so events is 0. */
+async function purgeEntityData(entity: string): Promise<{ rows: number; events: number; tableExisted: boolean }> {
+  const tableExisted = await store.tableExists(entity);
+  const rows = tableExisted ? await store.clearTable(entity) : 0;
+  const { count: events } = await prisma.eventLog.deleteMany({
+    where: { aggregateRoot: entity, ...eventLogOrgWhere() },
+  });
+  return { rows, events, tableExisted };
 }
 
 function slimEvent(e: OntologyEvent) {
@@ -188,18 +202,33 @@ export function registerBcRoutes(app: FastifyInstance): void {
       entitiesForBc(o, bc).some((e) => e.name === entity)
       || valueObjectsForBc(o, bc).some((v) => v.name === entity);
     if (!inBc) return reply.code(400).send({ error: "UNKNOWN_ENTITY", message: `"${entity}" is not a table in ${bc}` });
-    if (!(await store.tableExists(entity))) return { entity, deleted: 0, eventsDeleted: 0, tableMissing: true };
-    const deleted = await store.clearTable(entity);
-    const { count: eventsDeleted } = await prisma.eventLog.deleteMany({
-      where: { aggregateRoot: entity, ...eventLogOrgWhere() },
-    });
+    const { rows: deleted, events: eventsDeleted, tableExisted } = await purgeEntityData(entity);
     // Journal the clear onto the history of every connector targeting this table,
     // mirroring how ingestPull records a "Fetch rows" so both actions show in the
     // builder's notes timeline. No-op when no connector feeds the table.
     for (const a of listAdapters().filter((a) => a.boundedContext === bc && a.targetEntity === entity)) {
       appendNote(a.id, "cleared", `Cleared ${deleted} row(s) and ${eventsDeleted} derived event(s) from ${entity}.`);
     }
-    return { entity, deleted, eventsDeleted, tableMissing: false };
+    return { entity, deleted, eventsDeleted, tableMissing: !tableExisted };
+  });
+
+  // Reset connector — the full teardown for ONE connector: delete its code +
+  // credentials + config + registry entry + entire history (chat & notes), AND
+  // purge the data it produced (the target table's rows + the events derived from
+  // them). Nothing is left behind — the table returns to the "no connector yet"
+  // state. Distinct from "Delete all rows" (data only) and the workbench "Remove
+  // adapter" (no data/events). Connector-kind only.
+  app.post("/api/bc/:bc/connector/:id/reset", async (req, reply) => {
+    const bc = resolveBc((req.params as any).bc);
+    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
+    const id = String((req.params as any).id ?? "");
+    const adapter = listAdapters().find((a) => a.id === id);
+    if (!adapter || adapter.boundedContext !== bc) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
+    if (adapter.kind !== "connector") return reply.code(400).send({ error: "NOT_A_CONNECTOR", message: `"${id}" is not an AI-built connector` });
+    const entity = adapter.targetEntity;
+    const { rows: deletedRows, events: deletedEvents } = await purgeEntityData(entity);
+    removeConnector(id); // code + credentials + sidecar + registry entry + journal (chat & doc)
+    return { id, entity, deletedRows, deletedEvents, removed: true };
   });
 
   // History — latest data updates per event (count + last timestamp + provenance).

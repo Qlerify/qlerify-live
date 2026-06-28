@@ -1934,6 +1934,30 @@ async function expClearRows() {
   }
 }
 
+async function expResetConnector(id) {
+  const e = expState();
+  if (e.busy || !e.system) return;
+  if (!confirm(
+    `Completely reset connector "${id}"?\n\n` +
+    `This permanently deletes EVERYTHING for this connector:\n` +
+    `• its code & stored credentials\n` +
+    `• ALL ingested rows in table "${e.entity}"\n` +
+    `• the events derived from that data\n` +
+    `• the connector's entire history (chat & notes)\n\n` +
+    `The connector is removed — you would build a new one from scratch. This cannot be undone.`,
+  )) return;
+  e.busy = true; render();
+  try {
+    const r = await api(`/api/bc/${encodeURIComponent(e.system)}/connector/${encodeURIComponent(id)}/reset`, { method: "POST", body: "{}" });
+    await refreshExplorerAfterChat(); // connector is gone → card disappears, table empties
+    alert(`Connector "${id}" reset.\n\nDeleted ${r.deletedRows} row(s) and ${r.deletedEvents} event(s); code, credentials, and history removed.`);
+  } catch (err) {
+    alert("Reset failed: " + err.message);
+  } finally {
+    e.busy = false; render();
+  }
+}
+
 // Is the selected table an entity or a value object? (drives the chat context +
 // the sidebar label).
 function expKindOf(e, name) {
@@ -2224,10 +2248,17 @@ function connectorCard(a) {
         </div>`).join("")}
       </div>`
     : "";
+  // Destructive, connector-scoped, rarely used → a small, low-emphasis link at the
+  // bottom of the card rather than a prominent button up in the table header.
+  const resetBtn = a.kind === "connector"
+    ? `<div class="mt-2 pt-2 border-t border-stone-100 text-right">
+        <button data-reset-connector="${escapeHtml(a.id)}" class="text-[11px] text-rose-600 hover:text-rose-700 hover:underline" title="Completely reset this connector — its code, credentials, ingested data, derived events, and history. Cannot be undone.">⟲ Reset connector</button>
+      </div>`
+    : "";
   return `<div class="rounded-md border border-stone-200 p-2.5">
     <div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div>
     <div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div>
-    ${summary}${notesHtml}
+    ${summary}${notesHtml}${resetBtn}
   </div>`;
 }
 
@@ -2348,6 +2379,8 @@ function bindExplorer() {
   document.getElementById("exp-fetch-rows")?.addEventListener("click", expFetchRows);
   document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
+  document.querySelectorAll("[data-reset-connector]").forEach((el) =>
+    el.addEventListener("click", () => expResetConnector(el.dataset.resetConnector)));
 }
 
 function bcListView() {

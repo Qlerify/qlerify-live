@@ -125,3 +125,38 @@ describe("planDerivation — Onboarding evidence rules", () => {
     expect(p.AccountRegistered.fired[0].provenance).toBe("recorded");
   });
 });
+
+describe("planDerivation — connector date roles", () => {
+  const roles = new Map([["Account", { created: "created_at", updated: "updated_at" }]]);
+  const planWithRoles = (rows: Array<Record<string, unknown>>) =>
+    Object.fromEntries(planDerivation(ont, new Map([["Account", rows]]), roles).map((p) => [p.key, p]));
+
+  const row = {
+    id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A",
+    created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-03-01T00:00:00.000Z",
+  };
+
+  it("stamps the create event with the source's creation date", () => {
+    const reg = planWithRoles([row]).AccountRegistered.fired[0].businessAt as Date;
+    expect(reg.toISOString().startsWith("2026-01-01")).toBe(true);
+  });
+
+  it("stamps the update (status) event with the source's last-modified date", () => {
+    const conf = planWithRoles([row]).AccountConfirmed.fired[0].businessAt as Date;
+    expect(conf.toISOString().startsWith("2026-03-01")).toBe(true);
+  });
+
+  it("falls back to the creation date for an update when last-modified is absent", () => {
+    const noUpdated = { ...row, updated_at: "" };
+    const conf = planWithRoles([noUpdated]).AccountConfirmed.fired[0].businessAt as Date;
+    expect(conf.toISOString().startsWith("2026-01-01")).toBe(true);
+  });
+
+  it("ignores roles whose column is unparseable, falling back to the row heuristic", () => {
+    const bad = new Map([["Account", { created: "created_at" }]]);
+    const garbage = { id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A", created_at: "not-a-date", createdAt: "2025-09-09T00:00:00.000Z" };
+    const p = Object.fromEntries(planDerivation(ont, new Map([["Account", [garbage]]]), bad).map((x) => [x.key, x]));
+    const reg = p.AccountRegistered.fired[0].businessAt as Date;
+    expect(reg.toISOString().startsWith("2025-09-09")).toBe(true); // rowBaseDate → row.createdAt
+  });
+});

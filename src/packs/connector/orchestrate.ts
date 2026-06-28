@@ -9,7 +9,7 @@ import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
-import { generateConnectorModule, describeConnector } from "./codegen.js";
+import { generateConnectorModule, describeConnector, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS } from "./codegen.js";
 import {
   writeModule, readModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
   installDeps, deleteConnectorFiles, type InstallResult,
@@ -184,9 +184,26 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   // operator/AI can inspect and repair it.
   const install = await installDeps(gen.deps);
   writeModule(id, gen.code);
-  const next: AdapterConfig = { ...cfg, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps };
+  // Infer which columns hold the source's creation vs last-modified timestamp so
+  // derive can stamp create/update events with real dates. Preserve an existing
+  // (possibly operator-overridden) mapping; only infer when none is set yet, so a
+  // repair turn never silently clobbers a deliberate choice. Best-effort.
+  let dateRoles = cfg.dateRoles;
+  if (!dateRoles?.created && !dateRoles?.updated) {
+    try {
+      const proposed = await proposeDateRoles({ target, instructions: instr, code: gen.code });
+      if (proposed.created || proposed.updated) dateRoles = proposed;
+    } catch { /* leave roles unset; derive falls back to its first-date-field heuristic */ }
+  }
+  const next: AdapterConfig = {
+    ...cfg, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps,
+    ...(dateRoles?.created || dateRoles?.updated ? { dateRoles } : {}),
+  };
   writeSidecar(next);
   registerAdapter(createConnectorAdapter(next));
+  if (dateRoles?.created || dateRoles?.updated) {
+    appendNote(id, "built", `Timestamp roles inferred: created=${dateRoles.created ?? "—"}, updated=${dateRoles.updated ?? "—"}.`);
+  }
   // Let the AI describe the freshly built connector (system, table, access method,
   // and any filters/sort/limits in the code). Runs on every build AND repair, so
   // the description stays in sync with the code.
@@ -212,6 +229,10 @@ export interface ConnectorInfo {
   credentialKeys: string[];
   deps: string[];
   phase: string;
+  /** The source's creation/last-modified timestamp columns, or null if none set. */
+  dateRoles: { created?: string; updated?: string } | null;
+  /** Candidate timestamp columns on the target schema — the override picker's options. */
+  dateFields: string[];
 }
 
 /** Inspect a connector WITHOUT exposing secret values (only credential field
@@ -219,6 +240,7 @@ export interface ConnectorInfo {
 export function connectorInfo(id: string): ConnectorInfo | null {
   const cfg = readSidecar(id);
   if (!cfg) return null;
+  const target = resolveTargetSchema(cfg.targetEntity);
   return {
     id: cfg.id,
     boundedContext: cfg.boundedContext,
@@ -229,7 +251,53 @@ export function connectorInfo(id: string): ConnectorInfo | null {
     credentialKeys: credentialKeys(id),
     deps: cfg.deps ?? [],
     phase: cfg.phase,
+    dateRoles: cfg.dateRoles ?? null,
+    dateFields: target ? timestampFields(target) : [],
   };
+}
+
+/** The created/updated date-role hints declared by the connector populating
+ * `entity` in the active workflow, or undefined. twin/derive.ts consumes these to
+ * stamp create-kind events with the source's creation date and update-kind events
+ * with its last-modified date. Best-effort: off-request (boot/tests) or no
+ * connector → undefined, and derive falls back to its first-date-field heuristic. */
+export function dateRolesForEntity(entity: string): { created?: string; updated?: string } | undefined {
+  let wf: string | null;
+  try { wf = currentWorkflowId(); } catch { wf = null; }
+  const cfg = connectorForTarget(entity, wf);
+  const roles = cfg?.dateRoles;
+  if (!roles || (!roles.created && !roles.updated)) return undefined;
+  return roles;
+}
+
+/** Operator override of the creation/last-modified timestamp columns. Validates the
+ * field names against the target schema (a typo can't silently disable date
+ * routing); a null/empty value clears that role. Returns the stored roles. */
+export function setConnectorDateRoles(
+  id: string,
+  roles: { created?: string | null; updated?: string | null },
+): { created?: string; updated?: string } {
+  const cfg = readSidecar(id);
+  if (!cfg) throw new Error(`no connector "${id}"`);
+  const target = resolveTargetSchema(cfg.targetEntity);
+  // Valid anchors = the schema's own fields plus the always-present platform
+  // timestamp columns a connector can populate. Null target (orphaned) → no schema
+  // to validate against, so accept any name.
+  const valid = target ? new Set<string>([...target.fields.map((f) => f.name), ...PLATFORM_TIMESTAMP_COLS]) : null;
+  const clean: { created?: string; updated?: string } = {};
+  for (const key of ["created", "updated"] as const) {
+    const v = roles[key];
+    if (v == null || v === "") continue;
+    if (valid && !valid.has(v)) throw new Error(`"${v}" is not a field on ${cfg.targetEntity}`);
+    clean[key] = v;
+  }
+  const next: AdapterConfig = { ...cfg };
+  if (clean.created || clean.updated) next.dateRoles = clean;
+  else delete next.dateRoles;
+  writeSidecar(next);
+  registerAdapter(createConnectorAdapter(next));
+  appendNote(id, "note", `Timestamp roles set: created=${clean.created ?? "—"}, updated=${clean.updated ?? "—"}.`);
+  return clean;
 }
 
 /** Read the connector's current source (for "show me the code"). */

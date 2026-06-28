@@ -162,6 +162,141 @@ export async function describeConnector(input: ConnectorDescribeInput): Promise<
   return text;
 }
 
+// --- Date-role inference (creation vs last-modified) ------------------------
+// A connector populates a CURRENT-STATE snapshot row, which typically carries two
+// real time anchors the source records: when the record was first CREATED and
+// when it was LAST MODIFIED. Capturing WHICH model field is which lets
+// twin/derive.ts stamp a create-kind event with the creation date and an
+// update-kind event with the last-modified date — real anchors instead of
+// ingestion-time `now`. The source system is where this is known, so we infer it
+// at build time: a deterministic name/dataType heuristic first (covers
+// created_at / updatedAt / lastModified …), with a small AI pass refining ONLY
+// the ambiguous cases.
+
+export interface DateRoles {
+  created?: string;
+  updated?: string;
+}
+
+const CREATE_ROLE_RE = /(creat|register|signup|sign[_-]?up|opened|opening|started|placed|issued|added|received|submitted|requested|born|joined|enrol)/i;
+const UPDATE_ROLE_RE = /(updat|modif|changed|edited|touched|synced|last[_-]?seen|last[_-]?login|last[_-]?activ|revis|amended)/i;
+
+/** Is this field plausibly a timestamp? A date/time dataType, or a temporally
+ * named column (…date/…time/…timestamp, created/updated/modified/registered, a
+ * `_at`/`_on` suffix, or a camelCase `At`/`On` ending like `createdAt`). Tuned to
+ * EXCLUDE non-temporal lookalikes ("creator", "flat", "person"). */
+function isTimestampField(name: string, dataType?: string): boolean {
+  if (/date|time/i.test(dataType ?? "")) return true;
+  if (/(date|time|timestamp|created|updated|modified|registered)/i.test(name)) return true;
+  if (/_(at|on)\b/i.test(name)) return true;
+  if (/[a-z](At|On)\b/.test(name)) return true;
+  return false;
+}
+
+// gen_ projection tables ALWAYS carry these platform timestamp columns, and a
+// connector commonly maps the source's creation / last-modified times straight
+// INTO them (the returned values override the ingestion-time defaults on insert —
+// see projection-store.insert). They are therefore valid date anchors even when
+// the model declares no date-typed BUSINESS field — which is the common case (an
+// Account with email/status/… but no `registeredAt`, its real Cognito
+// UserCreateDate/UserLastModifiedDate sitting in createdAt/updatedAt).
+export const PLATFORM_TIMESTAMP_COLS = ["createdAt", "updatedAt"];
+
+/** The target's candidate timestamp columns (model field names), in declared
+ * order, PLUS the always-present platform `createdAt`/`updatedAt`. Business date
+ * fields come first so a declared date field wins the heuristic over a platform
+ * column. */
+export function timestampFields(target: EntitySchema): string[] {
+  const out = target.fields
+    .filter((f) => f.name !== "id" && isTimestampField(f.name, f.dataType))
+    .map((f) => f.name);
+  for (const c of PLATFORM_TIMESTAMP_COLS) if (!out.includes(c)) out.push(c);
+  return out;
+}
+
+/** Deterministic created/updated guess from the timestamp fields' names alone.
+ * Pure (unit-testable). The first creation-ish name wins `created`, the first
+ * modification-ish name wins `updated`. */
+export function inferDateRoles(target: EntitySchema): DateRoles {
+  const out: DateRoles = {};
+  for (const name of timestampFields(target)) {
+    if (!out.created && CREATE_ROLE_RE.test(name)) out.created = name;
+    else if (!out.updated && UPDATE_ROLE_RE.test(name)) out.updated = name;
+  }
+  return out;
+}
+
+export interface DateRolesInput {
+  target: EntitySchema;
+  /** The operator's natural-language note on the source (disambiguates roles). */
+  instructions: string;
+  /** The connector's generated source — shows how each column is actually read. */
+  code: string;
+}
+
+/** Keep only a name the target schema actually declares (a hallucinated or
+ * stale column can't silently become a date anchor). */
+function validRole(name: string | undefined, candidates: string[]): string | undefined {
+  return name && candidates.includes(name) ? name : undefined;
+}
+
+/** Key-gated AI refinement: choose the creation + last-modified columns from the
+ * candidate timestamp fields. Best-effort — returns {} on no key, a parse failure,
+ * or any error, so the caller keeps the heuristic. Never throws. */
+async function classifyDateRolesAI(input: DateRolesInput, candidates: string[]): Promise<DateRoles> {
+  if (!process.env.ANTHROPIC_API_KEY) return {};
+  const prompt = [
+    `A data connector populates the table "${input.target.name}". Some of its columns may be timestamps the SOURCE records: when the record was first CREATED, and when it was LAST MODIFIED.`,
+    ``,
+    `Candidate timestamp columns: ${candidates.join(", ")}.`,
+    input.instructions ? `\nOperator's note on the source: ${input.instructions}` : ``,
+    input.code ? `\nConnector source (how the columns are read):\n${input.code.slice(0, 4000)}` : ``,
+    ``,
+    `Decide which column is the CREATION timestamp and which is the LAST-MODIFIED timestamp. A column may be neither. Choose ONLY from the candidate list above, or null if none fits.`,
+    `Respond with ONLY a JSON object, no prose: {"created": "<column or null>", "updated": "<column or null>"}.`,
+  ].join("\n");
+  try {
+    const client = new Anthropic();
+    const res = await client.messages.create({
+      model: MODEL,
+      max_tokens: 128,
+      system: "You classify timestamp columns for a data connector. Output only a single JSON object.",
+      messages: [{ role: "user", content: prompt }],
+    });
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return {};
+    const parsed = JSON.parse(m[0]) as { created?: unknown; updated?: unknown };
+    return {
+      created: typeof parsed.created === "string" ? parsed.created : undefined,
+      updated: typeof parsed.updated === "string" ? parsed.updated : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Propose created/updated date roles for a freshly built connector: the
+ * deterministic heuristic, refined by a small AI pass ONLY when the heuristic
+ * leaves a gap AND there are still unclassified candidate columns (so the common
+ * created_at/updated_at case costs no extra call). Best-effort and
+ * side-effect-free; the caller persists the result on the sidecar. */
+export async function proposeDateRoles(input: DateRolesInput): Promise<DateRoles> {
+  const candidates = timestampFields(input.target);
+  const heur = inferDateRoles(input.target);
+  const resolvedBoth = !!heur.created && !!heur.updated;
+  const allClassified = candidates.every((c) => c === heur.created || c === heur.updated);
+  if (candidates.length === 0 || resolvedBoth || allClassified) return heur;
+  const ai = await classifyDateRolesAI(input, candidates);
+  return {
+    created: validRole(ai.created, candidates) ?? heur.created,
+    updated: validRole(ai.updated, candidates) ?? heur.updated,
+  };
+}
+
 /** Key-gated: author (or repair) a connector module. Returns the ESM source and
  * the npm packages it imports. No file I/O here — the caller persists. */
 export async function generateConnectorModule(input: ConnectorGenInput): Promise<ConnectorGenResult> {

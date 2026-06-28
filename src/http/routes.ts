@@ -17,7 +17,7 @@ import {
 import { provenanceMeta } from "../twin/provenance.js";
 import { deriveFromData, rebuildFromData } from "../twin/derive.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
-import { ingestPull } from "../packs/ingest.js";
+import { ingestPull, reingestAll } from "../packs/ingest.js";
 import { registerBcRoutes } from "./bc-routes.js";
 import { registerAdapterCodeRoutes } from "./adapter-routes.js";
 import { registerConnectorRoutes } from "./connector-routes.js";
@@ -167,11 +167,17 @@ export function registerRoutes(app: FastifyInstance) {
     const counts = await prisma.eventLog.groupBy({ by: ["boundedContext"], where: eventLogOrgWhere(), _count: { _all: true } });
     const eventCountByContext: Record<string, number> = {};
     for (const c of counts) eventCountByContext[c.boundedContext] = c._count._all;
+    // The root aggregate's mandatory attributes (model `required`), minus system
+    // fields — the by-case flow labels each row with the first few of these.
+    const rootEntity = o.entities.find((e) => e.name === singular);
+    const RESERVED_ATTRS = new Set(["id", "version", "createdAt", "updatedAt", "status", "progress", "total", "lastEvent", "dwellSeconds"]);
+    const rootMandatoryAttributes = (rootEntity?.required ?? []).filter((a) => !RESERVED_ATTRS.has(a));
     return {
       title: o.title,
       primaryBoundedContext: o.primaryBoundedContext,
       rootAggregate: singular,
       rootAggregatePlural: pluralize(singular),
+      rootMandatoryAttributes,
       boundedContextCount: o.boundedContexts.length,
       aggregateCount: new Set(o.events.map((e) => e.aggregateRoot).filter(Boolean)).size,
       eventCount: events().length,
@@ -186,6 +192,73 @@ export function registerRoutes(app: FastifyInstance) {
   // Per-run detail (root row + events + rows created in the run) — used by the
   // dashboard detail view.
   app.get("/sim/instance/:id", async (req) => genericInstanceDetail((req.params as any).id));
+
+  // Merged "all cases" flow: per-event firing counts across EVERY case in the
+  // active workflow. Drives the aggregate flow view — one counter badge per event
+  // = how many times that event fired across all cases. Workflow-scoped like the
+  // rest of the simulator reads (eventLogOrgWhere folds in org + workflow).
+  app.get("/sim/flow-aggregate", async () => {
+    const byRef = await prisma.eventLog.groupBy({
+      by: ["eventRef"],
+      where: eventLogOrgWhere(),
+      _count: { _all: true },
+    });
+    const counts: Record<string, number> = {};
+    let totalFirings = 0;
+    for (const r of byRef) {
+      counts[r.eventRef] = r._count._all;
+      totalFirings += r._count._all;
+    }
+    // Distinct cases that have any event — the denominator shown in the header
+    // and on the scope toggle ("All cases · N").
+    const cases = await prisma.eventLog.findMany({
+      where: { caseId: { not: null }, ...eventLogOrgWhere() },
+      select: { caseId: true },
+      distinct: ["caseId"],
+    });
+    return { counts, totalFirings, totalCases: cases.length };
+  });
+
+  // Per-case breakdown of the same firings the flow-aggregate folds together:
+  // one entry per case with that case's own ref→count map. Powers the "By case"
+  // flow (each case a row through the same steps). Most-recently-active first and
+  // capped, so a high-volume workflow doesn't render thousands of rows; the full
+  // distinct count is returned as totalCases so the UI can flag truncation.
+  app.get("/sim/flow-by-case", async (req) => {
+    // Default render cap so a high-volume workflow doesn't push thousands of
+    // SVG rows at the browser; pass ?limit=0 (or any non-positive value) to
+    // lift it and return every case.
+    const q = Number((req.query as any)?.limit ?? 50);
+    const ROW_CAP = Number.isFinite(q) && q > 0 ? q : Infinity;
+    const rows = await prisma.eventLog.groupBy({
+      by: ["caseId", "eventRef"],
+      where: { caseId: { not: null }, ...eventLogOrgWhere() },
+      _count: { _all: true },
+      // Both bounds on the BUSINESS timeline (businessAt), not the recording
+      // wall-clock (occurredAt): startAt is the case's first event's business date
+      // (the create date), lastAt its most recent. occurredAt is ~ingestion time
+      // for replayed/ingested data and would make every case look like it started
+      // "just now".
+      _min: { businessAt: true },
+      _max: { businessAt: true },
+    });
+    const byCase = new Map<string, { caseId: string; counts: Record<string, number>; firings: number; startAt: string; lastAt: string }>();
+    for (const r of rows) {
+      const id = r.caseId as string;
+      let c = byCase.get(id);
+      if (!c) { c = { caseId: id, counts: {}, firings: 0, startAt: "", lastAt: "" }; byCase.set(id, c); }
+      c.counts[r.eventRef] = r._count._all;
+      c.firings += r._count._all;
+      const first = r._min?.businessAt ? new Date(r._min.businessAt).toISOString() : "";
+      const last = r._max?.businessAt ? new Date(r._max.businessAt).toISOString() : "";
+      if (first && (c.startAt === "" || first < c.startAt)) c.startAt = first;
+      if (last > c.lastAt) c.lastAt = last;
+    }
+    // Most recently active first (by business last-activity).
+    const all = [...byCase.values()].sort((a, b) => (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0));
+    const capped = ROW_CAP === Infinity ? all : all.slice(0, ROW_CAP);
+    return { cases: capped, totalCases: all.length, cap: ROW_CAP === Infinity ? all.length : ROW_CAP };
+  });
 
   // ---------------- Source adapters (Part 2.2) ----------------
   // Registered packs' adapters. Additive + model-generic; the registry is filled
@@ -211,6 +284,22 @@ export function registerRoutes(app: FastifyInstance) {
       return await ingestPull((req.params as any).id, { limit });
     } catch (err: any) {
       return reply.code(400).send({ error: "PULL_FAILED", message: err?.message ?? String(err) });
+    }
+  });
+
+  // Reset & reimport — the Systems explorer's global counterpart to the per-table
+  // "Delete all rows" + "Fetch rows". Empties every base-data (gen_) table AND the
+  // whole event log for the active workflow, then re-pulls every configured
+  // connector so the tables repopulate from source (one final derive over the
+  // restored data). Workflow/org-scoped; connectors and the model are kept.
+  app.post("/api/data/reimport-all", async (req, reply) => {
+    const limit = Number((req.body as any)?.limit ?? 1000);
+    try {
+      await genericDeleteAll();                     // empty all gen_ tables + the event log
+      const result = await reingestAll({ limit });  // re-pull every connector, derive once
+      return { ok: true, ...result };
+    } catch (err: any) {
+      return reply.code(400).send({ error: "REIMPORT_FAILED", message: err?.message ?? String(err) });
     }
   });
 

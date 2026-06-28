@@ -16,7 +16,7 @@ import { getOntology } from "../ontology/model.js";
 import { currentWorkflowId } from "../platform/tenancy/context.js";
 import {
   connectorsInWorkflow, connectorForTarget, connectorOwner, connectorInfo,
-  regenerateConnectorSummary, removeConnector,
+  regenerateConnectorSummary, removeConnector, setConnectorDateRoles,
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
@@ -55,6 +55,8 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           lastPullAt: cfg.lastPullAt ?? null,
           rowCount,
           owned: !!cfg.workflowId, // false = legacy, adopted by model membership
+          dateRoles: info?.dateRoles ?? null,
+          dateFields: info?.dateFields ?? [],
         };
       }));
       // The re-point target list: every table in the model, flagged with the
@@ -101,6 +103,27 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       return { id, target, previousTarget: previous, targetKind };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Override which source columns hold the record's creation / last-modified times.
+  // Consumed by twin/derive.ts to stamp create vs update events with real dates.
+  // Field names are validated against the target schema; null/empty clears a role.
+  app.post("/api/connectors/:id/date-roles", async (req, reply) => {
+    try {
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const body = (req.body as any) ?? {};
+      const dateRoles = setConnectorDateRoles(id, { created: body.created ?? null, updated: body.updated ?? null });
+      return { id, dateRoles };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      if (err instanceof Error && /is not a field/.test(err.message)) {
+        return reply.code(400).send({ error: "BAD_FIELD", message: err.message });
+      }
       throw err;
     }
   });

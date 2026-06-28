@@ -94,9 +94,19 @@ function provModeForBC(bc) {
 
 const state = {
   // global
-  view: "dashboard",     // "dashboard" | "detail"
+  view: "dashboard",     // "dashboard" | "detail" | "flow"
   cases: [],
   events: [],
+  // Merged "all cases" flow (#flow): { counts: {ref→firings}, totalFirings, totalCases }
+  // from /sim/flow-aggregate. The aggregate counterpart of a single case's log.
+  flow: null,
+  // Per-case flow (#rows): { cases: [{caseId, counts, firings, startAt, lastAt}], totalCases, cap }
+  // startAt = first event's business date (case start); lastAt = most recent (business).
+  // from /sim/flow-by-case. The merged flow split into one row per case.
+  flowRows: null,
+  // When the user clicks "show all" in the By-case banner, lift the server-side
+  // 50-row cap on subsequent fetches (incl. the live poll). Sticky for the session.
+  flowRowsShowAll: false,
   busy: false,
   // model-derived UI labels (filled from /sim/meta); defaults keep the UI sane
   // before the first fetch / if the endpoint is unavailable.
@@ -1130,10 +1140,15 @@ function parseHash() {
   if (h.startsWith("#org")) return { view: "org" };
   if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#model")) return { view: "model" };
+  if (h.startsWith("#flow")) return { view: "flow" };
+  if (h.startsWith("#rows")) return { view: "rows" };
+  if (h.startsWith("#list")) return { view: "dashboard" };
   if (h.startsWith("#connectors")) return { view: "connectors" };
   if (h.startsWith("#bcs")) return { view: "bcs" };
   if ((m = h.match(/^#case\/([\w-]+)/))) return { view: "detail", caseId: m[1] };
-  return { view: "dashboard" };
+  // Bare "#" (the Overview home) is a SMART default: the merged Workflow flow
+  // when this workflow has cases, else the case List. Resolved in loadOverview().
+  return { view: "overview" };
 }
 
 function navigate(hash) {
@@ -1147,7 +1162,7 @@ function navigate(hash) {
 
 let dashboardTimer = null;
 
-const WORKFLOW_SCOPED_VIEWS = new Set(["dashboard", "detail", "model", "bcs", "bc", "connectors"]);
+const WORKFLOW_SCOPED_VIEWS = new Set(["overview", "dashboard", "detail", "flow", "rows", "model", "bcs", "bc", "connectors"]);
 
 async function ensureWorkflowSelected() {
   if (AUTH.workflow()) return;
@@ -1216,6 +1231,20 @@ async function onHashChange() {
       await loadBc(r.bc);
     } else if (r.view === "model") {
       await loadModel();
+    } else if (r.view === "flow") {
+      await loadFlow();
+      // Poll every 5s so the per-event counters tick up live as cases run.
+      dashboardTimer = setInterval(() => {
+        if (state.view === "flow" && !state.busy) loadFlow().catch(() => {});
+      }, 5000);
+    } else if (r.view === "rows") {
+      await loadFlowRows();
+      // Poll every 5s so rows appear / fill in live as cases run.
+      dashboardTimer = setInterval(() => {
+        if (state.view === "rows" && !state.busy) loadFlowRows().catch(() => {});
+      }, 5000);
+    } else if (r.view === "overview") {
+      await loadOverview();
     } else if (r.view === "org") {
       await loadOrg();
       // Poll every 5s so the portfolio reads as a live control tower.
@@ -1256,6 +1285,58 @@ async function loadDashboard() {
   state.cases = cases;
   state.events = events;
   render();
+}
+
+// Merged "all cases" flow (#flow): the model's events plus per-event firing
+// counts across every case (no single case loaded — state.flow.counts is the
+// aggregate). Same model + meta the single-case flow uses, so the diagram is
+// laid out identically; only the badges' meaning changes (all-cases totals).
+async function loadFlow() {
+  const [flow, events] = await Promise.all([api("/sim/flow-aggregate"), api("/sim/events"), loadRegistryStatus(), loadMeta()]);
+  state.flow = flow;
+  state.events = events;
+  render();
+}
+
+// Per-case flow (#rows): the same model events plus each case's own ref→count
+// map, so the merged flow can be split into one row per case. Shares the events +
+// meta the merged flow uses, so columns line up identically.
+async function loadFlowRows() {
+  // Also pull the case rows (same data the List uses) so each row's gutter can
+  // show that case's mandatory attribute values, joined by id.
+  const q = state.flowRowsShowAll ? "?limit=0" : "";
+  const [rows, events, cases] = await Promise.all([api("/sim/flow-by-case" + q), api("/sim/events"), api("/sim/cases"), loadRegistryStatus(), loadMeta()]);
+  state.flowRows = rows;
+  state.events = events;
+  state.cases = cases;
+  render();
+}
+
+// The Overview "home" (#) is a smart default: the merged Workflow flow once this
+// workflow has cases, otherwise the case List — whose empty-state onboards the
+// first case. We peek at the flow aggregate's case count to choose, then hand off
+// to loadFlow/loadDashboard (each owns its own fetch + 5s live poll) and resolve
+// state.view away from the transient "overview" sentinel.
+async function loadOverview() {
+  let totalCases = 0;
+  try {
+    const flow = await api("/sim/flow-aggregate");
+    state.flow = flow;
+    totalCases = flow.totalCases ?? 0;
+  } catch { /* fall through to the List, which carries its own empty-state */ }
+  if (totalCases > 0) {
+    state.view = "flow";
+    await loadFlow();
+    dashboardTimer = setInterval(() => {
+      if (state.view === "flow" && !state.busy) loadFlow().catch(() => {});
+    }, 5000);
+  } else {
+    state.view = "dashboard";
+    await loadDashboard();
+    dashboardTimer = setInterval(() => {
+      if (state.view === "dashboard" && !state.busy) loadDashboard().catch(() => {});
+    }, 5000);
+  }
 }
 
 // Model-derived UI labels — fetched once and reused; failures keep the defaults.
@@ -1339,6 +1420,7 @@ function dashboardView() {
           <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} in flight</div>
         </div>
         <button id="btn-new-case" ${state.busy ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">+ New ${escapeHtml(singular.toLowerCase())}</button>
+        ${viewSwitcher("list")}
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
@@ -1976,6 +2058,29 @@ async function expClearRows() {
   }
 }
 
+// Global "Reset & reimport base data": empties every base-data table AND the whole
+// event log, then re-pulls every configured connector to restore the data from
+// source. The Systems-wide counterpart to the per-table Fetch/Delete buttons —
+// connectors and the model are kept.
+async function expReimportAll() {
+  const e = expState();
+  if (e.busy) return;
+  if (!confirm("Empty ALL base-data tables and the entire event log, then reimport the base data from every configured connector?\n\nThis clears every ingested row and derived event across all systems, then re-pulls each connector from its source. Connectors and the model are kept.")) return;
+  e.busy = true; render();
+  try {
+    const r = await api("/api/data/reimport-all", { method: "POST", body: JSON.stringify({ limit: 1000 }) });
+    await refreshExplorerAfterChat();
+    try { e.health = await api("/api/bc/health"); } catch (_e) { /* keep prior */ } // refresh status dots even if no table is selected
+    const ev = r.derived ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
+    const failed = r.failures && r.failures.length ? `\nConnectors that failed: ${r.failures.length} (${r.failures.map((f) => f.id).join(", ")})` : "";
+    alert(`Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}`);
+  } catch (err) {
+    alert("Reset & reimport failed: " + err.message);
+  } finally {
+    e.busy = false; render();
+  }
+}
+
 async function expDeleteConnector(id) {
   const e = expState();
   if (e.busy || !e.system) return;
@@ -2317,6 +2422,7 @@ function expMain(e) {
         <div class="flex items-center gap-2">
           <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
           <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table and the simulated events derived from it (connectors are kept)">Delete all rows</button>
+          <button id="exp-reimport-all" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Empty EVERY base-data table and the entire event log (all systems), then re-pull every connector to reimport the base data from source">Reset &amp; reimport base data</button>
           <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Configure connector</button>
         </div>
       </div>
@@ -2532,6 +2638,7 @@ function bindExplorer() {
   });
   document.getElementById("exp-fetch-rows")?.addEventListener("click", expFetchRows);
   document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
+  document.getElementById("exp-reimport-all")?.addEventListener("click", expReimportAll);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
   document.querySelectorAll("[data-delete-connector]").forEach((el) =>
     el.addEventListener("click", () => expDeleteConnector(el.dataset.deleteConnector)));
@@ -2975,6 +3082,18 @@ function firedCountBadge(ref, n, cx, cy, isOpen) {
        title="${isOpen ? "Click to collapse" : "Fired " + n + "× for this case — click to expand each firing into its own row"}">×${n}</div>`;
 }
 
+// Non-interactive twin of firedCountBadge for the aggregate views (merged flow,
+// by-case rows): the SAME emerald "×N" corner bubble, hidden at n≤1, just without
+// the click-to-expand affordance (there are no per-firing rows to expand there).
+// Keeping one look means the badge reads identically across detail / merged / by
+// case. (cx, cy) is the card's top-right corner; the translate centres it.
+function flowCountBadge(n, cx, cy, title) {
+  if (!n || n <= 1) return "";
+  return `<div class="absolute z-10 flex items-center justify-center rounded-full bg-emerald-500 text-white text-[9px] font-bold leading-none shadow ring-2 ring-white"
+       style="left:${cx}px; top:${cy}px; transform:translate(-50%,-50%); min-width:20px; height:18px; padding:0 5px;"
+       title="${escapeHtml(title || ("Fired " + n + "×"))}">×${n}</div>`;
+}
+
 // Readable business date. Rendered in UTC so it's stable regardless of the
 // viewer's timezone (the businessAt value is a date carried in the event data).
 function fmtBizDate(iso) {
@@ -2997,6 +3116,31 @@ function fmtGap(min) {
   const d = Math.floor(h / 24), hh = h % 24;
   return hh ? `+${d}d${hh}h` : `+${d}d`;
 }
+
+// Human "how long ago" for a past ISO timestamp: "just now", "5m ago", "2h ago",
+// "3d ago", "4mo ago", "1y ago". Pairs with the absolute date in the by-case
+// gutter so a row reads "Jun 28, 14:05 · 5m ago".
+function timeAgo(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return "";
+  const sec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (sec < 45) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  const mo = Math.floor(d / 30);
+  if (mo < 12) return `${mo}mo ago`;
+  return `${Math.floor(mo / 12)}y ago`;
+}
+
+// Small inline icons for the by-case copy-id control (currentColor so they tint
+// with the button's text colour).
+const iconCopy = `<svg viewBox="0 0 24 24" fill="none" class="h-3.5 w-3.5"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const iconCheck = `<svg viewBox="0 0 24 24" fill="none" class="h-3.5 w-3.5"><path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 // ---------------------------------------------------------------------------
 // Flow layout — turn the event DAG (each event's `predecessors`, the model's
@@ -3509,6 +3653,369 @@ function splitTimelineView(layout, splitRef, firedCounts) {
   `;
 }
 
+// ---------------------------------------------------------------------------
+// Finder-style segmented view switcher — the three representations of this
+// workflow's cases: the merged "Workflow" flow (all cases on one diagram with a
+// counter on each event), the "By case" flow (the same flow split into one row
+// per case), and the case List. Sits top-right in the header, just left of the
+// Assistant button. Plain anchors so hash routing drives it.
+// `active` ∈ "flow" | "rows" | "list" | null. null = a case drill-down (no mode
+// is current; any segment pops back out). #list / #flow / #rows are explicit;
+// bare # is the smart default (loadOverview).
+// ---------------------------------------------------------------------------
+function viewSwitcher(active) {
+  const seg = (href, label, on, title) =>
+    `<a href="${href}" class="px-2.5 py-1 rounded ${on ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-800"} whitespace-nowrap transition-colors" title="${escapeHtml(title)}">${label}</a>`;
+  return `
+    <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-stone-300 bg-stone-100 text-sm" role="group" aria-label="View">
+      ${seg("#flow", "⑂ Workflow", active === "flow", "All cases merged onto one flow, with a counter on each event")}
+      ${seg("#rows", "▦ By case", active === "rows", "The same flow split into one row per case")}
+      ${seg("#list", "▤ List", active === "list", "Every case as a list — pick one to follow it end to end")}
+    </div>`;
+}
+
+// Merged flow (#flow): the whole model DAG with a counter on each event = how
+// many times it fired ACROSS ALL CASES (state.flow.counts). Reuses the
+// single-case layout, card geometry and edge SVG; it deliberately drops the
+// per-case extras (branch split, per-firing rows, business dates/gaps) since
+// there is no single timeline here — those merge away into the counts. Cards
+// that never fired stay ghosted; fired cards tint by relative volume so the
+// hotspots in the flow pop out.
+function mergedTimeline() {
+  const counts = state.flow?.counts || {};
+  const total = state.events.length;
+  const firedRefs = new Set(state.events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
+  const firedSteps = firedRefs.size;
+  const maxCount = Math.max(1, ...state.events.map((e) => counts[e.ref] || 0));
+
+  const layout = computeFlowLayout(state.events);
+  const { cardW, cardH, colPitch, rowPitch } = FLOW;
+  const laneTop = Array.from({ length: layout.lanes }, (_, L) => L * rowPitch);
+  const W = (layout.cols - 1) * colPitch + cardW;
+  const H = layout.lanes ? (layout.lanes - 1) * rowPitch + cardH : cardH;
+
+  const cards = state.events.map((e, i) => {
+    const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
+    const n = counts[e.ref] || 0;
+    const fired = n > 0;
+    const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
+    const provMode = provModeForBC(e.boundedContext);
+    // Heat: relative volume → emerald background tint (fired cards only). Floor
+    // keeps low-volume fired cards visibly "on"; ceiling stays readable.
+    const heat = fired ? (0.1 + 0.45 * (n / maxCount)).toFixed(3) : 0;
+    const heatStyle = fired ? `background-color:rgba(16,185,129,${heat});` : "";
+    return `
+      <div class="absolute rounded-md border ${fired ? "border-emerald-300" : phaseBorder} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
+           style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardH}px; ${heatStyle} ${provHatch(provMode)}">
+        <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
+          <span class="truncate">${i + 1}. ${escapeHtml(e.boundedContext)}</span>
+          ${provChip(provMode)}
+        </div>
+        <div class="text-[12px] font-medium leading-tight text-stone-800">${escapeHtml(e.name)}</div>
+        <div class="text-[10px] text-stone-500 mt-1">${escapeHtml(e.role)}</div>
+      </div>`;
+  }).join("");
+
+  // Fired-count badges as a separate overlay layer (the same ×N corner bubble the
+  // detail view uses): each overhangs its card's top-right corner = how many times
+  // that event triggered across all cases. Sibling of the cards so it can overhang
+  // the edge (cards clip their own children).
+  const badges = state.events.map((e, i) => {
+    const n = counts[e.ref] || 0;
+    const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
+    return flowCountBadge(n, pos.col * colPitch + cardW, laneTop[pos.lane], `${e.name} triggered ${n}× across all cases`);
+  }).join("");
+
+  // Connectors: same S-curve as the single-case flow; an edge is lit (dark) when
+  // its target event fired in at least one case, faint otherwise.
+  const paths = layout.edges.map(({ from, to }) => {
+    const a = layout.place.get(from), b = layout.place.get(to);
+    if (!a || !b) return "";
+    const sx = a.col * colPitch + cardW, sy = laneTop[a.lane] + cardH / 2;
+    const ex = b.col * colPitch,         ey = laneTop[b.lane] + cardH / 2;
+    const dx = Math.max(24, (ex - sx) * 0.5);
+    const lit = firedRefs.has(to);
+    return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${lit ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
+  }).join("");
+
+  const svg = layout.edges.length ? `
+        <svg width="${W}" height="${H}" class="absolute top-0 left-0" style="pointer-events:none;">
+          <defs>
+            <marker id="flow-arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e"/>
+            </marker>
+          </defs>
+          ${paths}
+        </svg>` : "";
+
+  const cases = state.flow?.totalCases ?? 0;
+  const pct = total ? (firedSteps / total) * 100 : 0;
+  return `
+    <section class="border-b border-stone-200 bg-stone-50">
+      <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
+        <span class="font-semibold text-stone-600">${state.flow?.totalFirings ?? 0} firings across ${cases} case${cases === 1 ? "" : "s"}</span>
+        <span class="text-stone-300">·</span>
+        <span>${firedSteps} of ${total} events triggered</span>
+        <span class="ml-auto italic text-stone-400">The ×N badge on an event counts its firings across all cases</span>
+      </div>
+      <div id="timeline-scroll" class="px-6 py-3 overflow-x-auto">
+        <div style="width:${W}px;">
+          <div class="relative" style="width:${W}px; height:${H}px;">
+            ${svg}
+            ${cards}
+            ${badges}
+          </div>
+          <div class="h-1 bg-stone-200 rounded overflow-hidden mt-3" style="width:${W}px;">
+            <div class="h-1 bg-emerald-400 transition-all duration-300" style="width:${pct}%"></div>
+          </div>
+        </div>
+      </div>
+    </section>`;
+}
+
+// Merged-flow page (#flow): the all-cases overview. Same header shape as the
+// dashboard so the two read as siblings under Overview; the scope bar lets the
+// user hop back to the case list (and from there into a single case).
+function mergedFlowView() {
+  const m = state.meta;
+  const plural = prettyEntity(m.rootAggregatePlural);
+  return `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4 flex items-center gap-6">
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — merged flow</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">All ${escapeHtml(plural.toLowerCase())} on one flow</div>
+        </div>
+        ${viewSwitcher("flow")}
+        <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
+      </div>
+    </header>
+    ${mergedTimeline()}
+    <main class="flex-1 overflow-auto p-6">
+      <p class="text-sm text-stone-500 max-w-3xl">Every case in this workflow, merged onto the model flow. The ×N badge on an event counts how many times it triggered across all ${escapeHtml(plural.toLowerCase())}; brighter cards are busier steps. Switch to <a href="#rows" class="text-stone-800 underline">By case</a> to split it into one row per case, or <a href="#list" class="text-stone-800 underline">List</a> to follow a single case end to end.</p>
+    </main>`;
+}
+
+// Per-case flow (#rows): the merged flow split into one row per case. Each row is
+// the SAME cards as the Workflow view — same geometry, phase border, provenance
+// chip/hatch and emerald heat — but flattened to a single lane and scoped to one
+// case: a card is "on" (emerald, tinted) where that case fired the step, ghosted
+// where it didn't, with the same ×N corner badge when a step fired more than once;
+// the connector edges between them light only where the case actually flowed. The
+// left gutter names the case; the row links into its full detail. Most flows have
+// few steps, so the full cards stay readable.
+function rowsTimeline() {
+  const rows = state.flowRows?.cases || [];
+  const layout = computeFlowLayout(state.events);
+  // Order events left-to-right by the merged flow's column (then lane), so the
+  // columns line up with the Workflow view; each event gets its own column here
+  // (single lane per row, so parallel branches lay out side by side without
+  // overlapping).
+  const ordered = [...state.events].sort((a, b) => {
+    const pa = layout.place.get(a.ref) || { col: 0, lane: 0 };
+    const pb = layout.place.get(b.ref) || { col: 0, lane: 0 };
+    return pa.col - pb.col || pa.lane - pb.lane;
+  });
+  const N = ordered.length;
+  const idxOf = new Map(ordered.map((e, i) => [e.ref, i]));
+  const { cardW, cardH, colPitch } = FLOW;
+  const labelW = 210;
+  const gridW = N ? (N - 1) * colPitch + cardW : cardW;
+
+  if (!rows.length) {
+    return `<section class="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">No cases have fired yet — run a case (or switch to <a href="#list" class="underline">List</a> and add one) to see it appear as a row here.</section>`;
+  }
+
+  // Heat is comparable across rows: tint each fired card by its count relative to
+  // the busiest single (case, step) anywhere in view.
+  let maxCount = 1;
+  for (const c of rows) for (const ref in (c.counts || {})) maxCount = Math.max(maxCount, c.counts[ref]);
+
+  // Each row's gutter shows that case's first (up to 3) mandatory attributes,
+  // joined from the case rows by id. Fall back to the first plain columns when the
+  // model marks nothing required.
+  const caseById = new Map((state.cases || []).map((r) => [String(r.id), r]));
+  let attrKeys = state.meta?.rootMandatoryAttributes || [];
+  if (!attrKeys.length) attrKeys = genericColumns(state.cases || []);
+  attrKeys = attrKeys.slice(0, 3);
+
+  // Edge geometry is the model topology, identical for every row; only which
+  // edges are "lit" changes per case. Both endpoints sit on the single lane.
+  const yc = cardH / 2;
+  const edgeGeom = layout.edges.map(({ from, to }) => {
+    const ai = idxOf.get(from), bi = idxOf.get(to);
+    if (ai == null || bi == null) return null;
+    const sx = ai * colPitch + cardW, ex = bi * colPitch;
+    const dx = Math.max(24, (ex - sx) * 0.5);
+    return { d: `M${sx},${yc} C${sx + dx},${yc} ${ex - dx},${yc} ${ex},${yc}`, to };
+  }).filter(Boolean);
+
+  const rowsHtml = rows.map((c) => {
+    const counts = c.counts || {};
+    const firedRefs = new Set(ordered.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
+
+    const cards = ordered.map((e, i) => {
+      const n = counts[e.ref] || 0;
+      const fired = n > 0;
+      const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
+      const provMode = provModeForBC(e.boundedContext);
+      const heat = fired ? (0.1 + 0.45 * (n / maxCount)).toFixed(3) : 0;
+      const heatStyle = fired ? `background-color:rgba(16,185,129,${heat});` : "";
+      return `
+        <div class="absolute rounded-md border ${fired ? "border-emerald-300" : phaseBorder} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
+             style="left:${i * colPitch}px; top:0; width:${cardW}px; height:${cardH}px; ${heatStyle} ${provHatch(provMode)}">
+          <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
+            <span class="truncate">${i + 1}. ${escapeHtml(e.boundedContext)}</span>
+            ${provChip(provMode)}
+          </div>
+          <div class="text-[12px] font-medium leading-tight text-stone-800">${escapeHtml(e.name)}</div>
+          <div class="text-[10px] text-stone-500 mt-1">${escapeHtml(e.role)}</div>
+        </div>`;
+    }).join("");
+
+    // Same ×N corner badge as the detail / merged views (hidden when a step fired
+    // just once for this case, which is the norm — the green card already says it
+    // ran). Sibling layer so it can overhang the card's top-right corner.
+    const badges = ordered.map((e, i) => {
+      const n = counts[e.ref] || 0;
+      return flowCountBadge(n, i * colPitch + cardW, 0, `${e.name} fired ${n}× for this case`);
+    }).join("");
+
+    const paths = edgeGeom.map(({ d, to }) =>
+      `<path d="${d}" fill="none" stroke="${firedRefs.has(to) ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#rows-arrow)"/>`
+    ).join("");
+    const svg = edgeGeom.length
+      ? `<svg width="${gridW}" height="${cardH}" class="absolute top-0 left-0" style="pointer-events:none;">${paths}</svg>`
+      : "";
+
+    const id = String(c.caseId);
+    // Mandatory-attribute lines: the first as the row's headline (bold value),
+    // the rest as "name: value". Falls back to the short id if a case carries no
+    // attribute values at all.
+    const caseRow = caseById.get(id) || {};
+    const attrLines = attrKeys.map((k, ai) => {
+      const raw = caseRow[k];
+      const val = (raw === undefined || raw === null || raw === "") ? "—" : String(raw);
+      const label = prettyEntity(k);
+      return ai === 0
+        ? `<div class="text-[10px] font-semibold text-stone-800 truncate" title="${escapeHtml(label)}: ${escapeHtml(val)}">${escapeHtml(val)}</div>`
+        : `<div class="text-[10px] text-stone-500 truncate" title="${escapeHtml(label)}: ${escapeHtml(val)}"><span class="text-stone-400">${escapeHtml(label)}:</span> ${escapeHtml(val)}</div>`;
+    }).join("");
+    const headline = attrLines || `<div class="text-[10px] font-semibold text-stone-800 truncate mono">${escapeHtml(id.slice(0, 12))}…</div>`;
+    return `
+      <a href="#case/${encodeURIComponent(id)}" class="flex items-stretch border-t border-stone-200 hover:bg-stone-50 group">
+        <div class="group/case relative sticky left-0 z-20 bg-white group-hover:bg-stone-50 shrink-0 border-r border-stone-200 px-3 flex flex-col justify-center" style="width:${labelW}px;">
+          <span role="button" tabindex="0" data-copy-case="${escapeHtml(id)}" title="Copy this case's ID to the clipboard"
+            class="absolute top-1.5 right-1.5 z-10 opacity-0 group-hover/case:opacity-100 focus:opacity-100 transition-opacity p-1 rounded text-stone-400 hover:text-stone-700 hover:bg-stone-200/70 cursor-pointer">${iconCopy}</span>
+          <div class="min-w-0 group-hover/case:pr-5 transition-[padding] duration-150">
+            ${headline}
+            ${c.startAt || c.lastAt ? (() => {
+              const start = c.startAt || c.lastAt;
+              const active = c.lastAt && c.lastAt !== start;
+              // Two labeled lines so neither reads as a contradiction: the start is an
+              // absolute business date, the last activity a relative time. The "Active"
+              // line only appears when the case moved on after it started.
+              const startLine = `<div title="${escapeHtml(`Started ${new Date(start).toLocaleString()}`)}"><span class="text-stone-400">Started</span> <span class="text-stone-600 font-medium">${escapeHtml(timeAgo(start))}</span></div>`;
+              const activeLine = active
+                ? `<div title="${escapeHtml(`Last activity ${new Date(c.lastAt).toLocaleString()}`)}"><span class="text-stone-400">Active</span> <span class="text-stone-600 font-medium">${escapeHtml(timeAgo(c.lastAt))}</span></div>`
+                : "";
+              return `<div class="text-[10px] text-stone-400 mt-1 leading-tight space-y-0.5">${startLine}${activeLine}</div>`;
+            })() : ""}
+          </div>
+        </div>
+        <div class="relative shrink-0 my-2" style="width:${gridW}px; height:${cardH}px;">
+          ${svg}${cards}${badges}
+        </div>
+      </a>`;
+  }).join("");
+
+  const total = state.flowRows?.totalCases ?? rows.length;
+  const truncated = total > rows.length;
+  const totalW = labelW + gridW;
+  return `
+    <section class="border-b border-stone-200 bg-white">
+      <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200">
+        <span class="font-semibold text-stone-600">${rows.length}${truncated ? ` of ${total}` : ""} case${total === 1 ? "" : "s"}</span>
+        <span class="text-stone-300">·</span>
+        <span>one row per case, most recently active first</span>
+        ${truncated
+          ? `<button type="button" data-show-all-cases title="Load every case (may be slow for very large workflows)" class="ml-auto italic text-amber-600 hover:text-amber-700 hover:underline cursor-pointer">Showing the ${rows.length} most recent of ${total} — show all</button>`
+          : `<span class="ml-auto italic text-stone-400">Click a row to follow that case end to end</span>`}
+      </div>
+      <div class="overflow-x-auto">
+        <svg width="0" height="0" class="absolute"><defs>
+          <marker id="rows-arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e"/>
+          </marker>
+        </defs></svg>
+        <div style="min-width:${totalW}px;">${rowsHtml}</div>
+      </div>
+    </section>`;
+}
+
+// Per-case flow page (#rows): same header shape as the merged flow so they read
+// as siblings; the switcher hops between them and the List.
+function flowRowsView() {
+  const m = state.meta;
+  const singular = prettyEntity(m.rootAggregate);
+  return `
+    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
+      <div class="px-6 py-4 flex items-center gap-6">
+        <div class="flex-1">
+          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(m.title)} — by case</div>
+          <div class="text-stone-900 text-xl font-semibold leading-tight">Each ${escapeHtml(singular.toLowerCase())} as its own row</div>
+        </div>
+        ${viewSwitcher("rows")}
+        <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
+      </div>
+    </header>
+    ${rowsTimeline()}
+    <main class="flex-1 overflow-auto p-6">
+      <p class="text-sm text-stone-500 max-w-3xl">The merged flow split into one row per case — each row shows how far that ${escapeHtml(singular.toLowerCase())} got through the steps and which it triggered. Click a row to follow that case end to end, or switch to <a href="#flow" class="text-stone-800 underline">Workflow</a> for the combined view.</p>
+    </main>`;
+}
+
+// Per-row "copy case ID" control in the by-case gutter. The control lives inside
+// the row's <a>, so the handler must swallow the click (preventDefault) to copy
+// without also navigating into the case. Keyboard-activatable (it's a role=button
+// span). Re-bound on every render of the view.
+function bindFlowRows() {
+  document.querySelector("[data-show-all-cases]")?.addEventListener("click", () => {
+    state.flowRowsShowAll = true;
+    loadFlowRows();
+  });
+  document.querySelectorAll("[data-copy-case]").forEach((el) => {
+    el.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); copyCaseId(el); });
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); copyCaseId(el); }
+    });
+  });
+}
+
+async function copyCaseId(el) {
+  const id = el.getAttribute("data-copy-case");
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+  } catch {
+    // Fallback for non-secure contexts / browsers without the async clipboard API.
+    const ta = document.createElement("textarea");
+    ta.value = id; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch { /* ignore */ }
+    ta.remove();
+  }
+  // Brief check + "Copied!" feedback, pinned visible, then restored.
+  el.innerHTML = iconCheck;
+  el.setAttribute("title", "Copied!");
+  el.classList.add("text-emerald-600", "opacity-100");
+  setTimeout(() => {
+    el.innerHTML = iconCopy;
+    el.setAttribute("title", "Copy this case's ID to the clipboard");
+    el.classList.remove("text-emerald-600", "opacity-100");
+  }, 1200);
+}
+
 // Compact "Last event" summary, folded onto the right of the timeline legend
 // row (was its own full-width band). The full chronological history now lives in
 // the assistant sidebar's "Event log" tab.
@@ -3759,6 +4266,7 @@ function genericDetailView() {
         <button id="btn-reset" ${state.busy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Reset</button>
         <button id="btn-next" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 font-medium">Step forward →</button>
         <button id="btn-all" ${state.busy || state.currentIndex >= total ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Run all</button>
+        ${viewSwitcher(null)}
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
@@ -3851,6 +4359,15 @@ function render() {
     bindTenantBar();
     bindEmptyOrg();
     bindChat();
+  } else if (state.view === "flow") {
+    root.innerHTML = wrap(mergedFlowView());
+    bindTenantBar();
+    bindChat();
+  } else if (state.view === "rows") {
+    root.innerHTML = wrap(flowRowsView());
+    bindTenantBar();
+    bindChat();
+    bindFlowRows();
   } else if (state.view === "model") {
     root.innerHTML = wrap(modelView());
     bindTenantBar();
@@ -4187,6 +4704,23 @@ function connDetail(c) {
     : `<div class="text-xs text-stone-400">No history recorded.</div>`;
   const chip = (label, val) => `<div class="text-[11px]"><span class="text-stone-400">${label}</span> <span class="text-stone-700">${val}</span></div>`;
   const orphan = c.status === "orphaned";
+  const dateFields = c.dateFields || [];
+  const dr = c.dateRoles || {};
+  const dfOpts = (selected) => [
+    `<option value="">— none —</option>`,
+    ...dateFields.map((f) => `<option value="${escapeHtml(f)}" ${f === selected ? "selected" : ""}>${escapeHtml(f)}</option>`),
+  ].join("");
+  const timestampsSection = dateFields.length ? `
+      <div class="mt-5 rounded-lg border border-stone-200 p-4">
+        <div class="text-sm font-medium text-stone-800">Event timestamps</div>
+        <div class="text-xs text-stone-500 mt-0.5">Which source columns hold the record's creation and last-modified times. Create events are stamped with <b>Created</b>; update events with <b>Updated</b> — so the timeline follows the data instead of ingestion time. Inferred at build time; override here.</div>
+        <div class="grid grid-cols-2 gap-3 mt-3">
+          <label class="text-xs text-stone-600 block">Created<select id="conn-date-created" class="mt-1 w-full text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white">${dfOpts(dr.created)}</select></label>
+          <label class="text-xs text-stone-600 block">Updated<select id="conn-date-updated" class="mt-1 w-full text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white">${dfOpts(dr.updated)}</select></label>
+        </div>
+        <button id="conn-date-save" ${state.connBusy ? "disabled" : ""} class="mt-3 px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium">Save timestamps</button>
+        <div class="text-[11px] text-stone-400 mt-2">New rows pick these up on the next Fetch. Events already in the log keep their old timestamps until you rebuild from data (clears &amp; re-derives the event log).</div>
+      </div>` : "";
   return `
     <div class="p-6 overflow-y-auto flex-1">
       <div class="flex items-center gap-2">
@@ -4220,7 +4754,7 @@ function connDetail(c) {
           <button id="conn-repoint-btn" ${state.connBusy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium">Re-point</button>
         </div>
       </div>
-
+${timestampsSection}
       <div class="mt-4">
         <div class="text-[11px] font-medium text-stone-500 uppercase tracking-wide mb-1">History</div>
         <div class="rounded-lg border border-stone-100 p-3 space-y-0.5">${notesHtml}</div>
@@ -4267,7 +4801,24 @@ function bindConnectors() {
   document.querySelectorAll("[data-conn-row]").forEach((el) =>
     el.addEventListener("click", () => { state.connSel = el.dataset.connRow; render(); }));
   document.getElementById("conn-repoint-btn")?.addEventListener("click", connRepoint);
+  document.getElementById("conn-date-save")?.addEventListener("click", connSaveDateRoles);
   document.getElementById("conn-delete-btn")?.addEventListener("click", connDelete);
+}
+
+async function connSaveDateRoles() {
+  const id = state.connSel;
+  if (!id || state.connBusy) return;
+  const created = document.getElementById("conn-date-created")?.value || null;
+  const updated = document.getElementById("conn-date-updated")?.value || null;
+  state.connBusy = true; render();
+  try {
+    await api(`/api/connectors/${encodeURIComponent(id)}/date-roles`, { method: "POST", body: JSON.stringify({ created, updated }) });
+    await loadConnectors();
+  } catch (e) {
+    alert("Couldn't save timestamps: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
 }
 
 async function connRepoint() {
@@ -4309,7 +4860,7 @@ async function connDelete() {
 
 function sectionBar() {
   if (!showWorkflowSectionBar()) return "";
-  const overviewActive = state.view === "dashboard" || state.view === "detail";
+  const overviewActive = state.view === "dashboard" || state.view === "detail" || state.view === "flow" || state.view === "rows";
   const modelActive = state.view === "model";
   const systemsActive = state.view === "bcs" || state.view === "bc";
   const connectorsActive = state.view === "connectors";

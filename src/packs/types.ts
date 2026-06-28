@@ -103,6 +103,15 @@ export interface AdapterConfig {
   /** npm packages the connector module imports (detected from its imports and
    * installed into the connector workspace at build time). */
   deps?: string[];
+  /** Which model field carries the source's CREATION timestamp and which carries
+   * its LAST-MODIFIED timestamp. A connector populates a current-state snapshot
+   * row, which records at most these two real time anchors. Discovered at
+   * build time (the source system is where this is known) and operator-overridable.
+   * Consumed by twin/derive.ts to stamp create-kind events with `created` and
+   * update-kind events with `updated` (falling back to `created`) — real dates
+   * instead of ingestion-time `now`. Values are MODEL field names on the target
+   * schema; absent → derive uses its first-date-field heuristic (unchanged). */
+  dateRoles?: { created?: string; updated?: string };
 }
 
 /** Resolves a credentialsRef to the actual secret. Dev = env var; KeyVault later

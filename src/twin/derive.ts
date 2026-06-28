@@ -40,6 +40,7 @@ import { emit } from "../events/bus.js";
 import { setBusinessClock } from "../events/clock.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
@@ -209,6 +210,39 @@ function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date {
   return new Date();
 }
 
+/** The real time anchor for ONE derived event on ONE row. A snapshot row records
+ * at most two source anchors — creation and last-modified — and the connector's
+ * declared date roles say which column is which:
+ *   • create-kind event       → the source's CREATION date
+ *   • status / fields (update) → the source's LAST-MODIFIED date, falling back to
+ *                                creation
+ * When no roles are declared (or the named column is empty/unparseable) it falls
+ * back to rowBaseDate's model heuristic, so behaviour is unchanged for connectors
+ * that set no roles. The caller still adds the order-index offset, which keeps
+ * multiple events sharing one anchor (two updates, or create==update) ordered. */
+function eventBaseDate(
+  kind: EvidenceKind,
+  row: Record<string, unknown>,
+  entity: EntitySchema,
+  roles: { created?: string; updated?: string } | undefined,
+): Date {
+  const fromRole = (field?: string): Date | null => {
+    if (!field || !present(row[field])) return null;
+    const d = new Date(String(row[field]));
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  if (roles) {
+    if (kind === "create") {
+      const d = fromRole(roles.created);
+      if (d) return d;
+    } else if (kind === "status" || kind === "fields") {
+      const d = fromRole(roles.updated) ?? fromRole(roles.created);
+      if (d) return d;
+    }
+  }
+  return rowBaseDate(row, entity);
+}
+
 function rowProvenance(row: Record<string, unknown>): ProvMode | undefined {
   const p = row._provenance;
   return typeof p === "string" && (PROV_MODES as readonly string[]).includes(p) ? (p as ProvMode) : undefined;
@@ -255,6 +289,7 @@ export interface EventPlan {
 export function planDerivation(
   ont: Ontology,
   rowsByEntity: Map<string, Array<Record<string, unknown>>>,
+  dateRolesByEntity?: Map<string, { created?: string; updated?: string }>,
 ): EventPlan[] {
   const order = ont.linearOrder();
   const plans: EventPlan[] = [];
@@ -266,6 +301,7 @@ export function planDerivation(
     if (!entity) continue;
     const rows = rowsByEntity.get(entity.name) ?? [];
     if (rows.length === 0) continue;
+    const roles = dateRolesByEntity?.get(entity.name);
 
     const kind = classify(event, entity, ont);
     const fired: PlannedEmission[] = [];
@@ -284,7 +320,7 @@ export function planDerivation(
         aggregateId: id,
         role: event.role,
         payload: buildPayload(row, entity),
-        businessAt: new Date(rowBaseDate(row, entity).getTime() + oi * 1000),
+        businessAt: new Date(eventBaseDate(kind, row, entity, roles).getTime() + oi * 1000),
         provenance: rowProvenance(row),
         evidence: ev.reason,
       });
@@ -330,14 +366,19 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
   const limit = opts.limit ?? 1000;
   const ont = getOntology();
 
-  // Load the rows for every aggregate root that some event targets.
+  // Load the rows for every aggregate root that some event targets, plus that
+  // table's connector-declared timestamp roles (so create/update events get the
+  // source's real creation/last-modified dates instead of ingestion-time `now`).
   const rowsByEntity = new Map<string, Array<Record<string, unknown>>>();
+  const dateRolesByEntity = new Map<string, { created?: string; updated?: string }>();
   for (const name of new Set(ont.events.map((e) => e.aggregateRoot))) {
     if (rowsByEntity.has(name)) continue;
     rowsByEntity.set(name, (await store.tableExists(name)) ? await store.findMany(name, limit) : []);
+    const roles = dateRolesForEntity(name);
+    if (roles) dateRolesByEntity.set(name, roles);
   }
 
-  const plans = planDerivation(ont, rowsByEntity);
+  const plans = planDerivation(ont, rowsByEntity, dateRolesByEntity);
   const summaries: DerivedEventSummary[] = [];
   const touched = new Set<string>();
   let totalEmitted = 0;

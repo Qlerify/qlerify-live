@@ -2217,28 +2217,92 @@ function rowEventsCell(events, busy) {
   return `<td class="px-3 py-2 align-top border-l border-stone-100"><div class="flex flex-col items-start gap-1">${inner}</div></td>`;
 }
 
+// Internal columns of a gen_ table that are pure infrastructure (provenance,
+// tenancy) — never rendered. Everything else, INCLUDING id/version/createdAt/
+// updatedAt, is treated as ordinary data and judged against the model: model it
+// and it goes green; leave it undeclared and it shows amber like any other column.
+const EXP_HIDDEN_COLS = new Set(["_provenance", "organization_id"]);
+
+// Header styling per column state (see expColumns).
+const EXP_COL_STYLE = {
+  green: { text: "text-emerald-700", dot: "bg-emerald-500", title: "In the model and the data" },
+  ghost: { text: "text-violet-600", dot: "bg-violet-400", title: "In the model but not in the data — the connector isn't populating this attribute" },
+  amber: { text: "text-amber-700", dot: "bg-amber-500", title: "In the data but not in the model — either drift (a renamed/removed attribute) or a column you haven't modelled yet" },
+  neutral: { text: "text-stone-500", dot: "bg-stone-300", title: "No model to compare against" },
+};
+
+// The Items grid colours columns by comparing the model entity to the REAL
+// ingested data columns, across the model×data matrix (three states):
+//   green – in the model AND in the data (a populated model attribute)
+//   ghost – in the model but NOT in the data (a modelled attribute the connector
+//           isn't populating — e.g. a field just added to the model)
+//   amber – in the data but NOT in the model (drift — a renamed/removed
+//           attribute — OR a column like id/version/createdAt/updatedAt you
+//           simply haven't modelled yet: add it to the model and it turns green)
+// There is no special "platform" exemption — id/version/createdAt/updatedAt are
+// ordinary, model-able attributes. Only `_provenance`/`organization_id` are
+// hidden (pure infra). With no model entity to compare against (an unmodelled raw
+// table) every column is "neutral" — nothing is stale without a model.
+// Returns [{ name, state }] ordered id → model attributes (green/ghost in model
+// order) → remaining data columns (amber).
+function expColumns(e, entity) {
+  const modelFields = entity && entity.fields ? entity.fields.map((f) => f.name) : [];
+  const modelSet = new Set(modelFields);
+  const hasModel = modelSet.size > 0;
+  // "In the data" means at least one row carries a real value. Adding a field to
+  // the model ALTERs the gen_ table to add an all-NULL column, so a column can
+  // exist on every row yet never be populated — that's ghost (modelled, not
+  // filled), not green. Mirrors the empty-cell test in the body renderer.
+  const dataKeys = new Set();
+  for (const r of (e.items || [])) for (const k of Object.keys(r)) {
+    if (EXP_HIDDEN_COLS.has(k)) continue;
+    const v = r[k];
+    if (v !== null && v !== undefined && v !== "") dataKeys.add(k);
+  }
+  const stateOf = (name) => {
+    if (!hasModel) return "neutral";                              // nothing to compare against
+    if (modelSet.has(name)) return dataKeys.has(name) ? "green" : "ghost";
+    return "amber";                                               // in data, not in model (incl. unmodelled id/version/createdAt/…)
+  };
+  const out = [];
+  const seen = new Set();
+  const push = (name) => { if (!seen.has(name)) { seen.add(name); out.push({ name, state: stateOf(name) }); } };
+  if (dataKeys.has("id") || modelSet.has("id")) push("id");        // identifier first
+  for (const f of modelFields) push(f);                           // model attributes: green (in data) or ghost (missing)
+  for (const k of dataKeys) if (!modelSet.has(k)) push(k);        // everything else in the data (amber)
+  return out.length ? out : [{ name: "id", state: "neutral" }];
+}
+
 function expMain(e) {
   if (!e.system) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Loading systems…</div>`;
   if (!e.entity) return `<div class="flex-1 flex items-center justify-center text-stone-400 text-sm">Select a table to explore its items.</div>`;
   const entity = (e.entities || []).find((t) => t.name === e.entity) || (e.valueObjects || []).find((t) => t.name === e.entity);
-  const cols = entity && entity.fields && entity.fields.length
-    ? entity.fields.map((f) => f.name)
-    : (e.items[0] ? Object.keys(e.items[0]).filter((k) => k !== "_provenance") : ["id"]);
+  const cols = expColumns(e, entity);
+  const hasModel = !!(entity && entity.fields && entity.fields.length);
+  const legend = hasModel ? `
+      <div class="px-6 pb-2 flex items-center gap-x-4 gap-y-1 flex-wrap text-[11px] text-stone-500">
+        <span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>In model &amp; data</span>
+        <span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full bg-violet-400"></span>In model, no data <span class="italic">(not populated)</span></span>
+        <span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>In data, not in model <span class="italic">(stale / unmodelled)</span></span>
+      </div>` : "";
   const rows = applyExpFilters(e.items, e.filters);
   const tableAdapters = expAdaptersForEntity(e);
   const PAGE = 25;
   const pages = Math.max(1, Math.ceil(rows.length / PAGE));
   const page = Math.min(e.page, pages - 1);
   const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
-  const headerCells = cols.map((c) => `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200">${escapeHtml(c)}</th>`).join("")
+  const headerCells = cols.map((c) => {
+    const st = EXP_COL_STYLE[c.state] || EXP_COL_STYLE.neutral;
+    return `<th class="px-3 py-2 text-left text-[11px] font-semibold ${st.text} whitespace-nowrap border-b border-stone-200" title="${st.title}"><span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full ${st.dot}"></span>${escapeHtml(c.name)}</span></th>`;
+  }).join("")
     + `<th class="px-3 py-2 text-left text-[11px] font-semibold text-stone-600 whitespace-nowrap border-b border-stone-200 border-l border-stone-100">⚡ Events</th>`;
   // The events column is always on, so top-align every cell — a row that grows to
   // fit several stacked events keeps its other values lined up at the top.
   const tdAlign = "align-top";
   const bodyRows = pageRows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
       <td class="px-3 py-2 ${tdAlign}"><input type="checkbox" class="rounded border-stone-300" /></td>
-      ${cols.map((c, ci) => {
-        const val = r[c];
+      ${cols.map((col, ci) => {
+        const val = r[col.name];
         const empty = val === null || val === undefined || val === "";
         const s = empty ? "" : String(val);
         const disp = empty ? '<span class="text-stone-300">—</span>' : escapeHtml(s.length > 44 ? s.slice(0, 44) + "…" : s);
@@ -2265,6 +2329,7 @@ function expMain(e) {
           <button id="exp-next" class="px-2 py-0.5 rounded hover:bg-stone-100 ${page >= pages - 1 ? "opacity-40" : ""}">›</button>
         </div>
       </div>
+      ${legend}
       <div class="flex-1 overflow-auto px-6 pb-6">
         ${e.busy ? '<div class="text-stone-400 text-sm py-10 text-center">Loading…</div>'
           : e.tableMissing ? `<div class="text-stone-400 text-sm py-10 text-center">No data yet for <b>${escapeHtml(e.entity)}</b>. Run the simulator or configure a connector to populate it.</div>`
@@ -2297,7 +2362,7 @@ function expFiltersPanel(e, cols) {
   return `
     <details ${e.filters && e.filters.length ? "open" : ""}>
       <summary class="text-sm font-medium text-stone-700 cursor-pointer select-none mb-2">Filters <span class="text-stone-400 font-normal italic">– optional</span></summary>
-      <datalist id="exp-attr-list">${cols.map((c) => `<option value="${escapeHtml(c)}">`).join("")}</datalist>
+      <datalist id="exp-attr-list">${cols.map((c) => `<option value="${escapeHtml(c.name)}">`).join("")}</datalist>
       ${filterRows}
       <button id="exp-add-filter" class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 mb-1">Add filter</button>
       <div class="flex items-center gap-3 mt-1">

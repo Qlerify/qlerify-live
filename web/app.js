@@ -3126,15 +3126,25 @@ function caseFirings(layout) {
   }));
   const aggIds = new Set(firings.map((f) => f.aggId).filter(Boolean));
   for (const f of firings) {
-    let fk = null;
+    // ALL payload fields (other than own id) whose value is another firing's
+    // aggregateId — the candidate FK parents. *Id-suffixed fields are listed
+    // first, but which one actually becomes the parent is decided later by
+    // column proximity in buildBranchForest. Collecting every candidate (not
+    // just the first match) is what lets a firing carrying several FKs — e.g.
+    // Team Member Added with both userId and projectId — latch onto the nearest
+    // in-branch ancestor instead of whichever field happens to come first.
+    const seen = new Set();
+    f.parentAggs = [];
     const keys = Object.keys(f.payload)
       .filter((k) => k !== "id")
       .sort((a, b) => (b.endsWith("Id") ? 1 : 0) - (a.endsWith("Id") ? 1 : 0));
     for (const k of keys) {
       const v = f.payload[k];
-      if (typeof v === "string" && v && v !== f.aggId && aggIds.has(v)) { fk = v; break; }
+      if (typeof v === "string" && v && v !== f.aggId && aggIds.has(v) && !seen.has(v)) {
+        seen.add(v);
+        f.parentAggs.push(v);
+      }
     }
-    f.parentAgg = fk;
   }
   return firings;
 }
@@ -3163,9 +3173,19 @@ function buildBranchForest(splitRef, layout, firings) {
     const chain = byAgg.get(f.aggId);
     const pos = chain.indexOf(f);
     if (pos > 0) parent = chain[pos - 1];                       // same entity, earlier step
-    else if (f.parentAgg) {                                     // cross-aggregate FK
-      const p = firstByAgg.get(f.parentAgg);
-      if (p && p.col >= splitCol) parent = p;
+    else {                                                      // cross-aggregate FK
+      // Pick the closest ancestor inside the branch subtree: among every FK the
+      // payload resolves to, keep the one with the highest column that is still
+      // an earlier step (≥ split, < this firing's column). Preferring the
+      // nearest in-branch parent stops a firing that also references an upstream
+      // aggregate (e.g. Team Member Added → userId → User Registered, which sits
+      // on the shared spine) from failing the subtree test and dropping to a
+      // spurious root wired straight from the feeder event.
+      for (const agg of f.parentAggs) {
+        const p = firstByAgg.get(agg);
+        if (!p || p === f || p.col < splitCol || p.col >= f.col) continue;
+        if (!parent || p.col > parent.col) parent = p;
+      }
     }
     if (parent && nodeOf.has(parent) && parent !== f) nodeOf.get(parent).children.push(node);
     else roots.push(node);

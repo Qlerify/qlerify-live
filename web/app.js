@@ -3911,34 +3911,35 @@ function mergedFlowView() {
 }
 
 // Per-case flow (#rows): the merged flow split into one row per case. Each row is
-// the SAME cards as the Workflow view — same geometry, phase border, provenance
-// chip/hatch and emerald heat — but flattened to a single lane and scoped to one
-// case: a card is "on" (emerald, tinted) where that case fired the step, ghosted
-// where it didn't, with the same ×N corner badge when a step fired more than once;
-// the connector edges between them light only where the case actually flowed. The
-// left gutter names the case; the row links into its full detail. Most flows have
-// few steps, so the full cards stay readable.
+// a scoped copy of the Workflow view's 2-D layout — same column/lane placement,
+// spine, branches and routed skip edges, card geometry, phase border, provenance
+// chip/hatch and emerald heat — lit for one case: a card is "on" (emerald, tinted)
+// where that case fired the step, ghosted where it didn't, with the same ×N corner
+// badge when a step fired more than once; the connector edges between them light
+// only where the case actually flowed. The left gutter names the case; the row
+// links into its full detail.
 function rowsTimeline() {
   const rows = state.flowRows?.cases || [];
   const layout = computeFlowLayout(state.events);
-  // Order events left-to-right by the merged flow's column (then lane), so the
-  // columns line up with the Workflow view; each event gets its own column here
-  // (single lane per row, so parallel branches lay out side by side without
-  // overlapping).
-  const ordered = [...state.events].sort((a, b) => {
-    const pa = layout.place.get(a.ref) || { col: 0, lane: 0 };
-    const pb = layout.place.get(b.ref) || { col: 0, lane: 0 };
-    return pa.col - pb.col || pa.lane - pb.lane;
-  });
-  const N = ordered.length;
-  const idxOf = new Map(ordered.map((e, i) => [e.ref, i]));
-  const { cardW, cardH, colPitch } = FLOW;
+  const { cardW, cardH, colPitch, rowPitch } = FLOW;
   const labelW = 210;
-  const gridW = N ? (N - 1) * colPitch + cardW : cardW;
 
   if (!rows.length) {
     return `<section class="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">No cases have fired yet — run a case (or switch to <a href="#list" class="underline">List</a> and add one) to see it appear as a row here.</section>`;
   }
+
+  // 2-D geometry, identical for every case row (same model topology): the spine,
+  // its branches and the routed skip edges land exactly where the Workflow view
+  // puts them — only which cards/edges are lit changes per case. Mirrors
+  // mergedTimeline's lane math: card lanes keep full height, a lane carrying only
+  // a routed edge is short, and laneTop stacks them with the usual gutter.
+  const laneGap = rowPitch - cardH;
+  const cardLanes = new Set(Array.from(layout.place.values(), (p) => p.lane));
+  const laneHeight = Array.from({ length: layout.lanes }, (_, L) => cardLanes.has(L) ? cardH : ROUTE_ROW);
+  const laneTop = [];
+  for (let L = 0, acc = 0; L < layout.lanes; L++) { laneTop[L] = acc; acc += laneHeight[L] + laneGap; }
+  const gridW = (layout.cols - 1) * colPitch + cardW;
+  const rowH = layout.lanes ? laneTop[layout.lanes - 1] + laneHeight[layout.lanes - 1] : cardH;
 
   // Heat is comparable across rows: tint each fired card by its count relative to
   // the busiest single (case, step) anywhere in view.
@@ -3953,52 +3954,23 @@ function rowsTimeline() {
   if (!attrKeys.length) attrKeys = genericColumns(state.cases || []);
   attrKeys = attrKeys.slice(0, 3);
 
-  // Skip edges — endpoints more than one card apart once the flow is flattened to
-  // this view's single lane — would be drawn straight through the cards between
-  // them. (It bites harder here than in the Workflow view: parallel branches are
-  // interleaved into adjacent columns, so even a one-hop model edge can hop over
-  // a sibling card.) Route each onto a band below the cards: the lowest band that
-  // is free across every column it spans, packing non-overlapping edges onto the
-  // same band. Adjacent-column edges stay on the lane as the original S-curve.
-  const bandOf = new Map();   // `${from}->${to}` -> band index (0 = first row below the cards)
-  const bandOcc = new Set();  // `${band},${idx}` taken
-  let bandCount = 0;
-  const skips = layout.edges
-    .map(({ from, to }) => ({ from, to, ai: idxOf.get(from), bi: idxOf.get(to) }))
-    .filter((e) => e.ai != null && e.bi != null && e.bi - e.ai > 1)
-    .sort((a, b) => (b.bi - b.ai) - (a.bi - a.ai)); // widest first → big arcs claim bands first
-  for (const e of skips) {
-    const mid = [];
-    for (let i = e.ai + 1; i < e.bi; i++) mid.push(i);
-    let b = 0;
-    while (!mid.every((i) => !bandOcc.has(`${b},${i}`))) b++;
-    mid.forEach((i) => bandOcc.add(`${b},${i}`));
-    bandCount = Math.max(bandCount, b + 1);
-    bandOf.set(`${e.from}->${e.to}`, b);
-  }
-  // Lane/row geometry for flowEdgePath: lane 0 is the card lane, each band a short
-  // routing row beneath it. rowH is the per-case row height (just cardH when no
-  // edge needs routing, so unbranched flows render exactly as before).
-  const BAND_GAP = 8, BAND_H = 22;
-  const rowH = cardH + (bandCount ? BAND_GAP + bandCount * BAND_H : 0);
-  const laneTop = [0], laneHeight = [cardH];
-  for (let b = 0; b < bandCount; b++) { laneTop[b + 1] = cardH + BAND_GAP + b * BAND_H; laneHeight[b + 1] = BAND_H; }
-
   // Edge geometry is the model topology, identical for every row; only which edges
-  // are "lit" changes per case.
+  // are "lit" changes per case. Same lane placement + waypoint routing as the
+  // Workflow view, so a spine shortcut runs straight and a skip edge bows onto its
+  // routed row exactly as it does there.
   const edgeGeom = layout.edges.map(({ from, to }) => {
-    const ai = idxOf.get(from), bi = idxOf.get(to);
-    if (ai == null || bi == null) return null;
-    const band = bandOf.get(`${from}->${to}`);
-    const wp = band == null ? null : { lane: band + 1, cols: [] };
-    return { d: flowEdgePath({ col: ai, lane: 0 }, { col: bi, lane: 0 }, wp, laneTop, laneHeight, FLOW), to };
+    const a = layout.place.get(from), b = layout.place.get(to);
+    if (!a || !b) return null;
+    const d = flowEdgePath(a, b, layout.waypoints.get(`${from}->${to}`), laneTop, laneHeight, FLOW);
+    return { d, to };
   }).filter(Boolean);
 
   const rowsHtml = rows.map((c) => {
     const counts = c.counts || {};
-    const firedRefs = new Set(ordered.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
+    const firedRefs = new Set(state.events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
 
-    const cards = ordered.map((e, i) => {
+    const cards = state.events.map((e, i) => {
+      const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
       const n = counts[e.ref] || 0;
       const fired = n > 0;
       const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
@@ -4007,7 +3979,7 @@ function rowsTimeline() {
       const heatStyle = fired ? `background-color:rgba(16,185,129,${heat});` : "";
       return `
         <div class="absolute rounded-md border ${fired ? "border-emerald-300" : phaseBorder} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
-             style="left:${i * colPitch}px; top:0; width:${cardW}px; height:${cardH}px; ${heatStyle} ${provHatch(provMode)}">
+             style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardH}px; ${heatStyle} ${provHatch(provMode)}">
           <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
             <span class="truncate">${i + 1}. ${escapeHtml(e.boundedContext)}</span>
             ${provChip(provMode)}
@@ -4020,9 +3992,10 @@ function rowsTimeline() {
     // Same ×N corner badge as the detail / merged views (hidden when a step fired
     // just once for this case, which is the norm — the green card already says it
     // ran). Sibling layer so it can overhang the card's top-right corner.
-    const badges = ordered.map((e, i) => {
+    const badges = state.events.map((e, i) => {
+      const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
       const n = counts[e.ref] || 0;
-      return flowCountBadge(n, i * colPitch + cardW, 0, `${e.name} fired ${n}× for this case`);
+      return flowCountBadge(n, pos.col * colPitch + cardW, laneTop[pos.lane], `${e.name} fired ${n}× for this case`);
     }).join("");
 
     const paths = edgeGeom.map(({ d, to }) =>

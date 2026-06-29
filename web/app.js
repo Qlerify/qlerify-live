@@ -115,6 +115,7 @@ const state = {
   caseId: null,
   instance: null,   // per-run detail from /sim/instance
   prevInstance: null, // the instance snapshot before the last step (per-run diff)
+  asOfPrev: null,   // when a step is selected: reconstruction JUST BEFORE its firings (as-of diff baseline)
   log: [],
   currentIndex: 0,
   // Refs whose ×N fired-count badge is expanded into one row per firing on the
@@ -125,6 +126,12 @@ const state = {
   // up to it, then the downstream fans out into one full branch per execution
   // (an FK-threaded instance tree). null = no split. Cleared on case switch.
   splitRef: null,
+  // The timeline event the user selected to scrub the data view back in time:
+  // the data view is reconstructed AS OF this event (the fold of the event log
+  // up to & including it). It is the declared index into state.events (the same
+  // index `data-step` encodes). null = no selection → the live, latest view.
+  // Cleared on case switch and on any action that advances the live run.
+  selectedStep: null,
   // per-BC adapter workbench (Part 2.3)
   bc: null,           // current bounded context (#bc/<Name>)
   bcList: null,       // /api/bc index
@@ -2986,7 +2993,7 @@ async function loadDetail() {
   state.prevInstance = state.instance && state.instance.instanceId === instance.instanceId ? state.instance : null;
   // New run (not just a step within the same run) → collapse any expanded
   // fired-count badges and any active branch split so the next case starts clean.
-  if (state.prevInstance === null) { state.expandedFirings = new Set(); state.splitRef = null; }
+  if (state.prevInstance === null) { state.expandedFirings = new Set(); state.splitRef = null; state.selectedStep = null; }
   state.instance = instance;
   state.events = events;
   // newest-first so lastEventInline() / businessByStep read the latest first
@@ -2998,6 +3005,7 @@ async function loadDetail() {
 
 async function doNext() {
   if (state.busy) return;
+  state.selectedStep = null; // advancing the live run drops any as-of scrub
   state.busy = true; render();
   try {
     await api("/sim/next", {
@@ -3014,6 +3022,7 @@ async function doNext() {
 
 async function doRunAll() {
   if (state.busy) return;
+  state.selectedStep = null; // advancing the live run drops any as-of scrub
   state.busy = true; render();
   try {
     await api("/sim/run-all", {
@@ -3559,8 +3568,11 @@ function timeline() {
     const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
     const fired = firedRefs.has(e.ref);
     const isCurrent = i === lastFiredIndex;
+    const isSelected = i === state.selectedStep;
     const phaseBorder = PHASE_TONE[e.phase] || "border-stone-300";
-    const ringClass = isCurrent ? "ring-2 ring-amber-400" : "";
+    // Selection (sky ring) is the active interaction → it wins over the amber
+    // "latest fired" ring when a card is both.
+    const ringClass = isSelected ? "ring-2 ring-sky-500" : isCurrent ? "ring-2 ring-amber-400" : "";
     // Every fired step is done → green. (No contiguous-frontier exclusion: a
     // derived run's fired set has gaps, and each fired box should read as done.)
     const isPast = fired;
@@ -3605,7 +3617,7 @@ function timeline() {
     }
 
     return `
-      <div data-step="${i}" class="absolute rounded-md border ${isPast ? "border-emerald-200" : phaseBorder} ${ringClass} ${isPast ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
+      <div data-step="${i}" title="View the data as of this event" class="absolute cursor-pointer rounded-md border ${isPast ? "border-emerald-200" : phaseBorder} ${ringClass} ${isPast ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired || isSelected ? "" : "opacity-60"} flex flex-col overflow-hidden"
            style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardHeightFor(e.ref)}px; ${provHatch(provMode)}">
         <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
           <span class="truncate">${i+1}. ${e.boundedContext}</span>
@@ -4203,6 +4215,126 @@ function detailView() {
 // Platform/bookkeeping columns we never surface as business fields.
 const GEN_HIDDEN = new Set(["version", "createdAt", "updatedAt", "_provenance"]);
 
+// --- point-in-time ("as of" a selected event) -------------------------------
+// When the user selects a timeline event, the data view is reconstructed as it
+// stood the moment that event fired — without any server round-trip or
+// destructive replay. Every EventLog entry's payload already captures the
+// command's args plus the resulting `status` (see commands/base emitFor), and
+// the whole log is already loaded in state.log, so we just fold the payloads of
+// the events up to & including the selected step. Fields a command never carried
+// (e.g. columns filled from exampleData at create, which are time-invariant)
+// keep their value from the live row; command-carried fields that have not been
+// set yet by the cutoff read blank ("not yet established at this point").
+// Payloads are parsed with the shared parsePayload() helper (returns {} for
+// empty/bad data, so an empty payload folds to nothing).
+
+// Map event ref → its declared index in state.events (the same index the
+// timeline's data-step encodes), so a log entry can be placed against the cutoff.
+function eventRefIndex() {
+  const m = new Map();
+  state.events.forEach((e, i) => m.set(e.ref, i));
+  return m;
+}
+
+// id → { agg, row } over the LIVE instance, for static-field carry-over.
+function liveRowsById(inst) {
+  const m = new Map();
+  if (inst.root && inst.root.id != null) m.set(String(inst.root.id), { agg: inst.rootAggregate, row: inst.root });
+  for (const [agg, rows] of Object.entries(inst.entities || {})) {
+    for (const row of rows || []) if (row.id != null) m.set(String(row.id), { agg, row });
+  }
+  return m;
+}
+
+// Reconstruct the whole instance from the event log, folding only the entries
+// the predicate accepts (by declared step index). `everCarried` (per-aggregate
+// set of fields any command ever carried, full-log) lets us blank a column that
+// only a LATER command sets vs. carry a time-invariant column from the live row.
+function reconstructInstance(includeIdx, everCarried, live, refIdx, chrono) {
+  const folded = new Map(); // id → { agg, row }
+  for (const ev of chrono) {
+    if (!ev.aggregateId) continue;            // skip markers (empty aggregateId)
+    const idx = refIdx.get(ev.eventRef);
+    if (idx == null || !includeIdx(idx)) continue;
+    const p = parsePayload(ev.payload);
+    if (!p || Object.keys(p).length === 0) continue; // empty/bad payload folds to nothing
+    const id = String(ev.aggregateId);
+    let cur = folded.get(id);
+    if (!cur) folded.set(id, (cur = { agg: ev.aggregateRoot, row: {} }));
+    Object.assign(cur.row, p);              // later (chronological) values win
+  }
+  const entities = {};
+  let root = null;
+  for (const [id, { agg, row: asOf }] of folded) {
+    const liveRow = live.get(id)?.row || {};
+    const carried = everCarried.get(id) || new Set();
+    const out = { id };
+    const cols = new Set([...Object.keys(liveRow), ...Object.keys(asOf)]);
+    for (const c of cols) {
+      if (c === "id") continue;
+      if (c in asOf) out[c] = asOf[c];                 // value as of the cutoff
+      else if (carried.has(c)) out[c] = null;          // a command sets it only later → not yet established
+      else out[c] = liveRow[c];                        // never command-carried → time-invariant
+    }
+    if (agg === state.instance.rootAggregate && id === String(state.instance.root?.id ?? "")) root = out;
+    else (entities[agg] ??= []).push(out);
+  }
+  return { instanceId: state.instance.instanceId, rootAggregate: state.instance.rootAggregate, root, entities, events: state.instance.events };
+}
+
+// The instance to render: the live one, or — when a step is selected — a
+// reconstruction of every aggregate's state as of that step. Also stashes
+// state.asOfPrev = the reconstruction of the state JUST BEFORE the selected
+// event's firings, so the data view can highlight exactly what that event
+// changed (across all its firings) by diffing as-of − before.
+function activeDetailInstance() {
+  const inst = state.instance || {};
+  if (state.selectedStep == null || !state.instance) { state.asOfPrev = null; return inst; }
+  const sel = state.selectedStep;
+  const refIdx = eventRefIndex();
+  const chrono = (state.log || []).slice().reverse(); // state.log is newest-first
+
+  // Fields any command EVER carried, per aggregate (full log) — lets us tell a
+  // time-varying column (blank until its command fires) from a static one.
+  const everCarried = new Map();
+  for (const ev of chrono) {
+    if (!ev.aggregateId) continue;
+    const p = parsePayload(ev.payload);
+    if (!p) continue;
+    const id = String(ev.aggregateId);
+    let set = everCarried.get(id);
+    if (!set) everCarried.set(id, (set = new Set()));
+    for (const k of Object.keys(p)) set.add(k);
+  }
+
+  const live = liveRowsById(state.instance);
+  // All firings of the selected event share the declared index `sel`, so
+  // "≤ sel" includes every firing of it and "< sel" excludes them all — the
+  // diff is precisely the net effect of all of the selected event's firings.
+  const asOf = reconstructInstance((idx) => idx <= sel, everCarried, live, refIdx, chrono);
+  state.asOfPrev = reconstructInstance((idx) => idx < sel, everCarried, live, refIdx, chrono);
+  return asOf;
+}
+
+// The selected event def (for the as-of banner), or null.
+function selectedEventDef() {
+  return state.selectedStep != null ? (state.events[state.selectedStep] || null) : null;
+}
+
+// A sub-bar shown under the timeline while a step is selected: it states what
+// point in time the data view is pinned to and offers a one-click return to the
+// live, latest view.
+function asOfBanner() {
+  const e = selectedEventDef();
+  if (!e) return "";
+  return `
+    <div class="px-6 py-2 bg-sky-50 border-b border-sky-200 flex items-center gap-3 text-sm">
+      <span class="inline-block w-2 h-2 rounded-full bg-sky-500"></span>
+      <span class="text-sky-900">Showing data <span class="font-semibold">as of</span> step ${state.selectedStep + 1} · <span class="font-semibold">${escapeHtml(e.name)}</span> <span class="text-sky-700">— fields it changed are highlighted</span></span>
+      <button id="btn-clear-asof" class="ml-auto px-2.5 py-1 text-xs rounded-md border border-sky-300 bg-white hover:bg-sky-100 text-sky-800 font-medium">Show latest →</button>
+    </div>`;
+}
+
 // Every row in the run, tagged with its aggregate. The root instance is listed
 // once under the root aggregate (the entities map may also carry it).
 function genAllRows(inst, m) {
@@ -4247,10 +4379,31 @@ function genRelations(allRows, m, bcByAgg) {
 
 // --- diff against the pre-step instance (what the last event touched) -------
 function genPrevRow(agg, id) {
-  const p = state.prevInstance;
+  // The diff baseline: when a step is selected, the reconstruction of the state
+  // JUST BEFORE that event's firings (so we highlight what it changed); otherwise
+  // the live pre-step snapshot.
+  const p = state.selectedStep != null ? state.asOfPrev : state.prevInstance;
   if (!p || id == null) return undefined;
   if (agg === p.rootAggregate && p.root && p.root.id === id) return p.root;
   return (p.entities?.[agg] || []).find((r) => r.id === id);
+}
+
+// Blank-tolerant comparison so a value that was "not yet established" (null) and
+// later set reads as a change, while null/undefined/"" never differ among
+// themselves. Objects/arrays compare by JSON.
+function asOfBlank(v) { return v === null || v === undefined || v === ""; }
+function asOfNorm(v) { return asOfBlank(v) ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v)); }
+// Business fields whose value the selected event established/modified: the set of
+// columns that differ between the row (as-of the event) and its before-baseline.
+function asOfChangedFields(row, prev) {
+  const changed = new Set();
+  const cols = new Set(Object.keys(row));
+  if (prev) for (const k of Object.keys(prev)) cols.add(k);
+  for (const k of cols) {
+    if (k === "id" || GEN_HIDDEN.has(k)) continue;
+    if (asOfNorm(row[k]) !== asOfNorm(prev ? prev[k] : undefined)) changed.add(k);
+  }
+  return changed;
 }
 // The aggregate instance the most recent event touched, read off the event log.
 // This is the baseline on the FIRST view of a run: the create event (e.g. the
@@ -4263,6 +4416,9 @@ function genLastTouched() {
   return { agg: last.aggregateRoot, id: String(last.aggregateId) };
 }
 function genRowChanged(agg, row) {
+  // As-of view: a row "changed" iff the selected event (any firing) established or
+  // modified at least one of its business fields.
+  if (state.selectedStep != null) return asOfChangedFields(row, genPrevRow(agg, row.id)).size > 0;
   const prev = genPrevRow(agg, row.id);
   if (state.prevInstance) {
     if (!prev) return true; // created by the last event
@@ -4274,6 +4430,8 @@ function genRowChanged(agg, row) {
   return !!lt && lt.agg === agg && row.id != null && String(row.id) === lt.id;
 }
 function genFieldChanged(agg, row, field) {
+  // As-of view: only the fields the selected event's firings established/modified.
+  if (state.selectedStep != null) return asOfChangedFields(row, genPrevRow(agg, row.id)).has(field);
   const prev = genPrevRow(agg, row.id);
   // Updated row with a known baseline → only the fields that actually differ.
   if (prev) return JSON.stringify(prev[field]) !== JSON.stringify(row[field]);
@@ -4385,7 +4543,7 @@ function genNode(agg, row, ctx, depth, prominent) {
 // Model-generic per-run detail: header (reuses the btn-back/next/all/reset ids so
 // the existing bindings work), the timeline, and the relationship forest.
 function genericDetailView() {
-  const inst = state.instance || {};
+  const inst = activeDetailInstance();
   const root = inst.root || {};
   const total = state.events.length;
   const m = state.meta;
@@ -4422,6 +4580,7 @@ function genericDetailView() {
       </div>
     </header>
     ${timeline()}
+    ${asOfBanner()}
     <main class="flex-1 overflow-auto p-6 flex flex-col gap-4">
       ${rootCard}
       ${otherCards ? `<div class="grid gap-4 items-start" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${otherCards}</div>` : ""}
@@ -4429,7 +4588,83 @@ function genericDetailView() {
 }
 
 
+// Move the selected event by the flow's 2D layout (column/lane from
+// computeFlowLayout — the same geometry the cards are drawn with), NOT the linear
+// sequence index. Left/right follow the current branch, bridging back onto the
+// connected (usually main) branch at a sub-branch's ends; up/down cross to the
+// parallel card stacked above/below. Returns true if the selection moved.
+// dir ∈ "left" | "right" | "up" | "down".
+function navSelect(dir) {
+  if (state.selectedStep == null) return false;
+  const events = state.events || [];
+  const curRef = events[state.selectedStep]?.ref;
+  if (!curRef) return false;
+  const layout = computeFlowLayout(events);
+  const cur = layout.place.get(curRef);
+  if (!cur) return false;
+  const idxByRef = new Map(events.map((e, i) => [e.ref, i]));
+  const cells = [];
+  events.forEach((e, idx) => {
+    const p = layout.place.get(e.ref);
+    if (p && e.ref !== curRef) cells.push({ idx, col: p.col, lane: p.lane });
+  });
+  let pick = null;
+  if (dir === "left" || dir === "right") {
+    // 1) Within the branch: nearest card in the SAME lane in that direction.
+    const cands = cells.filter((c) => c.lane === cur.lane && (dir === "right" ? c.col > cur.col : c.col < cur.col));
+    for (const c of cands) {
+      if (!pick || (dir === "right" ? c.col < pick.col : c.col > pick.col)) pick = c;
+    }
+    // 2) At the branch's start/end (no same-lane card that way): bridge along the
+    //    flow edge — the predecessor when going left, a successor when going right —
+    //    so leaving a sub-branch continues onto the main branch instead of
+    //    dead-ending on its first/last card.
+    if (!pick) {
+      const linked = dir === "left"
+        ? (events[state.selectedStep].predecessors || [])
+        : events.filter((e) => (e.predecessors || []).includes(curRef)).map((e) => e.ref);
+      for (const ref of linked) {
+        const p = layout.place.get(ref);
+        if (!p || (dir === "left" ? p.col >= cur.col : p.col <= cur.col)) continue; // must be upstream/downstream
+        const cand = { idx: idxByRef.get(ref), col: p.col, lane: p.lane };
+        if (!pick || (dir === "left" ? p.col > pick.col : p.col < pick.col)) pick = cand; // nearest by column
+      }
+    }
+  } else {
+    // Directly above (up) / below (down): the parallel-branch card at the SAME
+    // column, nearest lane. Nothing stacked there → no move (don't jump sideways).
+    const cands = cells.filter((c) => c.col === cur.col && (dir === "up" ? c.lane < cur.lane : c.lane > cur.lane));
+    for (const c of cands) {
+      if (!pick || (dir === "up" ? c.lane > pick.lane : c.lane < pick.lane)) pick = c;
+    }
+  }
+  if (!pick) return false;
+  state.selectedStep = pick.idx;
+  return true;
+}
+
+// Arrow keys move the selected event around the flow (only while one is selected,
+// so unselected arrows keep their normal scrolling). Registered once on document
+// — bindDetail() runs every render, so guard it.
+let _keyNavReady = false;
+function initKeyNav() {
+  if (_keyNavReady) return;
+  _keyNavReady = true;
+  const DIRS = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
+  document.addEventListener("keydown", (ev) => {
+    if (state.view !== "detail" || state.selectedStep == null) return;
+    const dir = DIRS[ev.key];
+    if (!dir) return;
+    // Don't hijack arrows while the user is typing in a field.
+    const a = document.activeElement;
+    if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT" || a.isContentEditable)) return;
+    ev.preventDefault(); // selection owns the arrows → no page/timeline scroll
+    if (navSelect(dir)) render();
+  });
+}
+
 function bindDetail() {
+  initKeyNav();
   document.getElementById("btn-back")?.addEventListener("click", () => navigate("#"));
   document.getElementById("btn-next")?.addEventListener("click", doNext);
   document.getElementById("btn-all")?.addEventListener("click", doRunAll);
@@ -4455,6 +4690,26 @@ function bindDetail() {
       render();
     }));
   document.getElementById("btn-merge-branches")?.addEventListener("click", () => { state.splitRef = null; render(); });
+  // Select a timeline event → pin the data view to its point in time (as-of
+  // fold of the event log). Re-clicking the selected card clears it. The split
+  // button / fired-count badge stopPropagation, so they never select.
+  document.querySelectorAll("#timeline-scroll [data-step]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const i = Number(el.getAttribute("data-step"));
+      if (Number.isNaN(i)) return;
+      state.selectedStep = state.selectedStep === i ? null : i;
+      render();
+    }));
+  // Click the empty timeline background (between/around the cards) → deselect,
+  // same as "Show latest". Card clicks bubble here too, so ignore any click that
+  // landed on a card or its badge/split controls.
+  document.getElementById("timeline-scroll")?.addEventListener("click", (ev) => {
+    if (ev.target.closest("[data-step], [data-toggle-firings], [data-split-ref]")) return;
+    if (state.selectedStep == null) return;
+    state.selectedStep = null;
+    render();
+  });
+  document.getElementById("btn-clear-asof")?.addEventListener("click", () => { state.selectedStep = null; render(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -4527,9 +4782,11 @@ function renderView() {
     bindChat();
     const scroller = document.getElementById("timeline-scroll");
     if (scroller) scroller.scrollLeft = prevScroll;
-    const activeIdx = state.currentIndex - 1;
-    if (activeIdx >= 0 && scroller) {
-      const node = scroller.querySelector(`[data-step="${activeIdx}"]`);
+    // Keep the focused card in view: the selected one while scrubbing (so arrow
+    // navigation follows it), otherwise the latest fired step.
+    const focusIdx = state.selectedStep != null ? state.selectedStep : state.currentIndex - 1;
+    if (focusIdx >= 0 && scroller) {
+      const node = scroller.querySelector(`[data-step="${focusIdx}"]`);
       if (node) {
         const nodeBox = node.getBoundingClientRect();
         const scrollerBox = scroller.getBoundingClientRect();

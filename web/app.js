@@ -3187,8 +3187,14 @@ function computeFlowLayout(events) {
   };
   events.forEach((e) => { col(e.ref); height(e.ref); });
 
-  // Main spine: start at the source that begins the longest path, then always
-  // follow the successor with the most depth remaining, to the end.
+  // Main spine: start at the source that begins the longest path, then walk
+  // forward. At each fork, prefer a "shortcut" successor — an edge that skips one
+  // or more columns (col advance > 1) — so the direct line stays on the top lane
+  // and the skipped sub-process drops to a branch below it. (e.g. a model with a
+  // direct "GPR Implemented → GPR Deployed" edge plus a longer "exemption" detour
+  // keeps the direct edge straight on the spine and pushes the detour down.) With
+  // no shortcut at the fork, fall back to the successor with the most depth
+  // remaining, as before — so plain parallel branches still spine the longest path.
   const spine = new Set();
   const sources = events.filter((e) => preds(e.ref).length === 0).map((e) => e.ref);
   if (sources.length) {
@@ -3197,29 +3203,71 @@ function computeFlowLayout(events) {
       spine.add(cur);
       const ss = succ.get(cur) || [];
       if (!ss.length) break;
-      cur = ss.reduce((a, b) => (height(b) > height(a) ? b : a));
+      const cc = col(cur);
+      const shortcuts = ss.filter((s) => col(s) - cc > 1);
+      cur = shortcuts.length
+        ? shortcuts.reduce((a, b) => (col(b) > col(a) ? b : a))
+        : ss.reduce((a, b) => (height(b) > height(a) ? b : a));
     }
   }
 
-  // Lanes: spine on lane 0; everything else takes the lowest free lane in its
-  // column, preferring to inherit a non-spine predecessor's lane so a branch
-  // reads as one straight horizontal run rather than zig-zagging.
+  // Lanes: spine on lane 0; every other event is grouped into a branch and each
+  // branch laid out as a coherent horizontal band below the spine.
+  //
+  // A branch is a weakly-connected group of non-spine events (linked through
+  // their non-spine predecessor edges). Branches are placed shortest-span first,
+  // so a small sub-branch that forks off the spine and quickly merges back claims
+  // the lane nearest the spine, while a longer branch that forked earlier is
+  // pushed further down. That keeps the short branch's fork/merge connectors from
+  // crossing over the long one — e.g. the GPR exemption detour sits on the row
+  // right under the spine and the wider BR branch drops below it. Assigning a
+  // whole branch one base lane (rather than node-by-node) also stops a branch
+  // from zig-zagging when a later branch needs the inner lane.
   const lane = new Map();
   const occupied = new Set(); // "lane,col"
   for (const ref of spine) { lane.set(ref, 0); occupied.add(`0,${col(ref)}`); }
-  const others = events
-    .filter((e) => !spine.has(e.ref))
-    .sort((a, b) => col(a.ref) - col(b.ref) || byRef.get(a.ref).idx - byRef.get(b.ref).idx);
-  for (const e of others) {
-    const c = col(e.ref);
-    let L = null;
-    for (const p of preds(e.ref)) {
-      const pl = lane.get(p);
-      if (!spine.has(p) && pl != null && !occupied.has(`${pl},${c}`)) { L = pl; break; }
+
+  const nonSpine = events.filter((e) => !spine.has(e.ref)).map((e) => e.ref);
+  const adj = new Map(nonSpine.map((r) => [r, []]));
+  for (const r of nonSpine) {
+    for (const p of preds(r)) if (adj.has(p)) { adj.get(r).push(p); adj.get(p).push(r); }
+  }
+  const seen = new Set();
+  const branches = [];
+  for (const r of nonSpine) {
+    if (seen.has(r)) continue;
+    const members = [];
+    const stack = [r];
+    seen.add(r);
+    while (stack.length) {
+      const x = stack.pop();
+      members.push(x);
+      for (const y of adj.get(x)) if (!seen.has(y)) { seen.add(y); stack.push(y); }
     }
-    if (L == null) { L = 1; while (occupied.has(`${L},${c}`)) L++; }
-    lane.set(e.ref, L);
-    occupied.add(`${L},${c}`);
+    const cs = members.map(col);
+    branches.push({ members, minCol: Math.min(...cs), maxCol: Math.max(...cs) });
+  }
+  // Narrowest column span first → nearest the spine; ties to the later fork
+  // (higher minCol), then declared order, so nesting reads inside-out.
+  branches.sort((a, b) =>
+    (a.maxCol - a.minCol) - (b.maxCol - b.minCol) ||
+    b.minCol - a.minCol ||
+    byRef.get(a.members[0]).idx - byRef.get(b.members[0]).idx);
+  for (const br of branches) {
+    // Lowest base lane free across every column the branch occupies, so a chain
+    // branch lands on one clean row; an internal fork drops the extra node below.
+    const cs = br.members.map(col);
+    let base = 1;
+    while (cs.some((c) => occupied.has(`${base},${c}`))) base++;
+    const ordered = br.members.slice()
+      .sort((a, b) => col(a) - col(b) || byRef.get(a).idx - byRef.get(b).idx);
+    for (const ref of ordered) {
+      const c = col(ref);
+      let L = base;
+      while (occupied.has(`${L},${c}`)) L++;
+      lane.set(ref, L);
+      occupied.add(`${L},${c}`);
+    }
   }
 
   const place = new Map(events.map((e) => [e.ref, { col: col(e.ref), lane: lane.get(e.ref), idx: byRef.get(e.ref).idx }]));
@@ -3245,6 +3293,17 @@ function computeFlowLayout(events) {
   for (const e of longEdges) {
     const mid = [];
     for (let c = e.c0 + 1; c < e.c1; c++) mid.push(c);
+    // If both ends sit on the same lane and that lane is clear across every
+    // column the edge spans, it can run dead straight along its own lane — no
+    // need to bow it onto a routed row. This is what keeps a spine shortcut (e.g.
+    // GPR Implemented → GPR Deployed) a straight horizontal line once the skipped
+    // steps have dropped to lower lanes. Claim those cells so a later routed edge
+    // can't overlap the straight run.
+    const lf = lane.get(e.from), lt = lane.get(e.to);
+    if (lf === lt && mid.every((c) => !occupied.has(`${lf},${c}`))) {
+      mid.forEach((c) => occupied.add(`${lf},${c}`));
+      continue;
+    }
     let L = 1;
     while (!mid.every((c) => !occupied.has(`${L},${c}`))) L++;
     mid.forEach((c) => occupied.add(`${L},${c}`));

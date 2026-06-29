@@ -126,6 +126,82 @@ describe("planDerivation — Onboarding evidence rules", () => {
   });
 });
 
+// Same Onboarding model, but Account Logged In declares NO aggregateRoot. It
+// should inherit Account from its predecessor (Account Confirmed) and become a
+// satellite that completes whenever that predecessor completes.
+const SATELLITE_WORKFLOW = JSON.stringify({
+  ...JSON.parse(WORKFLOW),
+  domainEvents: {
+    ...JSON.parse(WORKFLOW).domainEvents,
+    AccountLoggedIn: {
+      event: "Account Logged In",
+      role: "User",
+      follows: [{ $ref: "#/domainEvents/AccountConfirmed" }],
+      command: { $ref: "#/schemas/commands/LogIn" },
+      // aggregateRoot deliberately omitted — inherited from Account Confirmed.
+      acceptanceCriteria: ["Given a confirmed account, When the user logs in, Then a session is issued"],
+    },
+  },
+});
+
+describe("inherited aggregate root — root-less event becomes a satellite", () => {
+  const satOnt = loadOntologyFromStrings(SATELLITE_WORKFLOW, null);
+  const satPlan = (rows: Array<Record<string, unknown>>) =>
+    Object.fromEntries(planDerivation(satOnt, new Map([["Account", rows]])).map((p) => [p.key, p]));
+
+  it("loads (no throw) and inherits Account, coupled to Account Confirmed", () => {
+    const ev = satOnt.eventByKey("AccountLoggedIn")!;
+    expect(ev.aggregateRoot).toBe("Account");
+    expect(ev.coupledTo).toBe("AccountConfirmed");
+  });
+
+  it("fires the satellite for exactly the rows where the predecessor fired", () => {
+    const p = satPlan([
+      { id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A" },
+      { id: "a2", email: "b@x.com", status: "UNCONFIRMED", firstname: "B", lastname: "B" },
+    ]);
+    // Account Confirmed fires only for a1 (status ladder) — so does the satellite,
+    // even though a login leaves NO row-state evidence of its own.
+    expect(p.AccountConfirmed.fired.map((f) => f.aggregateId)).toEqual(["a1"]);
+    expect(p.AccountLoggedIn.fired.map((f) => f.aggregateId)).toEqual(["a1"]);
+    expect(p.AccountLoggedIn.fired[0].evidence).toMatch(/completes with Account Confirmed/);
+    expect(p.AccountLoggedIn.noEvidence).toBe(1); // a2: predecessor didn't fire
+  });
+});
+
+// Same model, but Account Confirmed declares NO command. It should import as an
+// inert flow marker: the model loads, and derive skips it entirely.
+const INERT_WORKFLOW = JSON.stringify({
+  ...JSON.parse(WORKFLOW),
+  domainEvents: {
+    ...JSON.parse(WORKFLOW).domainEvents,
+    AccountConfirmed: {
+      event: "Account Confirmed",
+      role: "User",
+      follows: [{ $ref: "#/domainEvents/AccountRegistered" }],
+      // command deliberately omitted — inert marker.
+      aggregateRoot: { $ref: "#/schemas/entities/Account" },
+      acceptanceCriteria: ["Given an unconfirmed account and a valid code, When submitted, Then the account becomes CONFIRMED"],
+    },
+  },
+});
+
+describe("command-less event — imports as an inert flow marker", () => {
+  const inertOnt = loadOntologyFromStrings(INERT_WORKFLOW, null);
+  const inertPlan = (rows: Array<Record<string, unknown>>) =>
+    Object.fromEntries(planDerivation(inertOnt, new Map([["Account", rows]])).map((p) => [p.key, p]));
+
+  it("loads (no throw) with an empty commandName on the marker event", () => {
+    expect(inertOnt.eventByKey("AccountConfirmed")!.commandName).toBe("");
+  });
+
+  it("derive emits NO plan for the command-less event but still derives the others", () => {
+    const p = inertPlan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A" }]);
+    expect(p.AccountConfirmed).toBeUndefined(); // skipped entirely
+    expect(p.AccountRegistered.fired.map((f) => f.aggregateId)).toEqual(["a1"]);
+  });
+});
+
 describe("planDerivation — connector date roles", () => {
   const roles = new Map([["Account", { created: "created_at", updated: "updated_at" }]]);
   const planWithRoles = (rows: Array<Record<string, unknown>>) =>

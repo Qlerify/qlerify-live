@@ -67,14 +67,17 @@ function isCreateEvent(event: OntologyEvent, ont: Ontology): boolean {
   return true;
 }
 
-/** The event that creates the workflow's root aggregate (e.g. AccountRegistered). */
+/** The event that creates the workflow's root aggregate (e.g. AccountRegistered).
+ * Command-less events are inert markers, so prefer a command-bearing one. */
 function rootCreateEvent(ont: Ontology): OntologyEvent {
   const root = ont.rootAggregate;
-  const ordered = ont.linearOrder().map((k) => ont.eventByKey(k)!);
+  const all = ont.linearOrder().map((k) => ont.eventByKey(k)!);
+  const ordered = all.filter((e) => e.commandName);
   return (
     ordered.find((e) => e.aggregateRoot === root && isCreateEvent(e, ont)) ||
     ordered.find((e) => e.aggregateRoot === root) ||
-    ordered[0]
+    ordered[0] ||
+    all[0]
   );
 }
 
@@ -214,14 +217,21 @@ export async function genericNewInstance(): Promise<{ id: string; aggregate: str
   const id = newId(ont.rootAggregate.toLowerCase().slice(0, 8));
   const args = { ...synthesizeArgs(event, ont, new Map()), id };
   // businessAt is derived in emit() from the event's own data, so no clock to set.
-  await withScope(id, () => genericApply(event.commandName, { args, role: event.role }));
+  // eventRef pins the EXACT event to record (events can share a command).
+  await withScope(id, () => genericApply(event.commandName, { args, role: event.role, eventRef: event.ref }));
   return { id, aggregate: ont.rootAggregate };
 }
 
-/** Index of the next event in linearOrder not yet fired for this run. */
+/** The steppable run sequence: linearOrder minus inert (command-less) markers,
+ * which are shown in the diagram but never fired. */
+function steppableOrder(ont: Ontology): string[] {
+  return ont.linearOrder().filter((k) => ont.eventByKey(k)?.commandName);
+}
+
+/** Index of the next steppable event not yet fired for this run. */
 export async function genericCurrentStep(instanceId: string): Promise<{ index: number; total: number }> {
   const ont = getOntology();
-  const order = ont.linearOrder();
+  const order = steppableOrder(ont);
   const fired = new Set(
     (await prisma.eventLog.findMany({ where: { caseId: instanceId, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } })).map((r) => r.eventRef),
   );
@@ -232,38 +242,74 @@ export async function genericCurrentStep(instanceId: string): Promise<{ index: n
   return { index: order.length, total: order.length };
 }
 
-/** Advance one step: fire the next unfired event's command for this run. */
+/** Events coupled to `key` (root-less satellites that complete with it), then
+ * their own satellites in turn — in the order they should fire. */
+function coupledSatellites(ont: Ontology, key: string): OntologyEvent[] {
+  const out: OntologyEvent[] = [];
+  const queue = ont.events.filter((e) => e.coupledTo === key);
+  while (queue.length) {
+    const sat = queue.shift()!;
+    out.push(sat);
+    queue.push(...ont.events.filter((e) => e.coupledTo === sat.key));
+  }
+  return out;
+}
+
+/** Record a skip marker so the step advances and the reason stays visible. */
+async function logSkippedStep(instanceId: string, event: OntologyEvent, caption: string): Promise<void> {
+  await prisma.eventLog.create({
+    data: {
+      eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
+      aggregateRoot: event.aggregateRoot, aggregateId: "", caseId: instanceId,
+      role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
+      provenance: await provenanceFor(event.boundedContext),
+      organizationId: currentOrgId(),
+      workflowId: currentWorkflowId(),
+    },
+  });
+}
+
+/** Advance one step: fire the next unfired event's command for this run, plus
+ * any root-less satellites that complete together with it. */
 export async function genericStep(instanceId: string): Promise<SimStepResult> {
   const ont = getOntology();
-  const order = ont.linearOrder();
+  const order = steppableOrder(ont);
   const { index, total } = await genericCurrentStep(instanceId);
   if (index >= total) {
     return { index, total, eventRef: null, eventName: null, caption: "(run complete)", done: true, instanceId };
   }
   const event = ont.eventByKey(order[index]!)!;
-  const instances = await runInstances(instanceId);
-  const args = synthesizeArgs(event, ont, instances);
+  const args = synthesizeArgs(event, ont, await runInstances(instanceId));
   let caption: string;
   try {
-    // businessAt is derived in emit() from the event's own data.
-    await withScope(instanceId, () => genericApply(event.commandName, { args, role: event.role }));
+    // businessAt is derived in emit() from the event's own data. eventRef pins the
+    // EXACT event to record — events can share a command (two "Approval process
+    // completed" steps both fire UpdateStatus); without it the run would re-emit
+    // the first such event and never advance past it.
+    await withScope(instanceId, () => genericApply(event.commandName, { args, role: event.role, eventRef: event.ref }));
     caption = `${event.role} → ${event.name}`;
+    // Root-less satellites complete in the SAME step, against the same aggregate
+    // instance the predecessor just created/updated. Each soft-fails on its own
+    // so one bad satellite can't undo the predecessor's success.
+    for (const sat of coupledSatellites(ont, event.key)) {
+      if (!sat.commandName) continue; // inert marker: shown in the flow, never fired
+      try {
+        const satArgs = synthesizeArgs(sat, ont, await runInstances(instanceId));
+        await withScope(instanceId, () => genericApply(sat.commandName, { args: satArgs, role: sat.role, eventRef: sat.ref }));
+      } catch (satErr: any) {
+        await logSkippedStep(instanceId, sat, `⚠️ ${sat.name}: ${satErr?.message ?? String(satErr)}`);
+      }
+    }
   } catch (err: any) {
     // Soft-fail one step so a single un-synthesizable command doesn't wedge the
     // run; record a marker so the step advances and the reason is visible.
     caption = `⚠️ ${event.name}: ${err?.message ?? String(err)}`;
-    await prisma.eventLog.create({
-      data: {
-        eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
-        aggregateRoot: event.aggregateRoot, aggregateId: "", caseId: instanceId,
-        role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
-        provenance: await provenanceFor(event.boundedContext),
-        organizationId: currentOrgId(),
-        workflowId: currentWorkflowId(),
-      },
-    });
+    await logSkippedStep(instanceId, event, caption);
   }
-  return { index, total, eventRef: event.ref, eventName: event.name, caption, done: index + 1 >= total, instanceId };
+  // `done` reflects ACTUAL progress: satellites firing alongside the predecessor
+  // can advance past more than one step in a single call.
+  const after = await genericCurrentStep(instanceId);
+  return { index, total, eventRef: event.ref, eventName: event.name, caption, done: after.index >= after.total, instanceId };
 }
 
 /** Delete one run: its root + every row it created (from the log's aggregateIds)

@@ -103,6 +103,11 @@ export interface OntologyEvent {
   phase?: number;
   /** True for rules-engine events emitted automatically (not a user action). */
   derived?: boolean;
+  /** Set when this event had NO aggregate root of its own and inherited one from
+   * the predecessor named here: a "satellite" step that completes together with
+   * that predecessor (fired in the same tick by genericStep / planDerivation)
+   * rather than as an independent step. */
+  coupledTo?: string;
 }
 
 export interface Ontology {
@@ -340,10 +345,10 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
       .filter((f): f is RawRef => typeof f === "object" && f !== null && "$ref" in f)
       .map((f) => refTail(f.$ref));
 
-    if (!aggregateRoot) problems.push(`event ${key}: missing aggregateRoot`);
-    else if (!entityByName.has(aggregateRoot)) problems.push(`event ${key}: aggregateRoot "${aggregateRoot}" is not a known entity`);
-    if (!commandName) problems.push(`event ${key}: missing command`);
-    else if (!commandByName.has(commandName)) problems.push(`event ${key}: command "${commandName}" is not a known command`);
+    // A command-less event imports as an inert flow marker: shown in the diagram
+    // for completeness, but skipped by sim and derive (there is no command to
+    // fire). Only a command that is NAMED but unknown is a genuine error.
+    if (commandName && !commandByName.has(commandName)) problems.push(`event ${key}: command "${commandName}" is not a known command`);
     for (const rm of readModels) {
       if (!queryByName.has(rm.name)) problems.push(`event ${key}: read model "${rm.name}" is not a known query`);
     }
@@ -370,6 +375,43 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
   for (const e of events) {
     for (const p of e.predecessors) {
       if (!eventByKey.has(p)) problems.push(`event ${e.key}: predecessor "${p}" does not exist`);
+    }
+  }
+
+  // A domain event with no aggregate root of its own INHERITS one from the
+  // closest predecessor that has one, and is COUPLED to that immediate
+  // predecessor: it becomes a "satellite" step that completes together with the
+  // predecessor it follows (fired in the same tick — see genericStep and
+  // planDerivation) instead of as an independent step. Resolving transitively
+  // lets a run of root-less events all attach to the nearest rooted ancestor.
+  function inheritedRoot(key: string, seen: Set<string>): { root: string; via: string } {
+    const e = eventByKey.get(key);
+    if (!e) return { root: "", via: "" };
+    if (e.aggregateRoot) return { root: e.aggregateRoot, via: "" };
+    if (seen.has(key)) return { root: "", via: "" };
+    seen.add(key);
+    for (const p of e.predecessors) {
+      const pe = eventByKey.get(p);
+      if (!pe) continue;
+      const root = pe.aggregateRoot || inheritedRoot(p, seen).root;
+      if (root) return { root, via: p };
+    }
+    return { root: "", via: "" };
+  }
+  for (const e of events) {
+    if (e.aggregateRoot) continue;
+    const { root, via } = inheritedRoot(e.key, new Set());
+    if (root) {
+      e.aggregateRoot = root;
+      e.coupledTo = via;
+    } else {
+      problems.push(`event ${e.key}: missing aggregateRoot and no predecessor to inherit one from`);
+    }
+  }
+  // Validate every (possibly inherited) aggregate root resolves to a known entity.
+  for (const e of events) {
+    if (e.aggregateRoot && !entityByName.has(e.aggregateRoot)) {
+      problems.push(`event ${e.key}: aggregateRoot "${e.aggregateRoot}" is not a known entity`);
     }
   }
   // Overlay keys that no longer resolve to a model event are IGNORED, not fatal:

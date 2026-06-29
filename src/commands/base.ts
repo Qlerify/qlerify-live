@@ -45,9 +45,18 @@ interface Binding {
  * every call (no module-load cache) so a hot-reloaded model is honored. The table
  * is a raw-SQL projection (twin/projection-store), so a freshly-applied model is
  * usable with no codegen / restart. Throws DomainError if a piece is missing. */
-async function resolveBinding(commandName: string): Promise<Binding> {
+async function resolveBinding(commandName: string, eventRef?: string): Promise<Binding> {
   const ont = getOntology();
-  const event = ont.events.find((e) => e.commandName === commandName);
+  // Prefer the EXACT event the caller named (the simulator steps through events,
+  // not commands). Several events can share one command — e.g. two "Approval
+  // process completed" steps both bound to UpdateStatus — so resolving by command
+  // name alone always picks the first, and firing the second would re-emit the
+  // first (the stepped run wedges, never advancing). The plain command path passes
+  // no eventRef and keeps the first-event-by-command fallback.
+  const byRef = eventRef ? ont.eventByRef(eventRef) : undefined;
+  const event =
+    (byRef && byRef.commandName === commandName ? byRef : undefined) ??
+    ont.events.find((e) => e.commandName === commandName);
   if (!event) throw new DomainError(`no model event binds command "${commandName}"`);
   const entity = ont.entity(event.aggregateRoot);
   if (!entity) throw new DomainError(`command "${commandName}" aggregate "${event.aggregateRoot}" is not a known entity`);
@@ -143,7 +152,7 @@ export async function genericApply<TArgs extends Record<string, unknown>>(
   commandName: string,
   ctx: CommandContext<TArgs>,
 ): Promise<unknown> {
-  const b = await resolveBinding(commandName);
+  const b = await resolveBinding(commandName, ctx.eventRef);
   const args = ctx.args as Record<string, unknown>;
   const mode = await classify(commandName, args, b);
   return mode === "create" ? doCreate(b, args, ctx.role) : doUpdate(b, args, ctx.role);

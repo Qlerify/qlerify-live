@@ -15,6 +15,15 @@ import type { Role } from "../auth.js";
 export interface CommandContext<TArgs = Record<string, unknown>> {
   args: TArgs;
   role: Role;
+  /** The exact domain event this invocation should record, e.g.
+   * "#/domainEvents/ApprovalProcessCompleted2". Set by callers that step through
+   * EVENTS rather than commands (the simulator): several events can share one
+   * command, so the command name alone is ambiguous — without this the generic
+   * base binds to the FIRST event for the command and a later same-command event
+   * would re-emit the earlier one (wedging a stepped run). Omitted on the plain
+   * command path (an HTTP command POST names no event), which keeps the existing
+   * first-event-by-command behavior. */
+  eventRef?: string;
 }
 
 /** Input to an event-detection predicate. For now: the aggregate id. */

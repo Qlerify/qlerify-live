@@ -3224,16 +3224,64 @@ function computeFlowLayout(events) {
 
   const place = new Map(events.map((e) => [e.ref, { col: col(e.ref), lane: lane.get(e.ref), idx: byRef.get(e.ref).idx }]));
   const cols = Math.max(...events.map((e) => col(e.ref))) + 1;
-  const lanes = Math.max(...events.map((e) => lane.get(e.ref))) + 1;
   const edges = [];
   for (const e of events) for (const p of preds(e.ref)) edges.push({ from: p, to: e.ref });
-  return { cols, lanes, place, edges };
+
+  // Route long edges around the cards they fly over. An edge that spans more
+  // than one column (e.g. a fork that also jumps straight to a downstream merge,
+  // so two branches run between the same pair of events) would otherwise be
+  // drawn as a flat line straight through the cards sitting in the columns
+  // between its ends. Give each such edge a "waypoint row" — the lowest lane
+  // that is free in every column it crosses, adding a fresh row below when none
+  // is — so it bows into its own row instead of overlapping those cards. Short
+  // (adjacent-column) edges need no row and keep the original direct curve, so
+  // linear flows produce no waypoints and the single-lane timeline is unchanged.
+  const waypoints = new Map(); // `${from}->${to}` -> { lane, cols }
+  let maxLane = events.reduce((m, e) => Math.max(m, lane.get(e.ref)), 0);
+  const longEdges = edges
+    .map((e) => ({ ...e, c0: col(e.from), c1: col(e.to) }))
+    .filter((e) => e.c1 - e.c0 > 1)
+    .sort((a, b) => (b.c1 - b.c0) - (a.c1 - a.c0)); // widest first → big arcs claim rows first
+  for (const e of longEdges) {
+    const mid = [];
+    for (let c = e.c0 + 1; c < e.c1; c++) mid.push(c);
+    let L = 1;
+    while (!mid.every((c) => !occupied.has(`${L},${c}`))) L++;
+    mid.forEach((c) => occupied.add(`${L},${c}`));
+    maxLane = Math.max(maxLane, L);
+    waypoints.set(`${e.from}->${e.to}`, { lane: L, cols: mid });
+  }
+  const lanes = maxLane + 1;
+  return { cols, lanes, place, edges, waypoints };
+}
+
+// Connector path for one edge between two placed cards. Adjacent-column edges
+// get the original smooth S-curve; an edge with a waypoint row (see
+// computeFlowLayout) eases into that free row, runs flat across the columns it
+// spans, then climbs to the target — so it never crosses the cards in between.
+// Endpoints stay anchored to each card's header band (top + cardH/2) as before,
+// even when a card is expanded tall; only the mid-run drops to the route row.
+function flowEdgePath(a, b, wp, laneTop, laneHeight, geom) {
+  const { cardW, cardH, colPitch } = geom;
+  const sx = a.col * colPitch + cardW, sy = laneTop[a.lane] + cardH / 2;
+  const ex = b.col * colPitch,         ey = laneTop[b.lane] + cardH / 2;
+  if (!wp) {
+    const dx = Math.max(24, (ex - sx) * 0.5);
+    return `M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}`;
+  }
+  const ry = laneTop[wp.lane] + laneHeight[wp.lane] / 2; // centre of the waypoint row
+  const x1 = sx + 28, x2 = ex - 28, k = 36;             // ease in / out within the column gutters
+  return `M${sx},${sy} C${sx + k},${sy} ${x1 - k},${ry} ${x1},${ry} L${x2},${ry} C${x2 + k},${ry} ${ex - k},${ey} ${ex},${ey}`;
 }
 
 // Card + grid geometry (px). Cards are absolutely positioned so the connector
 // SVG underneath can use exact coordinates; the column/row pitch leaves a gutter
 // for the connectors between cards.
 const FLOW = { cardW: 176, cardH: 104, colPitch: 224, rowPitch: 148 };
+// Height of a waypoint-only row — one that carries a routed (skip) edge but no
+// card. Kept short so a branch routed onto its own row reads clearly without
+// wasting a full card-height of vertical space.
+const ROUTE_ROW = 40;
 // Denser geometry for the branched (split) view: many executions stack
 // vertically, so rows are tight and the container scrolls.
 const SPLIT_FLOW = { cardW: 184, cardH: 72, colPitch: 212, rowPitch: 86 };
@@ -3391,7 +3439,10 @@ function timeline() {
   const isExpanded = (ref) => expandedSet.has(ref) && (firedCounts.get(ref) || 0) > 1;
   const cardHeightFor = (ref) => isExpanded(ref) ? expandedCardHeight(firedCounts.get(ref)) : cardH;
 
-  const laneHeight = Array.from({ length: layout.lanes }, () => cardH);
+  // Lanes that hold no card (pure waypoint rows for routed skip edges) are short;
+  // card lanes start at cardH and grow for any expanded card.
+  const cardLanes = new Set(Array.from(layout.place.values(), (p) => p.lane));
+  const laneHeight = Array.from({ length: layout.lanes }, (_, L) => cardLanes.has(L) ? cardH : ROUTE_ROW);
   for (const e of state.events) {
     const pos = layout.place.get(e.ref);
     if (pos) laneHeight[pos.lane] = Math.max(laneHeight[pos.lane], cardHeightFor(e.ref));
@@ -3495,11 +3546,9 @@ function timeline() {
   const paths = layout.edges.map(({ from, to }) => {
     const a = layout.place.get(from), b = layout.place.get(to);
     if (!a || !b) return "";
-    const sx = a.col * colPitch + cardW, sy = laneTop[a.lane] + cardH / 2;
-    const ex = b.col * colPitch,         ey = laneTop[b.lane] + cardH / 2;
-    const dx = Math.max(24, (ex - sx) * 0.5);
     const fired = firedRefs.has(to); // edge lit when its target event has fired (gap-safe)
-    return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${fired ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
+    const d = flowEdgePath(a, b, layout.waypoints.get(`${from}->${to}`), laneTop, laneHeight, FLOW);
+    return `<path d="${d}" fill="none" stroke="${fired ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
   }).join("");
 
   const svg = layout.edges.length ? `
@@ -3690,9 +3739,17 @@ function mergedTimeline() {
 
   const layout = computeFlowLayout(state.events);
   const { cardW, cardH, colPitch, rowPitch } = FLOW;
-  const laneTop = Array.from({ length: layout.lanes }, (_, L) => L * rowPitch);
+  // Lanes that carry only a routed (skip) edge get a short row; card lanes keep
+  // the full card height. With no routed edges this is exactly the old uniform
+  // `L * rowPitch` grid (cardH + laneGap === rowPitch), so flows without skips
+  // are unchanged.
+  const laneGap = rowPitch - cardH;
+  const cardLanes = new Set(Array.from(layout.place.values(), (p) => p.lane));
+  const laneHeight = Array.from({ length: layout.lanes }, (_, L) => cardLanes.has(L) ? cardH : ROUTE_ROW);
+  const laneTop = [];
+  for (let L = 0, acc = 0; L < layout.lanes; L++) { laneTop[L] = acc; acc += laneHeight[L] + laneGap; }
   const W = (layout.cols - 1) * colPitch + cardW;
-  const H = layout.lanes ? (layout.lanes - 1) * rowPitch + cardH : cardH;
+  const H = layout.lanes ? laneTop[layout.lanes - 1] + laneHeight[layout.lanes - 1] : cardH;
 
   const cards = state.events.map((e, i) => {
     const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
@@ -3731,11 +3788,9 @@ function mergedTimeline() {
   const paths = layout.edges.map(({ from, to }) => {
     const a = layout.place.get(from), b = layout.place.get(to);
     if (!a || !b) return "";
-    const sx = a.col * colPitch + cardW, sy = laneTop[a.lane] + cardH / 2;
-    const ex = b.col * colPitch,         ey = laneTop[b.lane] + cardH / 2;
-    const dx = Math.max(24, (ex - sx) * 0.5);
     const lit = firedRefs.has(to);
-    return `<path d="M${sx},${sy} C${sx + dx},${sy} ${ex - dx},${ey} ${ex},${ey}" fill="none" stroke="${lit ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
+    const d = flowEdgePath(a, b, layout.waypoints.get(`${from}->${to}`), laneTop, laneHeight, FLOW);
+    return `<path d="${d}" fill="none" stroke="${lit ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#flow-arrow)"/>`;
   }).join("");
 
   const svg = layout.edges.length ? `
@@ -3839,15 +3894,45 @@ function rowsTimeline() {
   if (!attrKeys.length) attrKeys = genericColumns(state.cases || []);
   attrKeys = attrKeys.slice(0, 3);
 
-  // Edge geometry is the model topology, identical for every row; only which
-  // edges are "lit" changes per case. Both endpoints sit on the single lane.
-  const yc = cardH / 2;
+  // Skip edges — endpoints more than one card apart once the flow is flattened to
+  // this view's single lane — would be drawn straight through the cards between
+  // them. (It bites harder here than in the Workflow view: parallel branches are
+  // interleaved into adjacent columns, so even a one-hop model edge can hop over
+  // a sibling card.) Route each onto a band below the cards: the lowest band that
+  // is free across every column it spans, packing non-overlapping edges onto the
+  // same band. Adjacent-column edges stay on the lane as the original S-curve.
+  const bandOf = new Map();   // `${from}->${to}` -> band index (0 = first row below the cards)
+  const bandOcc = new Set();  // `${band},${idx}` taken
+  let bandCount = 0;
+  const skips = layout.edges
+    .map(({ from, to }) => ({ from, to, ai: idxOf.get(from), bi: idxOf.get(to) }))
+    .filter((e) => e.ai != null && e.bi != null && e.bi - e.ai > 1)
+    .sort((a, b) => (b.bi - b.ai) - (a.bi - a.ai)); // widest first → big arcs claim bands first
+  for (const e of skips) {
+    const mid = [];
+    for (let i = e.ai + 1; i < e.bi; i++) mid.push(i);
+    let b = 0;
+    while (!mid.every((i) => !bandOcc.has(`${b},${i}`))) b++;
+    mid.forEach((i) => bandOcc.add(`${b},${i}`));
+    bandCount = Math.max(bandCount, b + 1);
+    bandOf.set(`${e.from}->${e.to}`, b);
+  }
+  // Lane/row geometry for flowEdgePath: lane 0 is the card lane, each band a short
+  // routing row beneath it. rowH is the per-case row height (just cardH when no
+  // edge needs routing, so unbranched flows render exactly as before).
+  const BAND_GAP = 8, BAND_H = 22;
+  const rowH = cardH + (bandCount ? BAND_GAP + bandCount * BAND_H : 0);
+  const laneTop = [0], laneHeight = [cardH];
+  for (let b = 0; b < bandCount; b++) { laneTop[b + 1] = cardH + BAND_GAP + b * BAND_H; laneHeight[b + 1] = BAND_H; }
+
+  // Edge geometry is the model topology, identical for every row; only which edges
+  // are "lit" changes per case.
   const edgeGeom = layout.edges.map(({ from, to }) => {
     const ai = idxOf.get(from), bi = idxOf.get(to);
     if (ai == null || bi == null) return null;
-    const sx = ai * colPitch + cardW, ex = bi * colPitch;
-    const dx = Math.max(24, (ex - sx) * 0.5);
-    return { d: `M${sx},${yc} C${sx + dx},${yc} ${ex - dx},${yc} ${ex},${yc}`, to };
+    const band = bandOf.get(`${from}->${to}`);
+    const wp = band == null ? null : { lane: band + 1, cols: [] };
+    return { d: flowEdgePath({ col: ai, lane: 0 }, { col: bi, lane: 0 }, wp, laneTop, laneHeight, FLOW), to };
   }).filter(Boolean);
 
   const rowsHtml = rows.map((c) => {
@@ -3885,7 +3970,7 @@ function rowsTimeline() {
       `<path d="${d}" fill="none" stroke="${firedRefs.has(to) ? "#78716c" : "#e7e5e4"}" stroke-width="2" marker-end="url(#rows-arrow)"/>`
     ).join("");
     const svg = edgeGeom.length
-      ? `<svg width="${gridW}" height="${cardH}" class="absolute top-0 left-0" style="pointer-events:none;">${paths}</svg>`
+      ? `<svg width="${gridW}" height="${rowH}" class="absolute top-0 left-0" style="pointer-events:none;">${paths}</svg>`
       : "";
 
     const id = String(c.caseId);
@@ -3923,7 +4008,7 @@ function rowsTimeline() {
             })() : ""}
           </div>
         </div>
-        <div class="relative shrink-0 my-2" style="width:${gridW}px; height:${cardH}px;">
+        <div class="relative shrink-0 my-2" style="width:${gridW}px; height:${rowH}px;">
           ${svg}${cards}${badges}
         </div>
       </a>`;

@@ -293,10 +293,14 @@ export function planDerivation(
 ): EventPlan[] {
   const order = ont.linearOrder();
   const plans: EventPlan[] = [];
+  // Aggregate ids each event fired for, so a root-less satellite can mirror the
+  // predecessor it's coupled to (it has no independent evidence rule of its own).
+  const firedIdsByEvent = new Map<string, Set<string>>();
 
   for (let oi = 0; oi < order.length; oi++) {
     const event = ont.eventByKey(order[oi]!);
     if (!event) continue;
+    if (!event.commandName) continue; // inert marker: shown in the flow, not derived from data
     const entity = ont.entity(event.aggregateRoot);
     if (!entity) continue;
     const rows = rowsByEntity.get(entity.name) ?? [];
@@ -305,15 +309,31 @@ export function planDerivation(
 
     const kind = classify(event, entity, ont);
     const fired: PlannedEmission[] = [];
+    const firedIds = new Set<string>();
     let noEvidence = 0;
+
+    // A satellite "completes with" its coupled predecessor: fire for exactly the
+    // rows where that predecessor fired, not its own (absent) evidence rule.
+    const predFired = event.coupledTo ? firedIdsByEvent.get(event.coupledTo) ?? new Set<string>() : null;
+    const coupledName = event.coupledTo ? ont.eventByKey(event.coupledTo)?.name ?? event.coupledTo : "";
 
     for (const row of rows) {
       const id = String(row.id ?? "");
       if (!id) continue;
-      const ev = evaluate(kind, event, row, entity, ont);
-      if (!ev.happened) {
-        noEvidence++;
-        continue;
+      let reason: string;
+      if (predFired) {
+        if (!predFired.has(id)) {
+          noEvidence++;
+          continue;
+        }
+        reason = `completes with ${coupledName}`;
+      } else {
+        const ev = evaluate(kind, event, row, entity, ont);
+        if (!ev.happened) {
+          noEvidence++;
+          continue;
+        }
+        reason = ev.reason;
       }
       fired.push({
         ref: event.ref,
@@ -322,10 +342,12 @@ export function planDerivation(
         payload: buildPayload(row, entity),
         businessAt: new Date(eventBaseDate(kind, row, entity, roles).getTime() + oi * 1000),
         provenance: rowProvenance(row),
-        evidence: ev.reason,
+        evidence: reason,
       });
+      firedIds.add(id);
     }
 
+    firedIdsByEvent.set(event.key, firedIds);
     plans.push({ key: event.key, name: event.name, aggregateRoot: event.aggregateRoot, kind, fired, noEvidence });
   }
 

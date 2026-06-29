@@ -1405,6 +1405,41 @@ function genericColumns(rows) {
   return Object.keys(first).filter((k) => !reserved.has(k)).slice(0, 4);
 }
 
+// Render a case attribute value for the narrow UI (the by-case gutter): scalars
+// as-is, but a structured value — an object/array, or a JSON string holding one —
+// collapsed to a readable scalar instead of dumping raw JSON. Some models store a
+// mandatory attribute as a value object (or a JSON-encoded string), which would
+// otherwise show as `{"...":...}` / `[object Object]` in the gutter.
+function attrText(raw) {
+  if (raw === undefined || raw === null || raw === "") return "—";
+  let v = raw;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t[0] !== "{" && t[0] !== "[") return v;     // plain string — show as-is
+    try { v = JSON.parse(t); } catch { return v; }  // looked like JSON but wasn't
+  }
+  if (typeof v !== "object") return String(v);
+  if (Array.isArray(v)) {
+    const parts = v.map(attrScalar).filter((s) => s !== "");
+    return parts.length ? parts.join(", ") : "—";
+  }
+  return attrScalar(v) || "—";
+}
+// The most human-readable scalar inside an object: a name-ish field if present,
+// else the first primitive value; "" when there is nothing scalar to show.
+function attrScalar(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v !== "object") return String(v);
+  for (const k of ["name", "title", "label", "displayName", "value", "id"]) {
+    if (typeof v[k] === "string" || typeof v[k] === "number") return String(v[k]);
+  }
+  for (const k of Object.keys(v)) {
+    const x = v[k];
+    if (typeof x === "string" || typeof x === "number" || typeof x === "boolean") return String(x);
+  }
+  return "";
+}
+
 function dashboardView() {
   const m = state.meta;
   const cols = genericColumns(state.cases);
@@ -4011,8 +4046,7 @@ function rowsTimeline() {
     // attribute values at all.
     const caseRow = caseById.get(id) || {};
     const attrLines = attrKeys.map((k, ai) => {
-      const raw = caseRow[k];
-      const val = (raw === undefined || raw === null || raw === "") ? "—" : String(raw);
+      const val = attrText(caseRow[k]);
       const label = prettyEntity(k);
       return ai === 0
         ? `<div class="text-[10px] font-semibold text-stone-800 truncate" title="${escapeHtml(label)}: ${escapeHtml(val)}">${escapeHtml(val)}</div>`

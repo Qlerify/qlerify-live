@@ -133,7 +133,6 @@ const state = {
   // Cleared on case switch and on any action that advances the live run.
   selectedStep: null,
   // per-BC adapter workbench (Part 2.3)
-  bc: null,           // current bounded context (#bc/<Name>)
   bcList: null,       // /api/bc index
   bcData: null,       // /api/bc/:bc overview
   bcVerify: null,
@@ -260,19 +259,6 @@ async function sendChat() {
       { type: "text", text: `[Context: viewing case ${state.caseId} — ${desc}. When the user says "this case", "it", or refers to a step without naming a case, they mean this one.]` },
       { type: "text", text },
     ];
-  } else if (state.view === "bc" && state.bc) {
-    const a = (state.bcData && state.bcData.adapters || [])[0];
-    let ctx = `[Context: viewing bounded context ${state.bc}`;
-    if (a) {
-      ctx += ` — adapter ${a.id} (${a.kind}, mode ${a.mode}), target entity ${a.targetEntity}`;
-      if (state.bcVerify) ctx += `. Last verify: ${state.bcVerify.ok ? "ok" : "FAILED"}${state.bcVerify.detail ? " — " + state.bcVerify.detail : ""}`;
-      if (state.bcTest && state.bcTest.error) ctx += `. Last dry-run error: ${state.bcTest.error}`;
-      else if (state.bcTest && state.bcTest.diff) ctx += `. Last dry-run: ${state.bcTest.diff.ok ? "matched the model" : "shape mismatch"}`;
-    } else {
-      ctx += ` — no adapter configured yet`;
-    }
-    ctx += `. When the user says "this adapter", "it", or refers to the connection, they mean this one.]`;
-    content = [{ type: "text", text: ctx }, { type: "text", text }];
   } else if (state.view === "bcs" && state.exp && state.exp.system) {
     const e = state.exp;
     const kind = expKindOf(e, e.entity) === "valueObject" ? "value object" : "entity";
@@ -1209,13 +1195,12 @@ function parseHash() {
   if (h.startsWith("#login")) return { view: "login" };
   if (h.startsWith("#admin")) return { view: "admin" };
   if (h.startsWith("#org")) return { view: "org" };
-  if ((m = h.match(/^#bc\/(.+)$/))) return { view: "bc", bc: decodeURIComponent(m[1]) };
   if (h.startsWith("#model")) return { view: "model" };
   if (h.startsWith("#flow")) return { view: "flow" };
   if (h.startsWith("#rows")) return { view: "rows" };
   if (h.startsWith("#list")) return { view: "dashboard" };
-  if (h.startsWith("#connectors")) return { view: "connectors" };
-  if (h.startsWith("#bcs")) return { view: "bcs" };
+  if ((m = h.match(/^#connectors(?:\/(.+))?$/))) return { view: "connectors", connSel: m[1] ? decodeURIComponent(m[1]) : null };
+  if ((m = h.match(/^#bcs(?:\/([^/]+)(?:\/(.+))?)?$/))) return { view: "bcs", expSys: m[1] ? decodeURIComponent(m[1]) : null, expEntity: m[2] ? decodeURIComponent(m[2]) : null };
   if ((m = h.match(/^#case\/([\w-]+)/))) return { view: "detail", caseId: m[1] };
   // Bare "#" (the Overview home) is a SMART default: the merged Workflow flow
   // when this workflow has cases, else the case List. Resolved in loadOverview().
@@ -1240,7 +1225,7 @@ function navigate(hash) {
 
 let dashboardTimer = null;
 
-const WORKFLOW_SCOPED_VIEWS = new Set(["overview", "dashboard", "detail", "flow", "rows", "model", "bcs", "bc", "connectors"]);
+const WORKFLOW_SCOPED_VIEWS = new Set(["overview", "dashboard", "detail", "flow", "rows", "model", "bcs", "connectors"]);
 
 async function ensureWorkflowSelected() {
   if (AUTH.workflow()) return;
@@ -1253,8 +1238,7 @@ async function onHashChange() {
   const r = parseHash();
   state.view = r.view;
   state.caseId = r.caseId ?? null;
-  state.bc = r.bc ?? null;
-  state.bcBusy = false; // never carry a stuck busy-flag across navigation
+  if (r.connSel) state.connSel = r.connSel; // deep-link: #connectors/<id> preselects it
   state.issuedCredential = null; // a one-time temp password never survives navigation
   // Leaving the Systems explorer hands the chat panel back to the Process
   // advisor (re-entering re-activates the table's connector thread).
@@ -1314,11 +1298,11 @@ async function onHashChange() {
     } else if (r.view === "admin") {
       await loadAdmin();
     } else if (r.view === "bcs") {
+      // deep-link: #bcs/<system>/<table> opens the explorer on that table.
+      if (r.expSys) { const e = expState(); e.system = r.expSys; e.pendingEntity = r.expEntity || null; }
       await loadExplorer();
     } else if (r.view === "connectors") {
       await loadConnectors();
-    } else if (r.view === "bc") {
-      await loadBc(r.bc);
     } else if (r.view === "model") {
       await loadModel();
     } else if (r.view === "flow") {
@@ -2063,53 +2047,6 @@ function bindOrgMap() {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// Per-BC adapter workbench (Part 2.3, Slice 1) — read/projection over existing
-// substrate; zero AI / credentials / dynamic code (that is Slice 2).
-// ---------------------------------------------------------------------------
-
-async function loadBcList() {
-  await loadMeta();
-  try { state.bcList = await api("/api/bc"); } catch { state.bcList = []; }
-  render();
-}
-
-async function loadBc(bc) {
-  await loadMeta();
-  state.bcVerify = null; state.bcTest = null; state.bcRaw = null; state.bcCode = null;
-  try { state.bcData = await api("/api/bc/" + encodeURIComponent(bc)); }
-  catch (e) { state.bcData = { error: e.message, name: bc }; }
-  // The workbench is one stacked page, so load the adapter code up front.
-  const adapter = (state.bcData && state.bcData.adapters || [])[0];
-  if (adapter) {
-    try { state.bcCode = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code`); }
-    catch { state.bcCode = { exists: false, source: "", hasKey: false }; }
-  }
-  render();
-}
-
-async function loadBcRaw() {
-  state.bcBusy = true; render();
-  try { state.bcRaw = await api(`/api/bc/${encodeURIComponent(state.bc)}/raw?limit=100`); }
-  catch { state.bcRaw = { tableMissing: true, entity: null, rows: [] }; }
-  finally { state.bcBusy = false; render(); }
-}
-
-function bcHeader(title, subtitle, back) {
-  return `
-    <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
-      <div class="px-6 py-4 flex items-center gap-4">
-        ${back ? `<button data-go="${back}" class="text-stone-400 hover:text-stone-700 text-lg leading-none" title="Back">←</button>` : ""}
-        <div class="flex-1">
-          <div class="text-[11px] uppercase tracking-widest text-stone-500 font-semibold">${escapeHtml(subtitle)}</div>
-          <div class="text-stone-900 text-xl font-semibold leading-tight">${escapeHtml(title)}</div>
-        </div>
-        <button data-go="#" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Overview</button>
-        <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
-      </div>
-    </header>`;
-}
-
 // ===========================================================================
 // Systems explorer (#bcs) — a three-pane data console:
 //   Systems (bounded contexts) | Tables (entities) | Items (gen_ rows)
@@ -2127,7 +2064,8 @@ async function loadExplorer() {
   try { e.systems = await api("/api/bc"); } catch (_err) { e.systems = []; }
   loadHealth(); // per-table connection status for the Tables pane; renders when it lands
   const cur = e.system && e.systems.find((s) => s.name === e.system);
-  if (e.systems[0]) { await selectExpSystem(cur ? e.system : e.systems[0].name); return; }
+  const want = e.pendingEntity; e.pendingEntity = null; // one-shot deep-link target table
+  if (e.systems[0]) { await selectExpSystem(cur ? e.system : e.systems[0].name, want); return; }
   render();
 }
 
@@ -2254,33 +2192,6 @@ async function expReimportAll() {
   } catch (err) {
     hideOverlay();
     alert("Reset & reimport failed: " + err.message);
-  } finally {
-    e.busy = false; render();
-  }
-}
-
-async function expDeleteConnector(id) {
-  const e = expState();
-  if (e.busy || !e.system) return;
-  if (!confirm(
-    `Completely delete connector "${id}"?\n\n` +
-    `This permanently deletes EVERYTHING for this connector:\n` +
-    `• its code & stored credentials\n` +
-    `• ALL ingested rows in table "${e.entity}"\n` +
-    `• the events derived from that data\n` +
-    `• the connector's entire history (chat & notes)\n\n` +
-    `The connector is removed — you would build a new one from scratch. This cannot be undone.`,
-  )) return;
-  e.busy = true; render();
-  showOverlay("Deleting connector…");
-  try {
-    const r = await api(`/api/bc/${encodeURIComponent(e.system)}/connector/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" });
-    await refreshExplorerAfterChat(); // connector is gone → card disappears, table empties
-    hideOverlay(); // drop the scrim before the blocking result alert
-    alert(`Connector "${id}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s), plus its code, credentials, and history.`);
-  } catch (err) {
-    hideOverlay();
-    alert("Delete failed: " + err.message);
   } finally {
     e.busy = false; render();
   }
@@ -2672,9 +2583,28 @@ const NOTE_BADGE = {
   note: "bg-stone-100 text-stone-700",
 };
 
-// One connector card: id + shape, the doc summary, and the most recent update
-// notes (newest first). doc rides along on the adapter from /api/bc/:bc.
-function connectorCard(a) {
+// kebab-slug, byte-for-byte the backend's connector-id minting (orchestrate.ts slug()).
+function connectorSlug(s) {
+  return String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
+}
+
+// A connector's DISPLAY name. The id is an immutable persistence key (filename,
+// journal key, registry id) minted ONCE from system+table; a re-point changes the
+// target but deliberately freezes the id, so rendering the raw id reads as a stale
+// "wrong table" name. Derive the name from the CURRENT target instead — but only
+// for auto-minted ids (which carry the system slug as a prefix). A custom id is the
+// user's chosen name and is left untouched. bcFallback covers callers (the sidebar
+// card) whose object may not carry boundedContext but whose system is known.
+function connectorName(c, bcFallback) {
+  const bc = c.boundedContext || bcFallback || "";
+  const id = c.id || "";
+  return id.startsWith(connectorSlug(bc) + "-") ? connectorSlug(`${bc}-${c.targetEntity}`) : id;
+}
+
+// One connector card: name + shape, the doc summary, and the most recent update
+// notes (newest first). doc rides along on the adapter from /api/bc/:bc. `bc` is
+// the selected system, used to derive the live name when re-pointing renamed it.
+function connectorCard(a, bc) {
   const doc = a.doc;
   const summary = doc?.summary
     ? `<div class="text-xs text-stone-600 mt-1 italic">${escapeHtml(doc.summary)}</div>`
@@ -2689,17 +2619,19 @@ function connectorCard(a) {
         </div>`).join("")}
       </div>`
     : "";
-  // Destructive, connector-scoped, rarely used → a small, low-emphasis link at the
-  // bottom of the card rather than a prominent button up in the table header.
-  const deleteBtn = a.kind === "connector"
+  // Connector-scoped management (re-point, timestamps, full history, delete) lives
+  // on the Connectors tab — its single home. The card deep-links there for THIS
+  // connector instead of duplicating those controls (especially destructive delete)
+  // in the sidebar. Authoring stays here; operating happens there.
+  const manageLink = a.kind === "connector"
     ? `<div class="mt-2 pt-2 border-t border-stone-100 text-right">
-        <button data-delete-connector="${escapeHtml(a.id)}" class="text-[11px] text-rose-600 hover:text-rose-700 hover:underline" title="Completely delete this connector — its code, credentials, ingested data, derived events, and history. Cannot be undone.">🗑 Delete connector</button>
+        <a href="#connectors/${encodeURIComponent(a.id)}" class="text-[11px] text-sky-700 hover:text-sky-800 hover:underline" title="Open this connector in the Connectors tab to re-point it, set event timestamps, view its full history, or delete it.">Manage in Connectors →</a>
       </div>`
     : "";
   return `<div class="rounded-md border border-stone-200 p-2.5">
-    <div class="text-sm font-medium text-stone-800">${escapeHtml(a.id)}</div>
+    <div class="text-sm font-medium text-stone-800">${escapeHtml(connectorName(a, bc))}</div>
     <div class="text-xs text-stone-500 mt-0.5">${escapeHtml(a.kind)} · ${escapeHtml(a.mode)} → ${escapeHtml(a.targetEntity)}</div>
-    ${summary}${notesHtml}${deleteBtn}
+    ${summary}${notesHtml}${manageLink}
   </div>`;
 }
 
@@ -2711,7 +2643,7 @@ function connectorCard(a) {
 function connectorHistoryBody(e) {
   const adapters = (e.adapters || []).filter((a) => a.targetEntity === e.entity);
   const list = adapters.length
-    ? adapters.map(connectorCard).join("")
+    ? adapters.map((a) => connectorCard(a, e.system)).join("")
     : '<div class="text-sm text-stone-400">No connector yet for this table — build one below.</div>';
   return `
     <div class="p-4 overflow-y-auto flex-1 space-y-3">
@@ -2723,7 +2655,6 @@ function connectorHistoryBody(e) {
         <div class="text-xs text-stone-500 mt-1">Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and the assistant writes, tests, and runs a connector to fill this table.</div>
         <button id="exp-build-ai" class="w-full mt-3 px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 font-medium">Build connector with AI →</button>
       </div>
-      <a href="#bc/${encodeURIComponent(e.system || "")}" class="block text-center text-sm text-sky-700 hover:underline">Open full connector workbench →</a>
     </div>`;
 }
 
@@ -2821,297 +2752,6 @@ function bindExplorer() {
   document.getElementById("exp-clear-rows")?.addEventListener("click", expClearRows);
   document.getElementById("exp-reimport-all")?.addEventListener("click", expReimportAll);
   document.getElementById("exp-build-ai")?.addEventListener("click", openConnectorChat);
-  document.querySelectorAll("[data-delete-connector]").forEach((el) =>
-    el.addEventListener("click", () => expDeleteConnector(el.dataset.deleteConnector)));
-}
-
-function bcListView() {
-  const list = state.bcList || [];
-  const cards = list.map((b) => `
-    <button data-go="#bc/${encodeURIComponent(b.name)}" class="text-left rounded-lg border border-stone-200 bg-white hover:border-amber-300 hover:bg-amber-50 transition-colors p-4 flex flex-col gap-2">
-      <div class="flex items-center justify-between">
-        <div class="font-semibold text-stone-900">${escapeHtml(b.name)}</div>
-        ${provChip(b.provenance && b.provenance.mode)}
-      </div>
-      <div class="text-xs text-stone-500">${b.eventCount} events · ${b.entityCount} entities · ${b.adapterCount} connector${b.adapterCount === 1 ? "" : "s"}</div>
-      ${b.provenance && b.provenance.adapter ? `<div class="text-[11px] text-stone-400 mono">${escapeHtml(b.provenance.adapter)}</div>` : ""}
-    </button>`).join("");
-  return `
-    ${bcHeader("Bounded contexts", "Each system, its connector, and its live data", "#")}
-    <main class="flex-1 overflow-auto p-6">
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards || `<div class="text-stone-400">No bounded contexts.</div>`}</div>
-    </main>`;
-}
-
-// One titled section in the stacked workbench (replaces the old tabs).
-function bcSection(title, body) {
-  return `
-    <section class="space-y-3">
-      <div class="border-b border-stone-200 pb-1.5"><span class="text-sm font-semibold text-stone-700">${title}</span></div>
-      ${body}
-    </section>`;
-}
-
-function bcWorkbenchView() {
-  const d = state.bcData;
-  if (!d) return bcHeader("Loading…", "", "#bcs");
-  if (d.error) return `${bcHeader(d.name || "Bounded context", "Connector workbench", "#bcs")}<main class="p-6"><div class="text-rose-600">${escapeHtml(d.error)}</div></main>`;
-  const adapter = (d.adapters || [])[0];
-  const subBar = `
-    <div class="px-6 py-2 border-b border-stone-200 bg-white flex items-center gap-2 text-sm text-stone-600">
-      <span>data source</span> ${provChip(d.provenance && d.provenance.mode)}
-      ${adapter ? `<span class="mono text-xs text-stone-400">${escapeHtml(adapter.id)}</span>` : `<span class="text-stone-400">no connector</span>`}
-    </div>`;
-  // Stacked sections (no tabs). With no adapter, show one "Connect a system"
-  // prompt + the model overview rather than the empty per-tab panels.
-  const sections = adapter
-    ? [
-        bcSection("Connection", bcConnectionPanel(d, adapter)),
-        bcSection("Connector code", bcCodePanel(d, adapter)),
-        bcSection("Test", bcTestPanel(d, adapter)),
-        bcSection("Raw data", bcRawPanel(d, adapter)),
-        bcSection("Overview", bcOverviewPanel(d)),
-      ].join("")
-    : `${bcNoAdapter(d)}${bcSection("Overview", bcOverviewPanel(d))}`;
-  return `
-    ${bcHeader(d.name, "Connector workbench", "#bcs")}
-    ${subBar}
-    <main class="flex-1 overflow-auto p-6 space-y-8">${sections}</main>`;
-}
-
-function bcNoAdapter(d) {
-  const entity = (d && d.defaultEntity) || "the root entity";
-  return `
-    <div class="max-w-xl rounded-lg border border-dashed border-stone-300 bg-white p-6 text-center">
-      <div class="text-stone-400 text-4xl mb-2">🔌</div>
-      <div class="text-stone-700 font-medium">No connector for this system yet</div>
-      <div class="text-sm text-stone-500 mt-1">Create one to pull <span class="mono">${escapeHtml(prettyEntity(String(entity)))}</span> records from the real source. It starts simulated; then configure the endpoint + credentials and let AI author the live connector.</div>
-      <button id="bc-add-adapter" ${state.bcBusy ? "disabled" : ""} class="mt-4 px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Connect a system</button>
-    </div>`;
-}
-
-function bcOverviewPanel(d) {
-  const evRows = (d.events || []).map((e) => `
-    <tr class="border-t border-stone-100">
-      <td class="px-3 py-2 text-stone-700">${escapeHtml(e.name)}</td>
-      <td class="px-3 py-2 text-stone-500">${escapeHtml(e.role || "")}</td>
-      <td class="px-3 py-2 mono text-xs text-stone-500">${escapeHtml(prettyEntity(e.aggregateRoot || ""))}</td>
-      <td class="px-3 py-2">${e.derived ? `<span class="text-amber-600 text-xs font-semibold">DERIVED</span>` : ""}</td>
-    </tr>`).join("");
-  const chips = (arr, cls) => (arr || []).map((x) => `<span class="inline-block px-2 py-1 mr-1 mb-1 rounded ${cls} text-xs">${escapeHtml(prettyEntity(x.name))}</span>`).join("") || `<span class="text-stone-400 text-sm">none</span>`;
-  return `
-    <div class="space-y-6 max-w-4xl">
-      <section><div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Entities</div><div>${chips(d.entities, "bg-sky-50 text-sky-700")}</div></section>
-      <section><div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Commands</div><div>${chips(d.commands, "bg-stone-100 text-stone-700")}</div></section>
-      <section>
-        <div class="text-xs uppercase tracking-wide text-stone-500 font-semibold mb-2">Events (${(d.events || []).length})</div>
-        <div class="rounded-lg border border-stone-200 bg-white overflow-hidden"><table class="w-full text-sm"><tbody>${evRows}</tbody></table></div>
-      </section>
-    </div>`;
-}
-
-function bcConnectionPanel(d, adapter) {
-  if (!adapter) return bcNoAdapter(d);
-  const v = state.bcVerify;
-  const status = v == null ? `<span class="text-stone-400">not checked</span>`
-    : v.ok ? `<span class="text-emerald-700">● connected</span> <span class="text-stone-500">${escapeHtml(v.detail || "")}</span>`
-    : `<span class="text-rose-600">● not connected</span> <span class="text-stone-500">${escapeHtml(v.detail || "")}</span>`;
-  return `
-    <div class="max-w-2xl space-y-4">
-      <div class="rounded-lg border border-stone-200 bg-white p-4">
-        <div class="flex items-center justify-between gap-4">
-          <div>
-            <div class="font-medium text-stone-900">${escapeHtml(adapter.id)}</div>
-            <div class="text-xs text-stone-500">kind: ${escapeHtml(adapter.kind)} · target: ${escapeHtml(prettyEntity(adapter.targetEntity))} · mode: ${escapeHtml(adapter.mode)}</div>
-          </div>
-          <button id="bc-verify" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50 shrink-0">Verify connection</button>
-        </div>
-        <div class="mt-3 text-sm">${status}${v && v.at ? `<span class="text-stone-400 text-xs ml-2">${new Date(v.at).toLocaleTimeString()}</span>` : ""}</div>
-      </div>
-
-      <div class="rounded-lg border border-stone-200 bg-white p-4 space-y-3">
-        <div class="text-xs uppercase tracking-wide text-stone-500 font-semibold">Endpoint &amp; credentials</div>
-        <label class="block text-xs text-stone-500">Endpoint URL
-          <input id="bc-endpoint" type="text" placeholder="https://…/odata/PurchaseOrders" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300" />
-        </label>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="block text-xs text-stone-500">Credential key (env var)
-            <input id="bc-credref" type="text" placeholder="SAP_API_TOKEN" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300 mono" />
-          </label>
-          <label class="block text-xs text-stone-500">Secret
-            <input id="bc-secret" type="password" placeholder="••••••••" autocomplete="off" class="mt-1 w-full px-2 py-1.5 text-sm rounded border border-stone-300" />
-          </label>
-        </div>
-        <div class="flex gap-2">
-          <button id="bc-config-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Save endpoint</button>
-          <button id="bc-cred-save" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Set credential</button>
-        </div>
-        <div class="text-[11px] text-stone-400">The secret is never echoed, written to disk, or sent to chat — only the key name is remembered (dev: kept in process env; encrypted-at-rest store is the next increment). The AI-authored connector reads it as <span class="mono">ctx.secret</span>.</div>
-      </div>
-
-      <div class="rounded-lg border border-rose-200 bg-rose-50 p-4 space-y-2">
-        <div class="text-xs uppercase tracking-wide text-rose-600 font-semibold">Danger zone</div>
-        <div class="flex gap-2 flex-wrap">
-          <button id="bc-reset" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Reset connector</button>
-          <button id="bc-remove" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-rose-300 bg-white text-rose-700 hover:bg-rose-100 disabled:opacity-50">Remove connector</button>
-        </div>
-        <div class="text-[11px] text-rose-700/80"><b>Reset</b> wipes the AI-authored code + stored credentials back to a clean simulated draft (keeps the connector, so you can build it from scratch). <b>Remove</b> deletes it entirely.</div>
-      </div>
-    </div>`;
-}
-
-function bcCodePanel(d, adapter) {
-  if (!adapter) return bcNoAdapter(d);
-  const c = state.bcCode;
-  const hasKey = c ? c.hasKey : false;
-  const src = c && c.exists ? c.source : "";
-  const genLabel = c && c.exists ? "Regenerate with AI" : "Generate with AI";
-  return `
-    <div class="max-w-4xl space-y-3">
-      <div class="flex items-center gap-3 flex-wrap">
-        <button id="bc-generate" ${(!hasKey || state.bcBusy) ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">${genLabel}</button>
-        <span class="text-xs text-stone-400">${hasKey
-          ? "AI writes fetchRows(ctx) from the model attributes; it is shown here and only runs when you Test it (stop-and-show)."
-          : "set ANTHROPIC_API_KEY in .env to let AI author the connector live."}</span>
-      </div>
-      ${c && c.bodyPath ? `<div class="text-[11px] mono text-stone-400">${escapeHtml(c.bodyPath)}</div>` : ""}
-      ${src
-        ? `<pre class="rounded-lg border border-stone-200 bg-stone-50 p-3 text-[11px] leading-relaxed overflow-auto mono text-stone-800" style="max-height:60vh">${escapeHtml(src)}</pre>`
-        : `<div class="text-stone-400 text-sm">No connector body yet${hasKey ? " — click Generate to have AI write one against the PurchaseOrder schema." : "."}</div>`}
-    </div>`;
-}
-
-function bcTestPanel(d, adapter) {
-  if (!adapter) return bcNoAdapter(d);
-  const t = state.bcTest;
-  let result = "";
-  if (t && !t.error) {
-    const checklist = ((t.diff && t.diff.requiredStatus) || []).map((r) => `
-      <span class="inline-flex items-center gap-1 px-2 py-1 mr-1 mb-1 rounded text-xs ${r.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}">${r.ok ? "✓" : "✗"} ${escapeHtml(r.field)}</span>`).join("");
-    const cols = t.rows && t.rows.length ? Object.keys(t.rows[0]) : [];
-    const head = cols.map((c) => `<th class="px-2 py-1 text-left font-medium text-stone-500">${escapeHtml(c)}</th>`).join("");
-    const body = (t.rows || []).map((row) => `<tr class="border-t border-stone-100">${cols.map((c) => `<td class="px-2 py-1 text-stone-700">${escapeHtml(String(row[c] ?? ""))}</td>`).join("")}</tr>`).join("");
-    const extra = (t.diff && t.diff.extraFields) || [];
-    result = `
-      <div class="mt-4 space-y-3">
-        <div class="text-sm">${t.diff && t.diff.ok ? `<span class="text-emerald-700 font-medium">✓ matches the model</span>` : `<span class="text-rose-600 font-medium">✗ mismatch</span>`} <span class="text-stone-500">${t.count} row(s), nothing written</span></div>
-        <div>${checklist}</div>
-        ${extra.length ? `<div class="text-xs text-amber-700">extra unmapped fields: ${extra.map(escapeHtml).join(", ")}</div>` : ""}
-        <div class="rounded-lg border border-stone-200 bg-white overflow-auto"><table class="text-xs w-full"><thead class="bg-stone-50"><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
-      </div>`;
-  } else if (t && t.error) {
-    result = `<div class="mt-4 text-rose-600 text-sm">${escapeHtml(t.error)}</div>`;
-  }
-  return `
-    <div class="max-w-4xl">
-      <div class="flex items-center gap-3 flex-wrap">
-        <button id="bc-test" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Test connector (dry run)</button>
-        <button id="bc-ingest" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50">Ingest for real →</button>
-        <span class="text-xs text-stone-400">dry run pulls + grades against the model without writing; ingest lands rows in the projection store</span>
-      </div>
-      ${result}
-    </div>`;
-}
-
-function bcRawPanel(d, adapter) {
-  const r = state.bcRaw;
-  let body = `<div class="text-stone-400 text-sm">Click <b>Load raw rows</b> to read the ingestion table.</div>`;
-  if (r) {
-    if (r.tableMissing) body = `<div class="text-stone-400 text-sm">No ingestion table for <span class="mono">${escapeHtml(prettyEntity(r.entity || d.defaultEntity || ""))}</span> yet — run an ingest from the Test tab.</div>`;
-    else if (!r.rows.length) body = `<div class="text-stone-400 text-sm">Table <span class="mono">gen_${escapeHtml(r.entity)}</span> is empty.</div>`;
-    else {
-      const cols = Object.keys(r.rows[0]);
-      const head = cols.map((c) => `<th class="px-2 py-1 text-left font-medium text-stone-500">${escapeHtml(c)}</th>`).join("");
-      const rowsHtml = r.rows.map((row) => `<tr class="border-t border-stone-100">${cols.map((c) => c === "_provenance" ? `<td class="px-2 py-1">${provChip(row[c])}</td>` : `<td class="px-2 py-1 text-stone-700">${escapeHtml(String(row[c] ?? ""))}</td>`).join("")}</tr>`).join("");
-      body = `<div class="rounded-lg border border-stone-200 bg-white overflow-auto"><table class="text-xs w-full"><thead class="bg-stone-50"><tr>${head}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
-    }
-  }
-  return `
-    <div class="max-w-5xl space-y-3">
-      <div class="flex items-center gap-3">
-        <button id="bc-raw" ${state.bcBusy ? "disabled" : ""} class="px-3 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50">Load raw rows</button>
-        <span class="text-xs text-stone-400">verbatim <span class="mono">gen_${escapeHtml(d.defaultEntity || "")}</span> projection rows, including provenance</span>
-      </div>
-      ${body}
-    </div>`;
-}
-
-function bindBcList() {
-  document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.go)));
-}
-
-function bindBcWorkbench() {
-  document.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => navigate(el.dataset.go)));
-  const adapter = (state.bcData && state.bcData.adapters || [])[0];
-  document.getElementById("bc-add-adapter")?.addEventListener("click", async () => {
-    state.bcBusy = true; render();
-    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
-    catch (e) { alert("Could not connect a system: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-reset")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    if (!confirm("Reset this connector to a clean simulated draft? Its AI-authored code and stored credentials will be deleted.")) return;
-    state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/reset`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
-    catch (e) { alert("Reset failed: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-remove")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    if (!confirm("Remove this connector entirely? This deletes its code, credentials, and configuration.")) return;
-    state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}`, { method: "DELETE" }); await loadBc(state.bc); }
-    catch (e) { alert("Remove failed: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-generate")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/code/generate`, { method: "POST", body: "{}" }); await loadBc(state.bc); }
-    catch (e) { alert("Generate failed: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-config-save")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    const endpoint = document.getElementById("bc-endpoint")?.value || "";
-    const credentialsRef = document.getElementById("bc-credref")?.value || "";
-    state.bcBusy = true; render();
-    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/config`, { method: "PUT", body: JSON.stringify({ endpoint, credentialsRef }) }); }
-    catch (e) { alert("Save failed: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-cred-save")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    const credentialsRef = document.getElementById("bc-credref")?.value || "";
-    const secret = document.getElementById("bc-secret")?.value || "";
-    if (!credentialsRef || !secret) { alert("Enter a credential key and secret."); return; }
-    state.bcBusy = true; render();
-    try { await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/credential`, { method: "PUT", body: JSON.stringify({ credentialsRef, secret }) }); }
-    catch (e) { alert("Failed: " + e.message); }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-verify")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    state.bcBusy = true; render();
-    try { state.bcVerify = await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/verify`, { method: "POST", body: "{}" }); }
-    catch (e) { state.bcVerify = { ok: false, detail: e.message }; }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-test")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    state.bcBusy = true; render();
-    try { state.bcTest = await api(`/api/bc/${encodeURIComponent(state.bc)}/adapter/${encodeURIComponent(adapter.id)}/test`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); }
-    catch (e) { state.bcTest = { error: e.message }; }
-    finally { state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-ingest")?.addEventListener("click", async () => {
-    if (!adapter) return;
-    state.bcBusy = true; render();
-    try { await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 5 }) }); await loadBcRaw(); }
-    catch (e) { alert("Ingest failed: " + e.message); state.bcBusy = false; render(); }
-  });
-  document.getElementById("bc-raw")?.addEventListener("click", loadBcRaw);
 }
 
 // ---------------------------------------------------------------------------
@@ -4974,11 +4614,7 @@ function renderView() {
     bindTenantBar();
     bindConnectors();
     bindChat();
-  } else if (state.view === "bc") {
-    root.innerHTML = wrap(bcWorkbenchView());
-    bindTenantBar();
-    bindBcWorkbench();
-    bindChat();  } else if (state.view === "org") {
+  } else if (state.view === "org") {
     root.innerHTML = wrap(orgView());
     bindTenantBar();
     bindOrg();
@@ -5279,13 +4915,14 @@ function connStatusDot(status) {
 function connListRow(c) {
   const sel = state.connSel === c.id;
   return `<button data-conn-row="${escapeHtml(c.id)}" class="w-full text-left px-3 py-2.5 border-b border-stone-100 ${sel ? "bg-sky-50" : "hover:bg-stone-50"}">
-    <div class="flex items-center gap-2">${connStatusDot(c.status)}<span class="text-sm font-medium text-stone-800 truncate">${escapeHtml(c.id)}</span></div>
+    <div class="flex items-center gap-2">${connStatusDot(c.status)}<span class="text-sm font-medium text-stone-800 truncate">${escapeHtml(connectorName(c))}</span></div>
     <div class="text-[11px] text-stone-500 mt-0.5 truncate">${escapeHtml(c.boundedContext)} → ${escapeHtml(c.targetEntity)}${c.status === "orphaned" ? " (missing)" : ""} · ${c.rowCount} row(s)</div>
   </button>`;
 }
 
 function connDetail(c) {
   if (!c) return `<div class="p-8 text-sm text-stone-400">Select a connector to see its details.</div>`;
+  const name = connectorName(c);
   const tables = state.connectors?.tables || [];
   // Re-point options: tables free in this workflow (plus the current target).
   const free = tables.filter((t) => !t.occupiedBy || t.occupiedBy === c.id);
@@ -5317,12 +4954,49 @@ function connDetail(c) {
         <button id="conn-date-save" ${state.connBusy ? "disabled" : ""} class="mt-3 px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium">Save timestamps</button>
         <div class="text-[11px] text-stone-400 mt-2">New rows pick these up on the next Fetch. Events already in the log keep their old timestamps until you rebuild from data (clears &amp; re-derives the event log).</div>
       </div>` : "";
+  // Connection diagnostics (moved here from the retired per-system workbench): the
+  // two adapter ops that genuinely work for a connector — Verify (healthcheck) and a
+  // dry-run Test (pull + grade against the model, nothing written). Results are kept
+  // per-connector (gated by id) so they don't bleed across the list selection.
+  const v = state.connVerify?.id === c.id ? state.connVerify : null;
+  const t = state.connTest?.id === c.id ? state.connTest : null;
+  const verifyStatus = v == null
+    ? `<span class="text-stone-400">not checked</span>`
+    : `<span class="${v.ok ? "text-emerald-700" : "text-rose-600"}">● ${v.ok ? "connected" : "not connected"}</span>${v.detail ? ` <span class="text-stone-500">${escapeHtml(v.detail)}</span>` : ""}`;
+  let testResult = "";
+  if (t && !t.error) {
+    const checklist = ((t.diff && t.diff.requiredStatus) || []).map((r) =>
+      `<span class="inline-flex items-center gap-1 px-2 py-0.5 mr-1 mb-1 rounded text-[11px] ${r.ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}">${r.ok ? "✓" : "✗"} ${escapeHtml(r.field)}</span>`).join("");
+    const extra = (t.diff && t.diff.extraFields) || [];
+    testResult = `<div class="mt-3 space-y-2">
+        <div class="text-sm">${t.diff && t.diff.ok ? `<span class="text-emerald-700 font-medium">✓ matches the model</span>` : `<span class="text-rose-600 font-medium">✗ shape mismatch</span>`} <span class="text-stone-500">· ${t.count} row(s) pulled, nothing written</span></div>
+        ${checklist ? `<div>${checklist}</div>` : ""}
+        ${extra.length ? `<div class="text-[11px] text-amber-700">extra unmapped fields: ${extra.map(escapeHtml).join(", ")}</div>` : ""}
+      </div>`;
+  } else if (t && t.error) {
+    testResult = `<div class="mt-3 text-rose-600 text-sm">${escapeHtml(t.error)}</div>`;
+  }
+  const diagnostics = `
+      <div class="mt-5 rounded-lg border border-stone-200 p-4">
+        <div class="text-sm font-medium text-stone-800">Connection</div>
+        <div class="text-xs text-stone-500 mt-0.5">Check the live source is reachable, and dry-run a pull to grade the data against the model — without writing anything.</div>
+        <div class="flex items-center gap-2 mt-3 flex-wrap">
+          <button id="conn-verify" ${state.connBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium">Verify connection</button>
+          <button id="conn-test" ${state.connBusy ? "disabled" : ""} class="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium">Test (dry run)</button>
+          <span class="text-sm">${verifyStatus}</span>
+        </div>
+        ${testResult}
+      </div>`;
   return `
     <div class="p-6 overflow-y-auto flex-1">
       <div class="flex items-center gap-2">
         ${connStatusDot(c.status)}
-        <h2 class="text-xl font-semibold text-stone-900">${escapeHtml(c.id)}</h2>
+        <h2 class="text-xl font-semibold text-stone-900">${escapeHtml(name)}</h2>
         <span class="px-2 py-0.5 text-[11px] rounded-full ${orphan ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}">${orphan ? "orphaned" : "active"}</span>
+      </div>
+      <div class="flex items-center gap-3 mt-1 text-[11px]">
+        ${name !== c.id ? `<span class="text-stone-400" title="The connector's immutable id (its storage key). Re-pointing renamed it above, but the id never changes.">key <span class="font-mono text-stone-500">${escapeHtml(c.id)}</span></span>` : ""}
+        ${orphan ? "" : `<a href="#bcs/${encodeURIComponent(c.boundedContext)}/${encodeURIComponent(c.targetEntity)}" class="text-sky-700 hover:underline">Open table &amp; data →</a>`}
       </div>
       ${c.summary
         ? `<div class="text-sm text-stone-600 mt-2 italic">${escapeHtml(c.summary)}</div>`
@@ -5341,7 +5015,7 @@ function connDetail(c) {
         ${chip("Last pull", c.lastPullAt ? escapeHtml(formatVersionDate(c.lastPullAt)) : "never")}
         ${c.owned ? "" : chip("Owner", "legacy (unassigned)")}
       </div>
-
+${diagnostics}
       <div class="mt-5 rounded-lg border border-stone-200 p-4">
         <div class="text-sm font-medium text-stone-800">Re-point</div>
         <div class="text-xs text-stone-500 mt-0.5">Point this connector at a different table. Going forward only — existing rows in the old table stay put; the connector fills the new table on the next Fetch.</div>
@@ -5398,7 +5072,45 @@ function bindConnectors() {
     el.addEventListener("click", () => { state.connSel = el.dataset.connRow; render(); }));
   document.getElementById("conn-repoint-btn")?.addEventListener("click", connRepoint);
   document.getElementById("conn-date-save")?.addEventListener("click", connSaveDateRoles);
+  document.getElementById("conn-verify")?.addEventListener("click", connVerify);
+  document.getElementById("conn-test")?.addEventListener("click", connTest);
   document.getElementById("conn-delete-btn")?.addEventListener("click", connDelete);
+}
+
+// The connector currently selected in the Connectors tab (or null).
+function currentConn() {
+  return (state.connectors?.connectors || []).find((c) => c.id === state.connSel) || null;
+}
+
+// Verify — healthcheck the connector's live source. Stamps the result with the
+// connector id so connDetail only shows it for the connector it belongs to.
+async function connVerify() {
+  const c = currentConn();
+  if (!c || state.connBusy) return;
+  state.connBusy = true; render();
+  try {
+    const r = await api(`/api/bc/${encodeURIComponent(c.boundedContext)}/adapter/${encodeURIComponent(c.id)}/verify`, { method: "POST", body: "{}" });
+    state.connVerify = { id: c.id, ...r };
+  } catch (e) {
+    state.connVerify = { id: c.id, ok: false, detail: e.message };
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+// Test — a DRY-RUN pull (limit 5) graded against the model. Nothing is written.
+async function connTest() {
+  const c = currentConn();
+  if (!c || state.connBusy) return;
+  state.connBusy = true; render();
+  try {
+    const r = await api(`/api/bc/${encodeURIComponent(c.boundedContext)}/adapter/${encodeURIComponent(c.id)}/test`, { method: "POST", body: JSON.stringify({ limit: 5 }) });
+    state.connTest = { id: c.id, ...r };
+  } catch (e) {
+    state.connTest = { id: c.id, error: e.message };
+  } finally {
+    state.connBusy = false; render();
+  }
 }
 
 async function connSaveDateRoles() {
@@ -5422,13 +5134,14 @@ async function connRepoint() {
   if (!id || state.connBusy) return;
   const target = document.getElementById("conn-repoint-target")?.value;
   const cur = (state.connectors?.connectors || []).find((c) => c.id === id);
+  const name = cur ? connectorName(cur) : id;
   if (!target || (cur && target === cur.targetEntity)) { alert("Pick a different table to re-point to."); return; }
-  if (!confirm(`Re-point connector "${id}" to table "${target}"?\n\nIt will fill "${target}" on the next Fetch. Existing rows in "${cur?.targetEntity}" are left untouched.`)) return;
+  if (!confirm(`Re-point connector "${name}" to table "${target}"?\n\nIt will fill "${target}" on the next Fetch. Existing rows in "${cur?.targetEntity}" are left untouched.`)) return;
   state.connBusy = true; render();
   try {
     await api(`/api/connectors/${encodeURIComponent(id)}/repoint`, { method: "POST", body: JSON.stringify({ target }) });
     await loadConnectors();
-    alert(`Re-pointed "${id}" to "${target}".`);
+    alert(`Re-pointed to "${target}".`);
   } catch (e) {
     alert("Re-point failed: " + e.message);
   } finally {
@@ -5440,13 +5153,14 @@ async function connDelete() {
   const id = state.connSel;
   if (!id || state.connBusy) return;
   const cur = (state.connectors?.connectors || []).find((c) => c.id === id);
-  if (!confirm(`Completely delete connector "${id}"?\n\nThis permanently deletes its code, credentials, ALL ingested rows in "${cur?.targetEntity}", the derived events, and its entire history. The connector is removed. This cannot be undone.`)) return;
+  const name = cur ? connectorName(cur) : id;
+  if (!confirm(`Completely delete connector "${name}"?\n\nThis permanently deletes its code, credentials, ALL ingested rows in "${cur?.targetEntity}", the derived events, and its entire history. The connector is removed. This cannot be undone.`)) return;
   state.connBusy = true; render();
   try {
     const r = await api(`/api/connectors/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" });
     state.connSel = null;
     await loadConnectors();
-    alert(`Connector "${id}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s).`);
+    alert(`Connector "${name}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s).`);
   } catch (e) {
     alert("Delete failed: " + e.message);
   } finally {
@@ -5458,7 +5172,7 @@ function sectionBar() {
   if (!showWorkflowSectionBar()) return "";
   const overviewActive = state.view === "dashboard" || state.view === "detail" || state.view === "flow" || state.view === "rows";
   const modelActive = state.view === "model";
-  const systemsActive = state.view === "bcs" || state.view === "bc";
+  const systemsActive = state.view === "bcs";
   const connectorsActive = state.view === "connectors";
   return `
     <div class="bg-stone-50 text-sm border-b border-stone-200">

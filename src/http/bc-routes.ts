@@ -13,7 +13,6 @@ import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } fro
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatKey, appendNote } from "../packs/connector/journal.js";
-import { removeConnector } from "../packs/connector/orchestrate.js";
 import { ownsAdapterId, listOwnedAdapters } from "../packs/ownership.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
@@ -251,28 +250,13 @@ export function registerBcRoutes(app: FastifyInstance): void {
     return { entity, deleted, eventsDeleted, tableMissing: !tableExisted };
   });
 
-  // Delete connector — the full teardown for ONE connector: delete its code +
-  // credentials + config + registry entry + entire history (chat & notes), AND
-  // purge the data it produced (the target table's rows + the events derived from
-  // them). Nothing is left behind — the table returns to the "no connector yet"
-  // state. Distinct from "Delete all rows" (data only) and the workbench "Remove
-  // adapter" (no data/events). Connector-kind only.
-  app.post("/api/bc/:bc/connector/:id/delete", async (req, reply) => {
-    const bc = resolveBc((req.params as any).bc);
-    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
-    const id = String((req.params as any).id ?? "");
-    // Authorize + verify ownership BEFORE any existence/kind check, so the response
-    // is not an existence/kind oracle for another tenant's adapters.
-    await guardData("connector.administer"); // full teardown: code + creds + data + events
-    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
-    const adapter = listAdapters().find((a) => a.id === id);
-    if (!adapter || adapter.boundedContext !== bc) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
-    if (adapter.kind !== "connector") return reply.code(400).send({ error: "NOT_A_CONNECTOR", message: `"${id}" is not an AI-built connector` });
-    const entity = adapter.targetEntity;
-    const { rows: deletedRows, events: deletedEvents } = await purgeEntityData(entity);
-    removeConnector(id); // code + credentials + sidecar + registry entry + journal (chat & doc)
-    return { id, entity, deletedRows, deletedEvents, removed: true };
-  });
+  // Connector teardown (code + credentials + config + data + derived events +
+  // history) is the SINGLE canonical POST /api/connectors/:id/delete on the
+  // workflow-scoped Connectors tab — the connector's one management home. The old
+  // sidebar/workbench delete UIs were retired, so this duplicate teardown route
+  // (which let the two paths drift) is removed too. "Delete all rows" above is the
+  // distinct data-only operation. (Ownership-hardening that lived on this route now
+  // lives only on the canonical route's guardData + workflow scoping.)
 
   // History — latest data updates per event (count + last timestamp + provenance).
   app.get("/api/bc/:bc/history", async (req, reply) => {

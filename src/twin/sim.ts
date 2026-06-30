@@ -200,7 +200,7 @@ function synthesizeArgs(
 // Public operations
 // ---------------------------------------------------------------------------
 
-export interface SimStepResult {
+interface SimStepResult {
   index: number;
   total: number;
   eventRef: string | null;

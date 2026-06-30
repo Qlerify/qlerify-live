@@ -18,7 +18,7 @@ import type { EntitySchema } from "../ontology/model.js";
 const TIMEOUT_MS = 8000;
 const MAX_BYTES = 5_000_000;
 
-export interface AdapterRunContext {
+interface AdapterRunContext {
   /** The model entity the body must produce rows for (field names/types/required). */
   entity: EntitySchema;
   /** How many rows the caller wants. */

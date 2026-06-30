@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { getOntology } from "../../ontology/model.js";
 
-export interface FieldDesc {
+interface FieldDesc {
   name: string;
   tsType: string;
   validator: string | null; // require* helper name, or null if untyped/optional

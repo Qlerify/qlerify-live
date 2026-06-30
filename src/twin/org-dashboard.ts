@@ -33,7 +33,7 @@ import { getMeta, setMeta } from "./projection-store.js";
 // the gating notices are about.
 // ---------------------------------------------------------------------------
 
-export interface CapabilityDef {
+interface CapabilityDef {
   key: string;
   label: string;
   description: string;
@@ -41,7 +41,7 @@ export interface CapabilityDef {
   unlocks: string;
 }
 
-export const CAPABILITIES: CapabilityDef[] = [
+const CAPABILITIES: CapabilityDef[] = [
   {
     key: "commitDate",
     label: "Commitment / due date",
@@ -52,7 +52,7 @@ export const CAPABILITIES: CapabilityDef[] = [
 ];
 
 // Per-workflow mapping: capability key → the model field name it resolves to.
-export type WorkflowMapping = Record<string, string>;
+type WorkflowMapping = Record<string, string>;
 // Org-wide: workflowId → its mapping.
 export type OrgMappings = Record<string, WorkflowMapping>;
 
@@ -113,7 +113,7 @@ function orderInfo(ont: Ontology): OrderInfo {
 
 const DATEISH_RE = /(date|time|due|deadline|eta|occurr|deliver|promise|schedul|week|when)/i;
 
-export interface FieldOption {
+interface FieldOption {
   name: string;
   dataType?: string;
   dateish: boolean;
@@ -122,7 +122,7 @@ export interface FieldOption {
 
 /** The fields a workflow exposes, for the mapping dialog's dropdowns. Date-shaped
  * fields are flagged and sorted first; `suggested` is the best date guess. */
-export function availableFields(ont: Ontology): { fields: FieldOption[]; suggested: string | null } {
+function availableFields(ont: Ontology): { fields: FieldOption[]; suggested: string | null } {
   const seen = new Map<string, FieldOption>();
   const consider = (name: string, dataType: string | undefined, source: "entity" | "command") => {
     if (!name || name === "id" || seen.has(name)) return;
@@ -293,7 +293,7 @@ export interface PortfolioResult {
  * stamp + the PDP audit log. `live=false` only when there has been zero attributed
  * activity yet (a fresh org), so the UI can show "no AI activity yet" instead of
  * implying instrumented zeros. */
-export interface AiActivity {
+interface AiActivity {
   live: boolean;
   byKind: { human: number; ai: number; adapter: number; system: number };
   aiActionShare: { ai: number; human: number; pct: number | null }; // ai ÷ (ai+human) state-changing events
@@ -305,7 +305,7 @@ export interface AiActivity {
 /** Days-first cost-of-delay: exposure measured in DAYS (the unit we actually
  * have), before any € rate table exists. overdue/slip need the commitDate
  * mapping; overrun needs only the derived baseline. */
-export interface ValueAtRisk {
+interface ValueAtRisk {
   overdueDays: number; // Σ days already past due across open commitments
   slipDays: number; // Σ projected days late for not-yet-overdue commitments
   overrunDays: number; // Σ business days at-risk instances run beyond their own 85th pct
@@ -318,13 +318,13 @@ export interface ValueAtRisk {
  * no real per-pull `lastPullAt` writer yet (AdapterConfig.lastPullAt is interface-
  * only). The shape is the contract a real wiring will fill: swap `sources` to read
  * now − lastPullAt per source + healthcheck, and flip `preview` to false. */
-export interface ConnectorFreshness {
+interface ConnectorFreshness {
   preview: boolean;
   note: string;
   sources: { name: string; lastEventAgo: string; slaMinutes: number; status: "ok" | "stale" | "unknown" }[];
 }
 
-export interface WorkflowCard {
+interface WorkflowCard {
   id: string;
   name: string;
   workspaceId: string;
@@ -346,7 +346,7 @@ export interface WorkflowCard {
   atRiskDays: number; // Σ business days those at-risk instances run beyond the 85th pct
 }
 
-export interface ExceptionRow {
+interface ExceptionRow {
   kind: "overdue" | "at_risk" | "rework" | "soft_fail" | "aging";
   severity: number;
   workflowId: string;
@@ -357,7 +357,7 @@ export interface ExceptionRow {
   ageDays: number;
 }
 
-export interface Bottleneck {
+interface Bottleneck {
   workflowId: string;
   workflowName: string;
   eventRef: string;
@@ -367,14 +367,14 @@ export interface Bottleneck {
   waiting: number;
 }
 
-export interface CapabilityStatus extends CapabilityDef {
+interface CapabilityStatus extends CapabilityDef {
   state: "ready" | "partial" | "locked";
   modelledCount: number;
   mappedCount: number;
   unmapped: { id: string; name: string }[];
 }
 
-export interface TimelinessPanel {
+interface TimelinessPanel {
   scopeWorkflows: { id: string; name: string; field: string }[];
   overdue: number;
   predictedLate: number; // not yet overdue, but the baseline projects a miss

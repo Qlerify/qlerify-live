@@ -29,7 +29,7 @@ function blobPath(organizationId: string, hash: string): string {
   return join(ORGS_ROOT, organizationId, "blobs", hash.slice(0, 2), hash);
 }
 
-export interface ContentStore {
+interface ContentStore {
   /** Store bytes write-once; returns their content hash (the blob key). */
   put(organizationId: string, bytes: string): string;
   /** Read a blob's bytes, or null if absent. */

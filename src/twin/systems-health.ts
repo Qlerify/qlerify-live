@@ -18,9 +18,9 @@ import * as store from "./projection-store.js";
 
 /** The four connection states a table can be in, derived from (adapter wired?,
  * adapter mode, row count). `simulated` covers both simulated and recorded data. */
-export type TableStatus = "live" | "simulated" | "wired_empty" | "no_adapter";
+type TableStatus = "live" | "simulated" | "wired_empty" | "no_adapter";
 
-export interface TableHealth {
+interface TableHealth {
   name: string;
   kind: "entity" | "valueObject";
   status: TableStatus;
@@ -33,7 +33,7 @@ export interface TableHealth {
   detail: string;
 }
 
-export interface SystemHealth {
+interface SystemHealth {
   name: string;
   /** Tables with data flowing through a wired adapter (live + simulated). */
   connected: number;
@@ -41,7 +41,7 @@ export interface SystemHealth {
   tables: TableHealth[];
 }
 
-export interface SystemsHealth {
+interface SystemsHealth {
   /** Tables that need attention (no adapter, or wired but never populated). */
   gaps: number;
   systems: SystemHealth[];

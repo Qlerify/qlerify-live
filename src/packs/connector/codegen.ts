@@ -10,7 +10,7 @@ import type { EntitySchema } from "../../ontology/model.js";
 import { getAnthropicClient } from "../../llm/anthropic.js";
 import { scanImports } from "./runtime.js";
 
-export interface ConnectorGenInput {
+interface ConnectorGenInput {
   /** The model kind the connector must produce rows for. */
   target: EntitySchema;
   /** "entity" | "valueObject" — affects whether an id is expected. */
@@ -26,12 +26,12 @@ export interface ConnectorGenInput {
   errorReport?: string;
 }
 
-export interface ConnectorGenResult {
+interface ConnectorGenResult {
   code: string;
   deps: string[];
 }
 
-export function buildConnectorPrompt(input: ConnectorGenInput): string {
+function buildConnectorPrompt(input: ConnectorGenInput): string {
   const { target, targetKind, instructions, credentialKeys, endpoint, errorReport } = input;
   const fields = target.fields
     .map((f) => {
@@ -93,7 +93,7 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
 // factual paragraph. Kept separate from generateConnectorModule so the
 // code-gen contract (output ONLY the module) is never muddied.
 
-export interface ConnectorDescribeInput {
+interface ConnectorDescribeInput {
   /** System / bounded context the connector belongs to. */
   system: string;
   /** The model kind it populates. */
@@ -113,7 +113,7 @@ export interface ConnectorDescribeInput {
   code: string;
 }
 
-export function buildDescribePrompt(input: ConnectorDescribeInput): string {
+function buildDescribePrompt(input: ConnectorDescribeInput): string {
   const { system, target, targetKind, instructions, credentialKeys, endpoint, deps, mode, code } = input;
   return [
     `Document a data CONNECTOR for an operator. Write a short, factual description of what it does, grounded in the metadata AND the source code below.`,
@@ -171,7 +171,7 @@ export async function describeConnector(input: ConnectorDescribeInput): Promise<
 // created_at / updatedAt / lastModified …), with a small AI pass refining ONLY
 // the ambiguous cases.
 
-export interface DateRoles {
+interface DateRoles {
   created?: string;
   updated?: string;
 }
@@ -224,7 +224,7 @@ export function inferDateRoles(target: EntitySchema): DateRoles {
   return out;
 }
 
-export interface DateRolesInput {
+interface DateRolesInput {
   target: EntitySchema;
   /** The operator's natural-language note on the source (disambiguates roles). */
   instructions: string;

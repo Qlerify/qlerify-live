@@ -28,7 +28,7 @@ interface Bucket {
   hits: number[];
 }
 
-export interface RateDecision {
+interface RateDecision {
   blocked: boolean;
   /** Seconds until the oldest in-window failure expires (only when blocked). */
   retryAfterSec: number;
@@ -78,7 +78,7 @@ export class SlidingWindowLimiter {
 }
 
 /** Outcome for a login attempt across both buckets. */
-export interface LoginGate {
+interface LoginGate {
   blocked: boolean;
   retryAfterSec: number;
 }

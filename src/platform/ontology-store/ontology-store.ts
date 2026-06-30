@@ -22,7 +22,7 @@ import { newId } from "../ids.js";
 import { canonicalize } from "./canonical.js";
 import { fsContentStore as cas } from "./content-store.js";
 
-export interface VersionSummary {
+interface VersionSummary {
   events: number;
   roles: number;
   boundedContexts: number;
@@ -53,7 +53,7 @@ function scopeKeyOf(environmentId?: string | null, workspaceId?: string | null, 
   return [environmentId ?? "-", workspaceId ?? "-", workflowId ?? "-"].join("/");
 }
 
-export interface EnsureOntologyParams {
+interface EnsureOntologyParams {
   organizationId: string;
   /** Fixed ids for the seeded system org; omit to mint fresh ones. */
   resourceId?: string;
@@ -107,7 +107,7 @@ export async function ensureOntologyResource(p: EnsureOntologyParams): Promise<{
   return { resourceId, ontologyId };
 }
 
-export interface CreateVersionResult {
+interface CreateVersionResult {
   versionId: string;
   seq: number;
   manifestHash: string;
@@ -180,7 +180,7 @@ export async function createVersion(
   return { versionId, seq, manifestHash, changed: true };
 }
 
-export interface VersionContent {
+interface VersionContent {
   workflow: string;
   overlay: string | null;
   manifestHash: string;

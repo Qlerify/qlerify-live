@@ -43,14 +43,6 @@ export function listSidecars(): AdapterConfig[] {
     .filter((c): c is AdapterConfig => c != null);
 }
 
-/** Merge a patch into an EXISTING sidecar (never creates one implicitly, so a
- * code-defined pack adapter or a test doesn't litter `.qlerify/adapters`). */
-export function touchSidecar(id: string, patch: Partial<AdapterConfig>): void {
-  const cur = readSidecar(id);
-  if (!cur) return;
-  writeSidecar({ ...cur, ...patch });
-}
-
 /** Delete an adapter's sidecar (used by removeAdapter). No-op if absent. */
 export function deleteSidecar(id: string): void {
   const p = pathFor(id);

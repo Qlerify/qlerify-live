@@ -39,7 +39,7 @@ import type { EntitySchema } from "../../ontology/model.js";
 // persistent volume on Fly). The default is the user's home, never the checkout,
 // so `../../` from here can never reach the repo's .env / prisma/dev.db.
 const DATA_ROOT = process.env.QLERIFY_DATA_DIR || join(homedir(), ".qlerify-data");
-export const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
+const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
 
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network
@@ -189,7 +189,7 @@ main()
   });
 `;
 
-export function ensureWorkspace(): void {
+function ensureWorkspace(): void {
   mkdirSync(CONNECTORS_DIR, { recursive: true });
   const pkg = join(CONNECTORS_DIR, "package.json");
   if (!existsSync(pkg)) {
@@ -323,14 +323,14 @@ export async function installDeps(deps: string[]): Promise<InstallResult> {
 // Run — isolated subprocess
 // ---------------------------------------------------------------------------
 
-export interface RunRequest {
+interface RunRequest {
   entity: EntitySchema;
   limit: number;
   endpoint?: string;
   op?: "fetchRows" | "probe";
 }
 
-export interface RunResult {
+interface RunResult {
   ok: boolean;
   rows?: Array<Record<string, unknown>>;
   count?: number;

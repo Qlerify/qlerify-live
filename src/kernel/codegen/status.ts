@@ -15,9 +15,9 @@ function sha256(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export type CommandStatus = "current" | "gwt-drift" | "schema-drift" | "missing-in-model";
+type CommandStatus = "current" | "gwt-drift" | "schema-drift" | "missing-in-model";
 
-export interface CommandStatusRow {
+interface CommandStatusRow {
   command: string;
   route: string;
   status: CommandStatus;

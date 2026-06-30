@@ -92,7 +92,7 @@ export async function regenerateConnectorSummary(id: string, codeOverride?: stri
   setConnectorSummary(id, summary);
 }
 
-export interface CreateConnectorInput {
+interface CreateConnectorInput {
   boundedContext: string;
   /** Entity or value-object name the connector populates. */
   target: string;
@@ -157,7 +157,7 @@ export async function copyConnectorCredentials(fromId: string, toId: string): Pr
   return keys;
 }
 
-export interface BuildConnectorResult {
+interface BuildConnectorResult {
   deps: string[];
   install: InstallResult;
   bytes: number;
@@ -219,7 +219,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   return { deps: gen.deps, install, bytes: gen.code.length, targetKind };
 }
 
-export interface SaveConnectorCodeResult {
+interface SaveConnectorCodeResult {
   deps: string[];
   install: InstallResult;
   bytes: number;
@@ -251,7 +251,7 @@ export async function saveConnectorCode(id: string, code: string): Promise<SaveC
   return { deps, install, bytes: code.length };
 }
 
-export interface ConnectorInfo {
+interface ConnectorInfo {
   id: string;
   boundedContext: string;
   target: string;
@@ -334,7 +334,6 @@ export function setConnectorDateRoles(
 
 /** Read the connector's current source (for "show me the code"). */
 export { readModule as readConnectorCode } from "./runtime.js";
-export { readCredentials as readConnectorCredentials } from "./runtime.js";
 
 /** Delete a connector entirely: module + creds + sidecar + registry entry, plus
  * its journal (chat history + doc). Also clears the table-keyed chat thread in

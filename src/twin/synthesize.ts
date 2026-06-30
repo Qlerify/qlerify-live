@@ -12,7 +12,7 @@
 import type { EntitySchema, SchemaField } from "../ontology/model.js";
 
 /** Small deterministic PRNG (mulberry32) — seedable, unlike crypto randomUUID. */
-export function mulberry32(seed: number): () => number {
+function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) | 0;
@@ -51,7 +51,7 @@ function coerce(value: unknown, dataType?: string): unknown {
   }
 }
 
-export interface SynthesizeOpts {
+interface SynthesizeOpts {
   seed?: number;
   id?: string;
   overrides?: Record<string, unknown>;

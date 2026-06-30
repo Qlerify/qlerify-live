@@ -27,7 +27,7 @@ export function applyFieldMap(row: Record<string, unknown>, fieldMap?: FieldMap)
   return out;
 }
 
-export interface IntrospectResult {
+interface IntrospectResult {
   entity: string;
   fields: Array<{ name: string; dataType?: string; sample?: unknown }>;
 }
@@ -61,7 +61,7 @@ export interface Pack {
 }
 
 /** The wizard's forward progress for an adapter (persisted in the sidecar). */
-export type AdapterPhase = "draft" | "introspected" | "mapped" | "built" | "tested" | "populated";
+type AdapterPhase = "draft" | "introspected" | "mapped" | "built" | "tested" | "populated";
 
 /** Persisted adapter config — `.qlerify/adapters/<id>.json`. `credentialsRef` is a
  * KEY (env var / vault handle), NEVER the secret itself. */

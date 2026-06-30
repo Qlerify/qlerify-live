@@ -78,11 +78,6 @@ export function currentOrgId(): string {
   throw new TenantContextMissingError("no organization in context");
 }
 
-/** True when running as (or defaulting to) the system tenant. */
-export function isSystemContext(): boolean {
-  return (als.getStore()?.organizationId ?? SYSTEM_ORG_ID) === SYSTEM_ORG_ID;
-}
-
 /** The active workflow id: the bound workflow, else the virtual SYSTEM workflow.
  *
  * The `?? SYSTEM_WORKFLOW_ID` fallback fires ONLY off-request (no store) — boot,

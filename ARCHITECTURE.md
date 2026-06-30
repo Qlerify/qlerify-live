@@ -162,8 +162,10 @@ adapter (Increment 3).
 **Ordering constraints:** write-path before any adapter-informs-model loop · idempotency/seq/
 replay-mode before the dual store · seam mechanism before any generator · overlay validation
 before simplifying `registry.ts` and rewiring the frontend · crypto-shred before real PII
-ingest · preserve byte-stable `/commands/{bc}/{name}` + `/queries/{name}` URLs and extend
-`tests/ontology/conformance.test.ts` before swapping route registration.
+ingest · preserve byte-stable `/commands/{bc}/{name}` + `/queries/{name}` URLs before
+swapping route registration (route changes are now covered by the **model-independent**
+test suite — fixture-bound via `tests/helpers/po-model.ts` — not the retired
+`tests/ontology/conformance.test.ts`).
 
 ## 6. Increment 1 — SAP Purchase Order pilot (the concrete first slice)
 
@@ -186,7 +188,7 @@ State machine: `DRAFT → ORDERED → CONFIRMED → RECEIVED` (richest self-cont
    after regeneration.
 
 This slice proves live-config → deterministic scaffold (Parts 1+3), the AI-region/regen
-boundary every other part reuses, the GWT→logic seam, detection, and the conformance/golden-test
+boundary every other part reuses, the GWT→logic seam, detection, and the golden-test
 discipline — all behind existing routes with the working demo intact.
 
 ### Increment 1 — STATUS: DONE (2026-06-14)
@@ -203,9 +205,13 @@ Built and verified:
   is now a generated barrel, so HTTP routes / runner / tests import the same path unchanged.
 - **Endpoints**: `/api/commands`, `/api/commands/status`, `/commands/:bc/:name/describe`,
   `POST /commands/:bc/:name/detect`.
-- **npm scripts**: `codegen`, `codegen:ai`, `sim`, `sim:disruptions`.
+- **npm scripts**: `codegen`, `codegen:ai`. *(The `sim` / `sim:disruptions` scripts added
+  here were later removed; current scripts are `codegen`, `codegen:ai`, `swap`, plus the
+  build/test/db helpers.)*
 - **Conformance test extended** to understand BOTH handler styles (legacy single-file +
-  generated .gen/.logic seam) — the prerequisite the critique flagged.
+  generated .gen/.logic seam) — the prerequisite the critique flagged. *(Superseded: the
+  conformance test was later deleted; the suite is now model-independent, fixture-bound via
+  `tests/helpers/po-model.ts`.)*
 
 Proven: tsc clean · **103/103 tests pass** · happy path 34 events · generator idempotent
 (2nd run 0 writes) · **regenerate-everything leaves .logic.ts byte-identical** · live vertical
@@ -239,6 +245,8 @@ Built and verified:
   runtime validates against `getOntology().roles`.
 - **Conformance test model-relative** — no more magic 28/7/16; asserts internal consistency
   (linearOrder covers events, every role ∈ model.roles, EVENTS ≡ model events in linear order).
+  *(Superseded: this conformance test was later removed; the suite is now model-independent,
+  fixture-bound via `tests/helpers/po-model.ts`.)*
 - **Prisma schema generator** `src/kernel/codegen/schema.ts` — emits a valid `schema.prisma` from
   `ontology.entities` (type map, required→nullable, version+timestamps, string FKs, EventLog infra
   table preserved verbatim with a generic `scopeId`). Output passes `prisma validate`.
@@ -258,7 +266,8 @@ linearOrder fully model-derived — then restored byte-clean.
 
 **The deterministic "except" boundary** (what a swap does NOT auto-generate — the AI/hand bucket,
 listed by the swap warning): `*.logic.ts` bodies, `src/{bc}/queries.ts`, `simulator/{runner,
-stepper}.ts`, `events/derived.ts`, `events/bus.ts` `resolveDemandId` (still demand-specific), and
+stepper}.ts`, `events/derived.ts`, `events/bus.ts`'s scope resolver (`withScope()` — at the time
+the demand-specific `resolveDemandId`; since generalized to model-driven case correlation), and
 `web/app.js` panels. These are statically imported on the boot path, so completing a real swap to
 a new domain still requires regenerating/removing them — that's the next increment (pack-loader +
 generalized scope resolver + the queries/widget generators from Parts 4/5).
@@ -304,8 +313,8 @@ clean, 105/105 tests, happy path 34 events.
 
 Goal: the dashboard's "+ New" / step-through / detail work for ANY loaded model, not just Ericsson.
 
-- **Event scope override** `src/events/bus.ts` — `setScopeOverride`/`withScope(id, fn)`; `emit()` uses
-  it (else `resolveDemandId`). The generic sim runs a whole "run" with the root-instance id pinned, so
+- **Event scope override** `src/events/bus.ts` — `withScope(id, fn)`; `emit()` uses the pinned
+  scope (else falls back to model-driven case correlation, `twin/correlate.ts`). The generic sim runs a whole "run" with the root-instance id pinned, so
   events group under it in EventLog (like Ericsson per-demand scoping) without the hardcoded FK-walk.
 - **Generic simulator** `src/twin/sim.ts` — `genericNewInstance` (create the root aggregate via its
   create-command, scoped), `genericStep` (walk `linearOrder`, synthesize each command's args from
@@ -375,10 +384,17 @@ prerequisite for the command to function.
 
 ## Reality check vs the kernel+packs goal (2026-06-15) — read before Part 2
 
+> **SUPERSEDED (later).** This dated snapshot is kept for history but is now outdated:
+> `src/packs/` exists with `loadPacks()` (`src/packs/loadPacks.ts`) plus a full
+> adapter / connector / codegen layer (`src/packs/{adapters,connector,codegen,sap,…}`).
+> The ❌ items below — `src/packs/{bc}/`, the `Pack` interface, and `loadPacks()` — are
+> **built**. Read the bullets as the 2026-06-15 starting point, not current state.
+
 The §1 "Kernel + Packs" target is **NOT yet realized**. Current state:
 
 - **No `src/packs/` directory exists.** Bounded contexts are still flat dirs at `src/` root
   (`helix/`, `prim/`, `sap/`, …) — the original layout. No `Pack` interface, no `loadPacks()`.
+  *(Outdated: `src/packs/` + `loadPacks()` now exist — see the SUPERSEDED note above.)*
 - **No pack has all its layers.** Per-pack `adapter/`, `widgets/`, `ingestion/`, `pack.manifest.json`
   do not exist anywhere. Only a global `.qlerify/codegen.commands.json`.
 - **Only SAP Purchase Order uses the command seam** (`.gen.ts`+`.logic.ts` with `detect`/`DESCRIBE`,
@@ -396,8 +412,11 @@ custom widgets, used when the generic default isn't enough. SAP PO is the one pi
 - ✅ Kernel codegen engine (`src/kernel/codegen/`): introspect → emit `.gen`/`.logic` + manifest.
 - ✅ Generic runtime (`src/commands/base.ts` + `src/twin/`): runs any model generically.
 - ✅ One command-seam pilot (SAP PO).
-- ❌ `src/packs/{bc}/` organization, `Pack` interface, `loadPacks()`.
-- ❌ adapter / widgets / ingestion layers (Parts 2/4/5).
+- ❌ `src/packs/{bc}/` organization, `Pack` interface, `loadPacks()`. *(Now ✅ built — see
+  the SUPERSEDED note at the top of this section: `src/packs/loadPacks.ts` + the
+  adapter/connector/codegen layer.)*
+- ❌ adapter / widgets / ingestion layers (Parts 2/4/5). *(The adapter/connector + codegen
+  layers were since built under `src/packs/`; widgets/ingestion remain partial.)*
 - ❌ 6 of 7 BCs not converted to the seam.
 
 ### Next major iteration: Part 2 — Adapters = the first real pack
@@ -413,13 +432,21 @@ the others migrate into that structure incrementally afterward.
   introspect/mapping/pull/push/healthcheck; FDE AI loop in the chat-agent harness; `mode:
   simulated|recorded|live`).
 
-### Related milestone (after Part 2/3): retire the Ericsson dual-track
-The Ericsson domain is hand-coded (1,564 lines + `isEricssonModel()` branching in 11 places + the
-28-step `stepper` + the typed Prisma schema + the 105 tests) — it's the **faithful reference app**, not
-debt to rush. End-state: Ericsson becomes `workflow.json` + authored `.logic.ts` (the SAP-PO pattern,
-extended), the generic engine runs it, and `isEricssonModel()` + the bespoke stepper disappear. Costs:
-(a) needs authored `.logic.ts` to stay faithful (Part 3); (b) moving Ericsson off typed Prisma onto the
-raw-SQL `gen_` store means rebuilding the relational read-models. A deliberate later increment.
+### Related milestone (after Part 2/3): retire the Ericsson dual-track — DONE
+> **COMPLETED (decoupling "Pass A").** The Ericsson dual-track described below has been
+> retired: `isEricssonModel()`, `resolveDemandId`, the ~16 Ericsson tables, and
+> `src/events/derived.ts` are all gone (`git grep ericsson` over `src/` + `prisma/` returns
+> nothing; `prisma/schema.prisma` now holds only `Plat*` / `EventLog` models). The
+> **model-agnostic engine is the only path**, and the test suite is now model-independent
+> (131 green, fixture-bound via `tests/helpers/po-model.ts`). The paragraph below is kept as
+> history of the pre-decoupling plan.
+
+The Ericsson domain was hand-coded (1,564 lines + `isEricssonModel()` branching in 11 places + the
+28-step `stepper` + the typed Prisma schema + a model-specific test set) — it was the **faithful reference app**, not
+debt to rush. End-state (now reached): Ericsson became `workflow.json` + authored `.logic.ts` (the SAP-PO pattern,
+extended), the generic engine runs it, and `isEricssonModel()` + the bespoke stepper disappeared. Costs that were
+paid: (a) authored `.logic.ts` to stay faithful (Part 3); (b) moving Ericsson off typed Prisma onto the
+raw-SQL `gen_` store meant rebuilding the relational read-models.
 
 ---
 

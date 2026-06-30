@@ -2,11 +2,10 @@
 // routes. Every decision of interest is audited (§17 MUST), and a DENY raises an
 // AuthError (→ 403) — never a silent pass.
 
-import { prisma } from "../db.js";
 import { AuthError, DomainError } from "../errors.js";
 import { recordAudit } from "./audit/index.js";
 import { authorize, type AuthzResource } from "./pdp/index.js";
-import { currentWorkflowId, isSystemWorkflow, requireTenant } from "./tenancy/context.js";
+import { currentWorkflowId, requireTenant } from "./tenancy/context.js";
 import { currentActorKind } from "./tenancy/actor.js";
 import { connectorsEnabled } from "../config/features.js";
 import type { TenantContext } from "./types.js";
@@ -56,32 +55,5 @@ export async function guardData(action: string): Promise<void> {
     scopeType: "workflow",
     workflowId,
   };
-  await ensureAllowed(action, resource, ctx);
-}
-
-/** Gate a model-lifecycle action (apply/fetch/roll/restore) on the current org's
- * primary ("workflow") ontology resource — the fix for the previously
- * unauthenticated /api/model/* routes. Falls back to org-scope authz if the org
- * has no ontology resource yet (deny-by-default unless org owner/admin). */
-export async function guardModelAction(action: string): Promise<void> {
-  const ctx = requireTenant();
-  // These routes mutate the on-disk demo model + shared state — system workflow only.
-  if (!isSystemWorkflow()) {
-    throw new DomainError("Model lifecycle (fetch/apply/roll/restore) operates on the system default workflow only.");
-  }
-  const ont = await prisma.platOntology.findFirst({
-    where: { organizationId: ctx.organizationId, workflowId: null, name: "workflow" },
-    select: { resourceId: true, environmentId: true, workspaceId: true },
-  });
-  const resource: AuthzResource = ont
-    ? {
-        id: ont.resourceId,
-        organizationId: ctx.organizationId,
-        scopeType: "resource",
-        environmentId: ont.environmentId,
-        workspaceId: ont.workspaceId,
-        workflowId: null,
-      }
-    : { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" };
   await ensureAllowed(action, resource, ctx);
 }

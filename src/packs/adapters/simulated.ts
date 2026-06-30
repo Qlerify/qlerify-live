@@ -8,7 +8,7 @@ import { getOntology, type EntitySchema } from "../../ontology/model.js";
 import { synthesizeRow } from "../../twin/synthesize.js";
 import type { FieldMap, SourceAdapter } from "../types.js";
 
-export interface SimulatedAdapterConfig {
+interface SimulatedAdapterConfig {
   id: string;
   boundedContext: string;
   targetEntity: string;

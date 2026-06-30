@@ -204,8 +204,6 @@ interface RawWorkflow extends RawContext {
   version?: number;
   /** Primary bounded-context name in the native export. */
   boundedContext?: string;
-  /** Pre-flattened files (legacy) list contexts here instead. */
-  boundedContexts?: string[];
   roles?: string[];
   externalBoundedContexts?: Record<string, RawContext>;
 }

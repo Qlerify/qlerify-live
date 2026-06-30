@@ -13,7 +13,7 @@ const EFFORT = (process.env.CHAT_EFFORT ?? "medium") as "low" | "medium" | "high
 // Headroom for the connector build→test→repair→ingest loop (each is a tool turn).
 const MAX_ITERATIONS = 14;
 
-export interface ChatTurnResult {
+interface ChatTurnResult {
   messages: Anthropic.MessageParam[];
   toolCalls: Array<{ name: string; input: unknown; isError: boolean; preview: string }>;
   usage: {

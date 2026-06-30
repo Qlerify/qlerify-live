@@ -14,7 +14,7 @@ import { SYSTEM_WORKFLOW_ID } from "../platform/ids.js";
 export type ProvMode = "simulated" | "recorded" | "live";
 export const PROV_MODES: ProvMode[] = ["simulated", "recorded", "live"];
 
-export interface AdapterMode {
+interface AdapterMode {
   mode: ProvMode;
   adapter?: string; // id of the adapter that owns this BC's data, if any
   at?: string; // ISO timestamp the mode was last set
@@ -43,11 +43,6 @@ function metaKey(): string {
 // simply never read — a new model's BCs default to `simulated`.)
 const cache = new Map<string, Record<string, AdapterMode>>();
 
-/** Drop the in-process cache (tests + after an out-of-band meta change). */
-export function invalidateModesCache(): void {
-  cache.clear();
-}
-
 function safeParse(raw: string): Record<string, AdapterMode> {
   try {
     const v = JSON.parse(raw);
@@ -58,7 +53,7 @@ function safeParse(raw: string): Record<string, AdapterMode> {
 }
 
 /** The configured adapter mode per bounded context for the active workflow (cached). */
-export async function getAdapterModes(): Promise<Record<string, AdapterMode>> {
+async function getAdapterModes(): Promise<Record<string, AdapterMode>> {
   const key = metaKey();
   const hit = cache.get(key);
   if (hit) return hit;
@@ -90,7 +85,7 @@ export async function setAdapterMode(boundedContext: string, mode: ProvMode, ada
 // rollup + per-step badges. Pure: callers pass the model shape + event counts.
 // ---------------------------------------------------------------------------
 
-export interface ProvenanceMeta {
+interface ProvenanceMeta {
   byContext: Record<string, { mode: ProvMode; adapter?: string; at?: string; eventCount: number }>;
   /** Step counts by mode across the model's events (a "step" = one model event,
    * its mode = its bounded context's mode). `real` = recorded + live. */

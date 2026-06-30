@@ -21,7 +21,7 @@ export function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-export function buildAdapterPrompt(cfg: AdapterConfig, entity: EntitySchema): string {
+function buildAdapterPrompt(cfg: AdapterConfig, entity: EntitySchema): string {
   const fields = entity.fields
     .map((f) => `  ${f.name}: ${f.dataType ?? "string"}${entity.required.includes(f.name) ? " (required)" : ""}${f.exampleData?.[0] !== undefined ? ` — e.g. ${JSON.stringify(f.exampleData[0])}` : ""}`)
     .join("\n");
@@ -62,7 +62,7 @@ function bodyDir(cfg: AdapterConfig): string {
   return join("src", "packs", bcDir, "generated");
 }
 
-export interface WriteBodyResult {
+interface WriteBodyResult {
   bodyPath: string; // repo-relative
   hash: string;
   skipped: boolean; // identical content already on disk

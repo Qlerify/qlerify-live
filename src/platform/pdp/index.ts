@@ -35,7 +35,7 @@ export interface AuthzResource {
   environmentId?: string | null;
 }
 
-export interface AuthzDecision {
+interface AuthzDecision {
   allow: boolean;
   reason: string;
 }

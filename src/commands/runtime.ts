@@ -38,9 +38,3 @@ export interface DetectResult {
   evidence: string;
 }
 
-/** The three members every {command}.logic.ts must export. */
-export interface CommandLogic<TArgs = Record<string, unknown>> {
-  apply(ctx: CommandContext<TArgs>): Promise<unknown>;
-  detect(input: DetectInput): Promise<DetectResult>;
-  DESCRIBE: string;
-}

@@ -2763,7 +2763,7 @@ function bindExplorer() {
 }
 
 // ---------------------------------------------------------------------------
-// Detail view (current 7-panel demo)
+// Detail view — model-generic relationship forest (genericDetailView)
 // ---------------------------------------------------------------------------
 
 async function loadDetail() {
@@ -6145,13 +6145,7 @@ function adminTabContent(tab, a) {
       ${tbl(["Workspace", "Environment", "Lifecycle"], rows, "No workspaces.")}`;
   }
   if (tab === "workflows") {
-    const sysProjId = state.me?.systemWorkflowId;
-    // The system/demo workflow is infrastructure, not a manageable tenant workflow
-    // (it can't be deleted and is re-seeded every boot). Keep it OUT of this
-    // management table — it still appears in the breadcrumb for navigation.
-    const manageable = (a.workflows || []).filter((pr) => pr.id !== sysProjId);
-    const hidSystem = (a.workflows || []).length !== manageable.length;
-    const rows = manageable.map((pr) => `<tr>
+    const rows = (a.workflows || []).map((pr) => `<tr>
       <td class="px-4 py-2 font-medium">${escapeHtml(pr.name)}</td>
       <td class="px-4 py-2 mono text-xs text-stone-500">${escapeHtml(String(pr.workspaceId).slice(0, 12))}</td>
       <td class="px-4 py-2 text-stone-500">${escapeHtml(pr.lifecycleState || "active")}</td>

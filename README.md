@@ -306,7 +306,7 @@ The surface splits cleanly into two planes. Every route is **deny-by-default**; 
 | Commands | `POST /commands/:bc/:name` (generic dispatch), `GET /api/commands[/status]`, `GET /commands/:bc/:name/describe`, `POST …/detect` |
 | Ontology | `GET /api/ontology` |
 | Simulator / twin | `GET/POST /sim/cases`, `POST /sim/next`, `/sim/run-all`, `/sim/reset`, `/sim/delete`, `POST /sim/derive`, `/sim/rebuild`, `GET /sim/meta`, `/sim/event-log`, `/sim/flow-aggregate`, `/sim/flow-by-case` |
-| Bounded contexts | `GET /api/bc[/:bc]`, `/api/bc/health`, `/api/bc/:bc/raw`, `/row-events`, `/history`, `POST /api/bc/:bc/clear` |
+| Bounded contexts | `GET /api/bc[/:bc]`, `/api/bc/health`, `/api/bc/:bc/raw`, `/row-events`, `POST /api/bc/:bc/clear` |
 | Adapters/connectors | `GET /api/adapters[/:id]`, `POST /api/adapters/:id/pull`, `GET/POST /api/connectors[/:id/code]`, `POST /api/connectors/:id/repoint`, `/date-roles`, `/delete`, `POST /api/data/reimport-all` |
 | Org dashboard | `GET /org/portfolio`, `GET/PUT /org/mappings` |
 | AI assistant | `GET /chat/info`, `POST /chat` |

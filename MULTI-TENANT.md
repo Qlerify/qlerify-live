@@ -2,8 +2,10 @@
 
 This is the lowest layer of the platform: the **tenancy / identity / authorization /
 isolation spine** from `multi-tenant-platform-spec.md`, adapted to this codebase.
-It is **strictly additive** — the existing single-tenant demo runs unchanged, now
-*through* the spine as a seeded **system organization** (no `TENANCY=off` bypass).
+There is **no seeded demo and no system organization** (the legacy one is removed on
+boot by `removeLegacySystemOrg()`), and there is no `TENANCY=off` bypass. A fresh
+install starts with **zero organizations** and is **deny-by-default**: the superuser
+signs in and creates the first org, which then provisions its own workspaces/workflows.
 
 ## What shipped (`src/platform/*`)
 
@@ -39,10 +41,15 @@ and not one giant JSON column:
 
 ## Using it
 
-- **Auth (dev shim):** `Authorization: Bearer <idp-subject>` or `X-Identity-Subject`.
-  Optional `X-Org-Id` / `X-Org-Slug` *selects* among an identity's orgs but only indexes
-  the membership check — the canonical `organization_id` is the membership row's org.
-  **No headers ⇒ the system tenant** (the demo path).
+- **Auth:** a real request carries an opaque session token from sign-in
+  (`Authorization: Bearer <session>`). Optional `X-Org-Id` / `X-Org-Slug` *selects* among
+  an identity's orgs but only indexes the membership check — the canonical
+  `organization_id` is the membership row's org. The raw-subject / `X-Identity-Subject`
+  shim is a **local-dev/test convenience that is hard-off in production**
+  (`devShimEnabled()` returns false when `NODE_ENV==='production'`) and never works for
+  credentialed or superuser identities. **No credentials ⇒ rejected**
+  (`authentication required`) — there is no header-less demo default; every request
+  must authenticate.
 - **Control plane:** `GET /v1/whoami`, `POST /v1/organizations`, `POST /v1/environments`,
   `POST /v1/memberships`, `POST /v1/role-assignments`, `POST /v1/authorize`,
   `GET/PUT /v1/ontologies[/:id[/content]]`, `GET /v1/audit/verify`.

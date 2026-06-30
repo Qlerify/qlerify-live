@@ -74,7 +74,7 @@ function rebuildEvents(): void {
 rebuildEvents();
 
 // Per-WORKFLOW events. EVENTS (above) stays the SYSTEM/current-model live binding
-// for system-context consumers (chat, the legacy stepper, conformance); events()
+// for system-context consumers (chat); events()
 // resolves the ACTIVE workflow's events, keyed by the same content-hash cache key
 // getOntology() uses. This is what makes emit()/findEvent resolve the RIGHT model
 // when a non-system workflow is active.

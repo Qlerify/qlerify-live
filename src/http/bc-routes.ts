@@ -258,21 +258,6 @@ export function registerBcRoutes(app: FastifyInstance): void {
   // distinct data-only operation. (Ownership-hardening that lived on this route now
   // lives only on the canonical route's guardData + workflow scoping.)
 
-  // History — latest data updates per event (count + last timestamp + provenance).
-  app.get("/api/bc/:bc/history", async (req, reply) => {
-    const bc = resolveBc((req.params as any).bc);
-    if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
-    const grouped = await prisma.eventLog.groupBy({
-      by: ["eventName", "provenance"],
-      where: { boundedContext: bc, ...eventLogOrgWhere() },
-      _count: { _all: true },
-      _max: { occurredAt: true },
-    });
-    return grouped
-      .map((g) => ({ eventName: g.eventName, provenance: g.provenance, count: g._count._all, lastAt: g._max.occurredAt }))
-      .sort((a, b) => String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")));
-  });
-
   // ---- Connector-builder chat history, persisted per (workflow, system, table) --
   // Keyed by connectorChatKey (workflow-scoped) so two tenants that share a
   // bounded-context/table NAME cannot read, overwrite, or poison each other's

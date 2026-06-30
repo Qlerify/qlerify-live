@@ -18,7 +18,7 @@ import { tenantContext } from "./context.js";
 /** The surface that drove a state change. `human` = a person on the HTTP API;
  * `ai` = the chat assistant's write tools; `adapter` = data-evidence derivation;
  * `system` = off-request machinery (boot, sim runner, tests). */
-export type ActorKind = "human" | "ai" | "system" | "adapter";
+type ActorKind = "human" | "ai" | "system" | "adapter";
 
 const als = new AsyncLocalStorage<ActorKind>();
 

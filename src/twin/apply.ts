@@ -33,7 +33,7 @@ function boundedContextLabel(workflowJson: string): string | null {
   }
 }
 
-export interface ApplyModelOpts {
+interface ApplyModelOpts {
   /** Provenance recorded on the version row: set | fetch | restore | edit. */
   source?: string;
   /** The Qlerify link this content was pulled from (null for upload/paste). The

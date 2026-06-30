@@ -20,7 +20,7 @@ import { DomainError } from "../errors.js";
 import { tenantContext } from "../platform/tenancy/context.js";
 import { decryptSecret } from "../platform/secrets/secret-box.js";
 
-export type QlerifySource = "org" | "platform";
+type QlerifySource = "org" | "platform";
 
 export interface QlerifyCreds {
   url: string;

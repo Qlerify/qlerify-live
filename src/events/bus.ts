@@ -1,6 +1,6 @@
 // In-process event bus. Each command handler emits its event after the
-// aggregate write commits. Subscribers run synchronously on the same tick;
-// derived events subscribe to upstream events and emit their own.
+// aggregate write commits, persisting it to EventLog. The "case" an event is
+// grouped under is pinned via withScope() during a simulator run.
 
 import { prisma } from "../db.js";
 import { findEvent, type EventDef } from "./registry.js";
@@ -28,19 +28,11 @@ export interface EmittedEvent {
   evidence?: string;
 }
 
-type Subscriber = (ev: EmittedEvent) => Promise<void> | void;
-
-const subscribers = new Map<string, Subscriber[]>();
-const wildcardSubscribers: Subscriber[] = [];
-
 // Scope override: the generic simulator runs every command of one "run" with the
 // run's root-instance id set here, so emitted events are grouped by that id
 // (written to EventLog.caseId). null → fall back to model-driven case correlation
 // (twin/correlate.ts), which links an aggregate to the case its FK references.
 let scopeOverride: string | null = null;
-export function setScopeOverride(id: string | null): void {
-  scopeOverride = id;
-}
 /** Run `fn` with the event scope pinned to `id`, restoring the prior scope after. */
 export async function withScope<T>(id: string, fn: () => Promise<T>): Promise<T> {
   const prev = scopeOverride;
@@ -50,16 +42,6 @@ export async function withScope<T>(id: string, fn: () => Promise<T>): Promise<T>
   } finally {
     scopeOverride = prev;
   }
-}
-
-export function subscribe(ref: string, fn: Subscriber) {
-  const list = subscribers.get(ref) ?? [];
-  list.push(fn);
-  subscribers.set(ref, list);
-}
-
-export function subscribeAll(fn: Subscriber) {
-  wildcardSubscribers.push(fn);
 }
 
 // businessAt resolution ------------------------------------------------------
@@ -159,16 +141,4 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       actorKind: currentActorKind(),
     },
   });
-
-  for (const fn of wildcardSubscribers) {
-    await fn(ev);
-  }
-  for (const fn of subscribers.get(ev.ref) ?? []) {
-    await fn(ev);
-  }
-}
-
-export function _resetSubscribersForTests() {
-  subscribers.clear();
-  wildcardSubscribers.length = 0;
 }

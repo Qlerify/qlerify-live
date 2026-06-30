@@ -49,7 +49,7 @@ import * as store from "./projection-store.js";
 // a derived event's payload.
 const PLATFORM_COLS = new Set(["version", "createdAt", "updatedAt", "_provenance", "organization_id"]);
 
-export type EvidenceKind = "create" | "status" | "fields" | "none";
+type EvidenceKind = "create" | "status" | "fields" | "none";
 
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -263,7 +263,7 @@ function buildPayload(row: Record<string, unknown>, entity: EntitySchema): Recor
 
 /** One event the data implies happened for one aggregate instance — everything
  * emit() needs, plus the human-readable evidence. */
-export interface PlannedEmission {
+interface PlannedEmission {
   ref: string;
   aggregateId: string;
   role: string;
@@ -274,7 +274,7 @@ export interface PlannedEmission {
 }
 
 /** Per-event outcome of the plan: what fired, and how many rows held no evidence. */
-export interface EventPlan {
+interface EventPlan {
   key: string;
   name: string;
   aggregateRoot: string;
@@ -355,7 +355,7 @@ export function planDerivation(
   return plans;
 }
 
-export interface DerivedEventSummary {
+interface DerivedEventSummary {
   key: string;
   name: string;
   aggregateRoot: string;
@@ -370,7 +370,7 @@ export interface DerivedEventSummary {
   sample?: string;
 }
 
-export interface DeriveResult {
+interface DeriveResult {
   preview: boolean;
   totalEmitted: number;
   /** Distinct aggregate instances that gained at least one event. */

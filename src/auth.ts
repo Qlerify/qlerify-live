@@ -9,8 +9,8 @@ import { getOntology } from "./ontology/model.js";
 // Roles are model-derived: the valid set is whatever the live ontology declares
 // (getOntology().roles), so swapping the model swaps the roles with zero code
 // change. The type is therefore an open `string` rather than a hardcoded union;
-// the runtime guard below — and the conformance test — enforce that every role
-// in play actually exists in the model.
+// the runtime guard below enforces that every role in play actually exists in
+// the model.
 export type Role = string;
 
 export function roleFromRequest(req: FastifyRequest): Role {

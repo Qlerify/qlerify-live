@@ -19,7 +19,7 @@ const DENY: Array<{ re: RegExp; why: string }> = [
   { re: /\bglobalThis\s*\.\s*process\b/, why: "globalThis.process" },
 ];
 
-export interface DenyScanResult {
+interface DenyScanResult {
   ok: boolean;
   violations: string[];
 }

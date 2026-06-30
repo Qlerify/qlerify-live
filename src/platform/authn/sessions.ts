@@ -46,7 +46,7 @@ export function verifyPassword(password: string, stored: string | null | undefin
   return timingSafeEqual(actual, expected);
 }
 
-export interface IssuedSession {
+interface IssuedSession {
   token: string; // the raw bearer value (returned to the client, never stored)
   expiresAt: Date;
 }

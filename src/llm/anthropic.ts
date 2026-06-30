@@ -16,9 +16,9 @@ import { DomainError, LlmError } from "../errors.js";
 import { tenantContext } from "../platform/tenancy/context.js";
 import { decryptSecret } from "../platform/secrets/secret-box.js";
 
-export const DEFAULT_MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
+const DEFAULT_MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 
-export type AnthropicSource = "org" | "platform";
+type AnthropicSource = "org" | "platform";
 
 export interface ResolvedAnthropic {
   client: Anthropic;

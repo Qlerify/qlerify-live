@@ -1,6 +1,6 @@
 // Model-swap orchestrator.
 //
-// When the live model (workflow.json) is replaced with a different domain, this
+// When the live per-workflow model is replaced with a different domain, this
 // reconfigures everything DETERMINISTIC — the Prisma projection tables, the
 // command skeletons, stubbed logic for new commands, and a fresh overlay — and
 // reports the irreversible data loss and the domain-authored files that still
@@ -8,8 +8,8 @@
 // routes are already model/overlay-derived and reconfigure on their own.
 //
 // SAFETY: dropping projection tables is irreversible. swapPreview() is read-only
-// and is what the UI shows; applySwap() performs the destructive work and only
-// runs from the CLI with an explicit --yes.
+// (preview only); applySwap() performs the destructive work and runs only from
+// the CLI (`npm run swap`) with an explicit --yes.
 
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -39,7 +39,7 @@ function currentTables(): string[] {
   return [...text.matchAll(/^model\s+(\w+)\s*\{/gm)].map((m) => m[1]!);
 }
 
-export interface SwapPreview {
+interface SwapPreview {
   newModelTables: string[];
   currentTables: string[];
   dropped: string[]; // exist now, gone in new model → DATA PERMANENTLY LOST
@@ -52,7 +52,7 @@ export interface SwapPreview {
 }
 
 /** Read-only diff of what applying the current model would do to the DB. */
-export function swapPreview(): SwapPreview {
+function swapPreview(): SwapPreview {
   const ont = getOntology();
   const newTables = entityTableNames(ont);
   const newSet = new Set(newTables);
@@ -96,7 +96,7 @@ function freshOverlay(): string {
   ) + "\n";
 }
 
-export interface SwapResult {
+interface SwapResult {
   preview: SwapPreview;
   schemaWritten: boolean;
   overlayWritten: boolean;
@@ -106,7 +106,7 @@ export interface SwapResult {
 /** Perform the destructive swap. Writes the new schema, a fresh overlay, and the
  * command skeletons (+ stub logic) for every bounded context, then the caller is
  * responsible for `prisma db push --accept-data-loss`. */
-export function applySwap(): SwapResult {
+function applySwap(): SwapResult {
   const preview = swapPreview();
 
   // Back up the schema before overwriting (one level of undo for the file; the

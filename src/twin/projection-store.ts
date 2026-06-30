@@ -140,7 +140,7 @@ export async function listProjectionTables(): Promise<string[]> {
     .map((n) => n.slice(prefix.length));
 }
 
-export interface ApplyResult {
+interface ApplyResult {
   dropped: string[];
   created: string[];
 }

@@ -12,7 +12,7 @@ import { isPlatformAdmin } from "../authn/index.js";
 import { createSession, hashPassword, revokeSession, verifyPassword } from "../authn/sessions.js";
 import { loginRateLimiter } from "../authn/rate-limit.js";
 import { ensureAllowed } from "../authz.js";
-import { newId, SYSTEM_ORG_ID, SYSTEM_WORKFLOW_ID } from "../ids.js";
+import { newId, SYSTEM_ORG_ID } from "../ids.js";
 import { authorize, resourceRef } from "../pdp/index.js";
 import { ACTION_PERMISSION_MAP } from "../pdp/action-map.js";
 import {
@@ -139,8 +139,6 @@ export function registerControlRoutes(app: FastifyInstance) {
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
         mustChangePassword: !!idRow?.mustChangePassword,
         organizations: await accessibleOrgs(ctx),
-        isSystemWorkflow: false, // no system workflow exists; kept for client compat
-        systemWorkflowId: SYSTEM_WORKFLOW_ID, // sentinel; no real workflow carries it
       };
       // Authenticated but not a member of any org yet (fresh superadmin, or a user
       // whose last membership was removed) → the shell shows "create your first

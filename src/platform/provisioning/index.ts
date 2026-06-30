@@ -45,7 +45,7 @@ async function ensureBuiltinRoles(): Promise<void> {
   }
 }
 
-export interface RoleAssignmentInput {
+interface RoleAssignmentInput {
   organizationId: string;
   principalId: string;
   principalType: PrincipalType;
@@ -249,7 +249,7 @@ async function uniqueSlug(name: string): Promise<string> {
   return slug;
 }
 
-export interface CreateOrgParams {
+interface CreateOrgParams {
   name: string;
   customerAccountId?: string;
   homeRegion?: string;
@@ -334,7 +334,7 @@ export async function updateOrganization(
   return { id: updated.id, name: updated.name, slug: updated.slug, homeRegion: updated.homeRegion, status: updated.status };
 }
 
-export interface OrgAnthropicStatus {
+interface OrgAnthropicStatus {
   configured: boolean;
   source: "org" | "platform";
   hint: string | null;
@@ -394,7 +394,7 @@ export async function setOrgAnthropicConfig(
   return { configured: true, source: "org", hint, model };
 }
 
-export interface OrgQlerifyStatus {
+interface OrgQlerifyStatus {
   configured: boolean;
   source: "org" | "platform";
   hint: string | null;
@@ -532,11 +532,6 @@ export async function deleteOrganization(
   return { id: organizationId, deletedWorkflows: workflows.length, droppedTables };
 }
 
-/** Tenant Registry lookup (§10) — pooled/local in inc 1. */
-export async function lookupTenant(organizationId: string) {
-  return prisma.platTenantRegistry.findUnique({ where: { organizationId } });
-}
-
 let platformSeeded = false;
 
 /** Idempotent boot seed. Ensures the built-in roles + the superuser, and removes
@@ -583,7 +578,7 @@ async function removeLegacySystemOrg(): Promise<void> {
   }
 }
 
-export const SUPERADMIN_SUBJECT = "superadmin";
+const SUPERADMIN_SUBJECT = "superadmin";
 
 /** Decide what password (if any) the superuser seed should apply this boot — the
  * heart of "no default superadmin password". Pure + side-effect-free so it is

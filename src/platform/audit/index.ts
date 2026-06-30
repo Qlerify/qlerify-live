@@ -15,7 +15,7 @@
 import { prisma } from "../../db.js";
 import { newId, sha256 } from "../ids.js";
 
-export interface AuditInput {
+interface AuditInput {
   organizationId: string;
   actorPrincipalId?: string | null;
   action: string;
@@ -107,7 +107,7 @@ export function recordAudit(input: AuditInput): Promise<{ seq: number; thisHash:
   });
 }
 
-export interface ChainVerification {
+interface ChainVerification {
   ok: boolean;
   length: number;
   brokenAtSeq?: number;

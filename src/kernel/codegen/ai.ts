@@ -43,7 +43,7 @@ export function buildLogicPrompt(d: CommandDescriptor): string {
   ].join("\n");
 }
 
-export async function regenerateLogic(commandName: string, bc: string): Promise<string> {
+async function regenerateLogic(commandName: string, bc: string): Promise<string> {
   const d = descriptorsForBoundedContext(bc).find((x) => x.commandName === commandName);
   if (!d) throw new Error(`command ${commandName} not found in bounded context ${bc}`);
 

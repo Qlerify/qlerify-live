@@ -21,7 +21,7 @@ import { currentWorkflowId, isSystemWorkflow } from "../../platform/tenancy/cont
 const JOURNAL_DIR = join(QLERIFY_DIR, "connector-journal");
 const MAX_NOTES = 100; // keep the doc bounded; oldest notes roll off
 
-export type ConnectorNoteKind =
+type ConnectorNoteKind =
   | "created" | "built" | "edited" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "note";
 
 export interface ConnectorNote {
@@ -37,7 +37,7 @@ export interface ConnectorDoc {
   updatedAt: string;
 }
 
-export interface ConnectorChat {
+interface ConnectorChat {
   id: string;
   messages: unknown[];     // Anthropic.MessageParam[] — opaque to this module
   updatedAt: string;

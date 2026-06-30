@@ -21,7 +21,7 @@ import { prisma } from "../../db.js";
 import { DomainError } from "../../errors.js";
 import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
 import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
-import { hashPassword } from "../authn/sessions.js";
+import { generatePassword, hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
 import { invalidateAnthropicCache, validateAnthropicKey } from "../../llm/anthropic.js";
 import { invalidateQlerifyCache, qlerifyMcpUrlFor } from "../../llm/qlerify.js";
@@ -115,6 +115,32 @@ export async function addMembership(identityId: string, organizationId: string) 
     decision: "allow",
   });
   return created;
+}
+
+/** Issue a fresh one-time password for a member identity (invite or admin reset).
+ * Sets a new scrypt hash + the must-change flag, and returns the PLAINTEXT exactly
+ * once for the admin to convey out-of-band — it is never stored in the clear nor
+ * written to the audit log. With the dev shim off in production, this is the only
+ * way an invited member gets a usable credential. */
+export async function issueMemberCredential(
+  identityId: string,
+  organizationId: string,
+  actorPrincipalId?: string | null,
+): Promise<string> {
+  const password = generatePassword();
+  await prisma.platIdentity.update({
+    where: { id: identityId },
+    data: { passwordHash: hashPassword(password), mustChangePassword: true },
+  });
+  await recordAudit({
+    organizationId,
+    actorPrincipalId: actorPrincipalId ?? null,
+    action: "identity.credential.issue",
+    targetRef: `identity:${identityId}`,
+    decision: "allow",
+    reason: "issued a temporary password (must be changed on first sign-in)", // never the plaintext
+  });
+  return password;
 }
 
 export async function createEnvironment(organizationId: string, name: string, region = "local") {
@@ -559,29 +585,74 @@ async function removeLegacySystemOrg(): Promise<void> {
 
 export const SUPERADMIN_SUBJECT = "superadmin";
 
+/** Decide what password (if any) the superuser seed should apply this boot — the
+ * heart of "no default superadmin password". Pure + side-effect-free so it is
+ * unit-tested in isolation. Rules:
+ *   - SUPERADMIN_PASSWORD set  ⇒ apply it (operator-controlled rotation on reboot).
+ *   - unset + no existing hash ⇒ mint a strong RANDOM one-time password (never the
+ *     literal "superadmin", never guessable).
+ *   - unset + existing hash    ⇒ change NOTHING (don't clobber a rotated password
+ *     on every reboot; don't reset it to a default).
+ * `plaintext` is returned ONLY when we set a password this boot (so the credentials
+ * file is written exactly then) — `hash` undefined means "leave it as-is". */
+export function resolveSuperadminCredential(opts: { envPassword?: string; existingHash?: string | null }): {
+  hash?: string;
+  plaintext?: string;
+  generated: boolean;
+} {
+  const env = (opts.envPassword ?? "").trim();
+  if (env) return { hash: hashPassword(env), plaintext: env, generated: false };
+  if (!opts.existingHash) {
+    const pw = generatePassword();
+    return { hash: hashPassword(pw), plaintext: pw, generated: true };
+  }
+  return { generated: false };
+}
+
 /** Seed the superuser: a global platform-admin identity with a password and NO org
  * membership — it is platform-scoped, not a tenant member (it reaches orgs via
- * break-glass, and owns the orgs it creates). Credentials are written to a
- * gitignored file for the operator. Password = SUPERADMIN_PASSWORD env, else a
- * default (change it). Re-applied each boot so the env override takes effect. */
+ * break-glass, and owns the orgs it creates). There is NO default password: the
+ * password comes from SUPERADMIN_PASSWORD, or a strong random one minted once on
+ * first boot and written to a gitignored file for the operator. An existing
+ * (possibly rotated) password is never overwritten on reboot. */
 async function seedSuperuser(): Promise<void> {
-  const password = process.env.SUPERADMIN_PASSWORD || "superadmin";
+  const existing = await prisma.platIdentity.findUnique({ where: { subject: SUPERADMIN_SUBJECT } });
+  const cred = resolveSuperadminCredential({ envPassword: process.env.SUPERADMIN_PASSWORD, existingHash: existing?.passwordHash });
+
+  // On create we MUST have a hash; resolveSuperadminCredential guarantees one when
+  // there is no existing identity (the `!existingHash` branch always mints one).
+  const createHash = cred.hash ?? hashPassword(generatePassword());
   const identity = await prisma.platIdentity.upsert({
     where: { subject: SUPERADMIN_SUBJECT },
-    update: { passwordHash: hashPassword(password) },
-    create: { id: newId(), subject: SUPERADMIN_SUBJECT, primaryEmail: null, status: "active", passwordHash: hashPassword(password) },
+    update: cred.hash ? { passwordHash: cred.hash } : {},
+    create: { id: newId(), subject: SUPERADMIN_SUBJECT, primaryEmail: null, status: "active", passwordHash: createHash },
   });
   await prisma.platPlatformAdmin.upsert({
     where: { identityId: identity.id },
     update: {},
     create: { identityId: identity.id },
   });
-  try {
-    writeFileSync(
-      join(QLERIFY_DIR, "superadmin.local.txt"),
-      `Qlerify Platform — superuser account\nusername: ${SUPERADMIN_SUBJECT}\npassword: ${password}\n\n(Set SUPERADMIN_PASSWORD to override. Change this before any non-firewalled deployment.)\n`,
-    );
-  } catch {
-    /* best-effort — the account still works regardless of the file */
+
+  // Write the credentials file ONLY when we set a password this boot — i.e. we know
+  // the plaintext. A reboot that leaves an existing password untouched keeps the
+  // file from the first boot (or none, if the operator removed it).
+  if (cred.plaintext) {
+    if (cred.generated && process.env.NODE_ENV === "production") {
+      console.warn(
+        `[seed] SUPERADMIN_PASSWORD is not set — generated a random superuser password. ` +
+          `Retrieve it from ${join(QLERIFY_DIR, "superadmin.local.txt")} and set SUPERADMIN_PASSWORD for a stable, file-free credential.`,
+      );
+    }
+    try {
+      writeFileSync(
+        join(QLERIFY_DIR, "superadmin.local.txt"),
+        `Qlerify Platform — superuser account\nusername: ${SUPERADMIN_SUBJECT}\npassword: ${cred.plaintext}\n` +
+          (cred.generated
+            ? `\n(Auto-generated because SUPERADMIN_PASSWORD was unset. Set that env var to control the password and stop writing this file.)\n`
+            : `\n(From SUPERADMIN_PASSWORD. Change it before any non-firewalled deployment.)\n`),
+      );
+    } catch {
+      /* best-effort — the account still works regardless of the file */
+    }
   }
 }

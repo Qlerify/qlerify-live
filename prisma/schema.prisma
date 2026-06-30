@@ -217,6 +217,11 @@ model PlatIdentity {
   // identity WITH a password can no longer be impersonated via the raw-subject
   // dev shim — it must present a real session token.
   passwordHash String?
+  // True when the current password is an admin-issued temporary one: the member
+  // must set their own before doing anything else (the client gates them into the
+  // change-password screen). Cleared once they change it. The superadmin's
+  // random/operator-set password is NOT a temp credential, so it stays false.
+  mustChangePassword Boolean @default(false)
   createdAt    DateTime @default(now())
 
   memberships  PlatOrgMembership[]

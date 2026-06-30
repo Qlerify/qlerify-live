@@ -21,6 +21,13 @@ RUN npm ci
 COPY . .
 RUN npx prisma generate
 
+# Production mode is intrinsic to the image, not just the Fly runtime [env]: this
+# is the security boundary that DISABLES the forgeable raw-subject / X-Identity
+# auth shim (src/platform/authn — in prod only a real session token authenticates).
+# MUST stay AFTER `npm ci` above, or npm would skip the devDeps (tsx, prisma CLI)
+# this image runs on. Prisma generate / db push / tsx are all NODE_ENV-agnostic.
+ENV NODE_ENV=production
+
 EXPOSE 3001
 
 # Entrypoint puts .qlerify + the SQLite db on the volume, applies the schema,

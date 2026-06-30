@@ -22,6 +22,15 @@ export function hashPassword(password: string): string {
   return `scrypt$${salt.toString("hex")}$${hash.toString("hex")}`;
 }
 
+/** A high-entropy, URL-safe one-time password for an issued credential (an
+ * admin-invited member, an admin reset, or the auto-seeded superuser when no
+ * SUPERADMIN_PASSWORD is set). 18 random bytes ≈ 144 bits, base64url ⇒ 24 chars,
+ * no ambiguous separators. NEVER persisted in plaintext or written to the audit
+ * log — the caller conveys it out-of-band exactly once. */
+export function generatePassword(): string {
+  return randomBytes(18).toString("base64url");
+}
+
 /** Constant-time-ish verify. Runs scrypt unconditionally (against a dummy salt
  * when `stored` is null/malformed) so a missing account is indistinguishable. */
 export function verifyPassword(password: string, stored: string | null | undefined): boolean {

@@ -29,6 +29,9 @@ const COLUMNS: ColumnUpgrade[] = [
   // Workstream C — actor kind on audit rows, so guardrail-block-rate can isolate
   // AI-originated denials.
   { table: "plat_audit_events", column: "actorKind", type: "TEXT" },
+  // Authentication-issuance increment — a member's admin-issued temp password must
+  // be changed on first use. NOT NULL DEFAULT 0 backfills every existing row.
+  { table: "plat_identities", column: "mustChangePassword", type: "BOOLEAN NOT NULL DEFAULT 0" },
 ];
 
 // Indexes are already idempotent via IF NOT EXISTS — no existence check needed.

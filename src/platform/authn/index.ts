@@ -7,12 +7,15 @@
 // is the membership row's org.
 //
 // Credential resolution, in order:
-//   1. Bearer <opaque session token>  (from /v1/auth/login) — the real path.
-//   2. Bearer <subject> / X-Identity-Subject — the forgeable DEV SHIM, allowed
-//      ONLY for non-privileged identities (no password, no platform-admin grant).
-//      A credentialed or superuser identity can NEVER be impersonated this way —
-//      it must present a real session token. This closes the "one env var = a
-//      forgeable god-token" hole the red-team flagged.
+//   1. Bearer <opaque session token>  (from /v1/auth/login) — the real path, and
+//      the ONLY path available in production.
+//   2. Bearer <subject> / X-Identity-Subject — the forgeable DEV SHIM. It is
+//      DISABLED in production (NODE_ENV === "production"): there, only a real
+//      session token authenticates. Outside production it is allowed ONLY for
+//      non-privileged identities (no password, no platform-admin grant) — a
+//      credentialed or superuser identity must always present a real session
+//      token. Together these close the "one header = a forgeable god-token" hole:
+//      the shim is a local-dev/test convenience that does not ship to prod.
 //   3. No credentials ⇒ REJECTED. There is no header-less demo default: every
 //      request must authenticate. The SYSTEM org remains control-plane plumbing
 //      (superuser home, non-request fallback, audit anchor) — never a login.
@@ -54,6 +57,13 @@ export async function isPlatformAdmin(identityId: string): Promise<boolean> {
   return !!(await prisma.platPlatformAdmin.findUnique({ where: { identityId } }));
 }
 
+/** The forgeable raw-subject / X-Identity-Subject shim is a local-dev/test
+ * convenience and is HARD-OFF in production. Read at call time (not module load)
+ * so a test can flip NODE_ENV around a single call. */
+function devShimEnabled(): boolean {
+  return process.env.NODE_ENV !== "production";
+}
+
 /** A credentialed or superuser identity must use a real session — never the
  * forgeable raw-subject dev shim. */
 async function devSubjectAllowed(identity: Identity): Promise<boolean> {
@@ -72,7 +82,10 @@ async function resolveIdentity(headers: AuthnHeaders): Promise<{ identity: Ident
       if (!identity || identity.status !== "active") throw new UnauthenticatedError("session identity is not active");
       return { identity, subject: identity.subject };
     }
-    // (2) Raw-subject dev shim — non-privileged identities only.
+    // (2) Raw-subject dev shim — OFF in production; non-privileged identities only.
+    // The token wasn't a live session, so in prod it can only be an invalid/expired
+    // credential (never a forgeable subject).
+    if (!devShimEnabled()) throw new UnauthenticatedError("invalid or expired credential");
     const identity = await prisma.platIdentity.findUnique({ where: { subject: tok } });
     if (!identity) throw new UnauthenticatedError("invalid or expired credential");
     if (identity.status !== "active") throw new UnauthenticatedError(`identity "${tok}" is not active`);
@@ -80,11 +93,12 @@ async function resolveIdentity(headers: AuthnHeaders): Promise<{ identity: Ident
     return { identity, subject: identity.subject };
   }
 
-  // (3) X-Identity-Subject dev shim (non-privileged identities only). No
-  // credentials at all ⇒ reject: there is no header-less demo default — every
-  // request must authenticate (org → workspace → workflow starts at sign-in).
+  // (3) X-Identity-Subject dev shim — OFF in production; non-privileged identities
+  // only. No credentials at all ⇒ reject: there is no header-less demo default —
+  // every request must authenticate (org → workspace → workflow starts at sign-in).
   const sub = header(headers, "x-identity-subject");
   if (!sub) throw new UnauthenticatedError("authentication required");
+  if (!devShimEnabled()) throw new UnauthenticatedError("authentication required");
   const identity = await prisma.platIdentity.findUnique({ where: { subject: sub } });
   if (!identity) throw new UnauthenticatedError(`unknown identity subject: ${sub}`);
   if (identity.status !== "active") throw new UnauthenticatedError(`identity "${sub}" is not active`);

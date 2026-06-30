@@ -1255,6 +1255,7 @@ async function onHashChange() {
   state.caseId = r.caseId ?? null;
   state.bc = r.bc ?? null;
   state.bcBusy = false; // never carry a stuck busy-flag across navigation
+  state.issuedCredential = null; // a one-time temp password never survives navigation
   // Leaving the Systems explorer hands the chat panel back to the Process
   // advisor (re-entering re-activates the table's connector thread).
   if (r.view !== "bcs") deactivateConnectorChat();
@@ -1272,6 +1273,17 @@ async function onHashChange() {
   // If a 401 during ensureMe() cleared the session and redirected us, render the
   // login screen now instead of flashing a frame of header-less content.
   if (location.hash === "#login") { state.view = "login"; render(); return; }
+
+  // A member signed in with an admin-issued temporary password is GATED here:
+  // they must set their own password before any org/workflow data loads. Survives
+  // a reload because whoami carries mustChangePassword (not just the login reply).
+  if (state.me && state.me.mustChangePassword) {
+    state.cpForced = true;
+    state.cpReturn = "#org";
+    state.view = "change-password";
+    render();
+    return;
+  }
 
   // Authenticated but not a member of any organisation yet (a fresh superadmin, or
   // a user whose last membership was removed) → the create-first-organisation
@@ -4896,6 +4908,12 @@ function renderView() {
     return;
   }
 
+  if (state.view === "change-password") {
+    root.innerHTML = changePasswordView();
+    bindChangePassword();
+    return;
+  }
+
   if (state.view === "no-org") {
     root.innerHTML = noOrgView();
     bindNoOrg();
@@ -5080,6 +5098,10 @@ function accountMenuPanel() {
         </div>
         ${isAdmin ? `<div class="mt-3 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2 text-[12px] leading-snug text-amber-800"><span class="shrink-0">⚡</span><span>You can act across every organization. Every cross-tenant action is audited.</span></div>` : ""}
       </div>
+      <button role="menuitem" id="acct-menu-password" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
+        <svg viewBox="0 0 20 20" fill="none" class="h-5 w-5 text-stone-500 shrink-0"><path d="M6 9V6.5a4 4 0 0 1 8 0V9M5 9h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="text-sm font-medium text-stone-800">Change password</span>
+      </button>
       <button role="menuitem" id="acct-menu-logout" class="w-full flex items-center gap-2.5 px-4 py-2.5 border-t border-stone-200 hover:bg-stone-50 text-left">
         <svg viewBox="0 0 20 20" fill="none" class="h-5 w-5 text-stone-500 shrink-0"><path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3H15a1.5 1.5 0 0 1 1.5 1.5v11A1.5 1.5 0 0 1 15 17H9.5A1.5 1.5 0 0 1 8 15.5V14M11 10H3m0 0l2.5-2.5M3 10l2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="text-sm font-medium text-stone-800">Sign out</span>
@@ -5521,6 +5543,14 @@ function bindTenantBar() {
   const dismissAcctMenu = () => { state.acctMenuOpen = false; render(); document.getElementById("acct-menu-btn")?.focus(); };
   document.getElementById("acct-menu-btn")?.addEventListener("click", () => { state.acctMenuOpen = !state.acctMenuOpen; render(); });
   document.getElementById("acct-menu-backdrop")?.addEventListener("click", dismissAcctMenu);
+  document.getElementById("acct-menu-password")?.addEventListener("click", () => {
+    state.acctMenuOpen = false;
+    state.cpForced = false;
+    state.cpError = null;
+    state.cpReturn = location.hash || "#org"; // return here on cancel/success
+    state.view = "change-password";
+    render();
+  });
   document.getElementById("acct-menu-logout")?.addEventListener("click", async () => {
     state.acctMenuOpen = false;
     try { await api("/v1/auth/logout", { method: "POST", body: "{}" }); } catch (_e) { /* ignore */ }
@@ -5872,6 +5902,63 @@ function bindLogin() {
   });
 }
 
+// --- Change password (forced first-use, or from the account menu) -----------
+// Full-screen card mirroring loginView. When `state.cpForced` (an admin-issued
+// temporary password) there is no escape — the member must set their own before
+// anything else loads. From the account menu it is cancellable.
+function changePasswordView() {
+  const forced = !!state.cpForced;
+  const err = state.cpError ? `<div class="text-sm text-rose-600 mb-3">${escapeHtml(state.cpError)}</div>` : "";
+  const intro = forced
+    ? `<div class="text-sm text-stone-500 mb-4">Your account uses a temporary password. Set your own to continue.</div>`
+    : `<div class="text-sm text-stone-500 mb-4">Update the password for <span class="font-medium">${escapeHtml(state.me?.subject || "")}</span>.</div>`;
+  const cancel = forced ? "" : `<button type="button" id="cp-cancel" class="w-full mt-2 rounded-md border border-stone-300 py-2 text-sm hover:bg-stone-50">Cancel</button>`;
+  return `
+    <div class="min-h-screen flex items-center justify-center bg-gradient-to-b from-stone-50 to-stone-100">
+      <form id="cp-form" class="w-80 rounded-xl border border-stone-200 bg-white p-6 shadow-sm">
+        <div class="flex items-center gap-2 mb-1"><span style="color:#50E593">${qlerifyMark("h-6 w-6")}</span><span class="text-lg font-semibold">Qlerify<span class="text-amber-500">·</span>Live</span></div>
+        <div class="text-base font-semibold text-stone-800 mb-1">Change password</div>
+        ${intro}
+        ${err}
+        <label class="block text-xs font-medium text-stone-600 mb-1">Current password</label>
+        <input id="cp-current" type="password" autocomplete="current-password" class="w-full mb-3 rounded-md border border-stone-300 px-3 py-2 text-sm" />
+        <label class="block text-xs font-medium text-stone-600 mb-1">New password</label>
+        <input id="cp-new" type="password" autocomplete="new-password" class="w-full mb-3 rounded-md border border-stone-300 px-3 py-2 text-sm" />
+        <label class="block text-xs font-medium text-stone-600 mb-1">Confirm new password</label>
+        <input id="cp-confirm" type="password" autocomplete="new-password" class="w-full mb-4 rounded-md border border-stone-300 px-3 py-2 text-sm" />
+        <button class="w-full rounded-md bg-stone-900 text-white py-2 text-sm font-medium hover:bg-stone-800">Update password</button>
+        ${cancel}
+      </form>
+    </div>`;
+}
+
+function bindChangePassword() {
+  document.getElementById("cp-cancel")?.addEventListener("click", () => {
+    state.cpError = null;
+    navigate(state.cpReturn || "#org");
+  });
+  document.getElementById("cp-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const currentPassword = document.getElementById("cp-current").value;
+    const newPassword = document.getElementById("cp-new").value;
+    const confirm = document.getElementById("cp-confirm").value;
+    state.cpError = null;
+    if (newPassword !== confirm) { state.cpError = "The new passwords don't match."; render(); return; }
+    if (newPassword.length < 10) { state.cpError = "New password must be at least 10 characters."; render(); return; }
+    try {
+      const r = await api("/v1/account/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
+      if (r.token) AUTH.setSession(r.token); // server revoked the old sessions; swap to the fresh token
+      state.cpForced = false;
+      state.cpError = null;
+      state.me = null; // re-fetch whoami — mustChangePassword is now false
+      navigate(state.cpReturn || "#org");
+    } catch (_err) {
+      state.cpError = "Couldn't update the password — check your current password.";
+      render();
+    }
+  });
+}
+
 // --- Org Admin page --------------------------------------------------------
 
 async function loadAdmin() {
@@ -5890,6 +5977,28 @@ async function loadAdmin() {
   ]);
   state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit, anthropic, qlerify };
   render();
+}
+
+// One-time display of a freshly issued temporary password (member invite or admin
+// reset). Held in state.issuedCredential, never refetched — cleared on dismiss or
+// any navigation, so the secret doesn't linger on screen.
+function issuedCredentialBanner() {
+  const c = state.issuedCredential;
+  if (!c) return "";
+  return `
+    <div class="mb-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="text-sm font-medium text-amber-900">Temporary password for <span class="mono">${escapeHtml(c.subject)}</span></div>
+          <div class="mt-1.5 flex items-center gap-2">
+            <code class="mono text-sm bg-white border border-amber-200 rounded px-2 py-1 select-all">${escapeHtml(c.password)}</code>
+            <button id="issued-copy" class="text-xs px-2 py-1 rounded border border-amber-300 text-amber-800 hover:bg-amber-100">Copy</button>
+          </div>
+          <div class="text-xs text-amber-700 mt-1.5">Shown once. Share it over a secure channel; the member must change it on first sign-in.</div>
+        </div>
+        <button id="issued-dismiss" aria-label="Dismiss" class="text-amber-700 hover:text-amber-900 text-lg leading-none">×</button>
+      </div>
+    </div>`;
 }
 
 const ADMIN_TABS = [["general", "General"], ["members", "Members"], ["roles", "Roles"], ["markings", "Markings"], ["environments", "Environments"], ["workspaces", "Workspaces"], ["workflows", "Workflows"], ["audit", "Audit log"]];
@@ -6046,14 +6155,17 @@ function adminTabContent(tab, a) {
       <td class="px-4 py-2 text-stone-600">${escapeHtml(m.primaryEmail || "—")}</td>
       <td class="px-4 py-2">${(m.roles || []).map(roleChip).join(" ") || '<span class="text-stone-400">—</span>'}</td>
       <td class="px-4 py-2 text-stone-500">${escapeHtml(m.status || "active")}</td>
+      <td class="px-4 py-2 text-right"><button data-reset-pw="${escapeHtml(m.identityId)}" data-reset-subject="${escapeHtml(m.subject)}" class="text-xs px-2 py-1 rounded border border-stone-300 text-stone-700 hover:bg-stone-50">Reset password</button></td>
     </tr>`).join("");
     return `
+      ${issuedCredentialBanner()}
       <div class="mb-4 flex items-end gap-2">
         <div><label class="block text-xs text-stone-500 mb-1">Username (IdP subject)</label><input id="m-subject" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="jane@corp" /></div>
         <div><label class="block text-xs text-stone-500 mb-1">Email</label><input id="m-email" class="rounded-md border border-stone-300 px-3 py-1.5 text-sm" placeholder="optional" /></div>
         <button id="m-add" class="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800">Add member</button>
       </div>
-      ${tbl(["Username", "Email", "Roles", "Status"], rows, "No members.")}`;
+      <div class="text-xs text-stone-500 mb-3">Inviting a member issues a one-time temporary password (shown once below). With single sign-on not yet configured, share it over a secure channel — the member changes it on first sign-in.</div>
+      ${tbl(["Username", "Email", "Roles", "Status", ""], rows, "No members.")}`;
   }
   if (tab === "roles") {
     const rows = (a.roles || []).map((r) => `<tr>
@@ -6160,17 +6272,39 @@ function adminTabContent(tab, a) {
 
 function bindAdmin() {
   document.querySelectorAll("[data-admin-tab]").forEach((el) => el.addEventListener("click", () => {
+    state.issuedCredential = null; // don't carry a one-time secret across tabs
     state.admin = { ...(state.admin || {}), tab: el.dataset.adminTab };
     render();
   }));
   const reload = () => loadAdmin();
   const act = async (fn) => { try { await fn(); await reload(); } catch (e) { alert(e.message); } };
 
-  document.getElementById("m-add")?.addEventListener("click", () => act(async () => {
-    const subject = document.getElementById("m-subject").value.trim();
-    if (!subject) throw new Error("Username is required");
-    await api("/v1/memberships", { method: "POST", body: JSON.stringify({ subject, email: document.getElementById("m-email").value.trim() || undefined }) });
+  // Invite a member: the server issues a one-time temporary password (when the
+  // identity has none yet). Capture it BEFORE reload so the banner can show it.
+  document.getElementById("m-add")?.addEventListener("click", async () => {
+    try {
+      const subject = document.getElementById("m-subject").value.trim();
+      if (!subject) throw new Error("Username is required");
+      const email = document.getElementById("m-email").value.trim() || undefined;
+      const r = await api("/v1/memberships", { method: "POST", body: JSON.stringify({ subject, email }) });
+      state.issuedCredential = r.temporaryPassword ? { subject, password: r.temporaryPassword } : null;
+      await reload();
+    } catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-reset-pw]").forEach((el) => el.addEventListener("click", async () => {
+    const identityId = el.dataset.resetPw;
+    const subject = el.dataset.resetSubject || identityId;
+    if (!confirm(`Reset the password for "${subject}"?\n\nTheir current password stops working immediately and a new temporary one is issued (shown once).`)) return;
+    try {
+      const r = await api(`/v1/members/${encodeURIComponent(identityId)}/reset-password`, { method: "POST", body: "{}" });
+      state.issuedCredential = r.temporaryPassword ? { subject, password: r.temporaryPassword } : null;
+      await reload();
+    } catch (e) { alert(e.message); }
   }));
+  document.getElementById("issued-copy")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(state.issuedCredential?.password || ""); } catch { /* clipboard blocked — the code stays selectable */ }
+  });
+  document.getElementById("issued-dismiss")?.addEventListener("click", () => { state.issuedCredential = null; render(); });
   document.getElementById("r-add")?.addEventListener("click", () => act(async () => {
     const principalId = document.getElementById("r-principal").value.trim();
     const scopeId = document.getElementById("r-scopeid").value.trim() || state.me?.organizationId;

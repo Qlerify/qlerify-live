@@ -9,7 +9,8 @@ import { prisma } from "../../db.js";
 import { AuthError, DomainError } from "../../errors.js";
 import { recordAudit, verifyAuditChain } from "../audit/index.js";
 import { isPlatformAdmin } from "../authn/index.js";
-import { createSession, revokeSession, verifyPassword } from "../authn/sessions.js";
+import { createSession, hashPassword, revokeSession, verifyPassword } from "../authn/sessions.js";
+import { loginRateLimiter } from "../authn/rate-limit.js";
 import { ensureAllowed } from "../authz.js";
 import { newId, SYSTEM_ORG_ID, SYSTEM_WORKFLOW_ID } from "../ids.js";
 import { authorize, resourceRef } from "../pdp/index.js";
@@ -24,6 +25,7 @@ import {
   deleteOrganization,
   deleteWorkflow,
   ensureIdentity,
+  issueMemberCredential,
   setOrgAnthropicConfig,
   setOrgQlerifyConfig,
   updateOrganization,
@@ -127,11 +129,15 @@ export function registerControlRoutes(app: FastifyInstance) {
   app.get("/v1/whoami", async (req, reply) => {
     try {
       const ctx = requireIdentity();
+      // Surfaced so a reload (not just the login response) re-gates a member who
+      // still owes a password change into the change-password screen.
+      const idRow = ctx.identityId ? await prisma.platIdentity.findUnique({ where: { id: ctx.identityId }, select: { mustChangePassword: true } }) : null;
       const common = {
         principal: ctx.principal,
         subject: ctx.subject,
         isPlatformAdmin: !!ctx.isPlatformAdmin,
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
+        mustChangePassword: !!idRow?.mustChangePassword,
         organizations: await accessibleOrgs(ctx),
         isSystemWorkflow: false, // no system workflow exists; kept for client compat
         systemWorkflowId: SYSTEM_WORKFLOW_ID, // sentinel; no real workflow carries it
@@ -166,6 +172,16 @@ export function registerControlRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as { subject?: string; password?: string };
     const subject = (body.subject ?? "").trim();
     const password = body.password ?? "";
+    const ip = req.ip || "unknown";
+
+    // Rate limit BEFORE any DB/scrypt work — a throttled attacker can't even probe.
+    const gate = loginRateLimiter.check(ip, subject);
+    if (gate.blocked) {
+      await recordAudit({ organizationId: SYSTEM_ORG_ID, action: "auth.login", decision: "deny", reason: `rate-limited login for "${subject}"` });
+      reply.header("Retry-After", String(gate.retryAfterSec));
+      return reply.code(429).send({ error: "RATE_LIMITED", message: "too many sign-in attempts — try again later" });
+    }
+
     const identity = subject ? await prisma.platIdentity.findUnique({ where: { subject } }) : null;
     // Always run scrypt (even for an unknown / passwordless subject) so login
     // timing never reveals whether an account exists. Passwordless identities
@@ -173,17 +189,52 @@ export function registerControlRoutes(app: FastifyInstance) {
     const pwOk = verifyPassword(password, identity?.passwordHash ?? null);
     const ok = !!identity && identity.status === "active" && !!identity.passwordHash && pwOk;
     if (!ok || !identity) {
+      loginRateLimiter.recordFailure(ip, subject);
       await recordAudit({ organizationId: SYSTEM_ORG_ID, action: "auth.login", decision: "deny", reason: `failed login for "${subject}"` });
       return reply.code(401).send({ error: "AUTH_ERROR", message: "invalid username or password" });
     }
+    loginRateLimiter.recordSuccess(ip, subject); // a real sign-in clears this subject's throttle
     const { token } = await createSession(identity.id, new Date());
     await recordAudit({ organizationId: SYSTEM_ORG_ID, actorPrincipalId: identity.id, action: "auth.login", decision: "allow", reason: `login "${subject}"` });
     const ctxLike = { organizationId: SYSTEM_ORG_ID, principal: { id: identity.id, type: "identity" as const }, identityId: identity.id, isPlatformAdmin: await isPlatformAdmin(identity.id) };
     return {
       token,
-      identity: { id: identity.id, subject: identity.subject, isPlatformAdmin: ctxLike.isPlatformAdmin },
+      // The client gates a must-change member into the change-password screen.
+      identity: { id: identity.id, subject: identity.subject, isPlatformAdmin: ctxLike.isPlatformAdmin, mustChangePassword: identity.mustChangePassword },
       organizations: await accessibleOrgs(ctxLike as any),
     };
+  });
+
+  // Self-service password change (authenticated — NOT under /v1/auth/*, so the
+  // tenant plugin binds the caller's identity first). Verifies the current
+  // password, sets a new one, clears the must-change flag, and rotates sessions:
+  // every other session for this identity is revoked and a fresh token issued, so
+  // a temp password that may have been seen by an admin (or a leaked old session)
+  // is dead the moment the member sets their own.
+  app.post("/v1/account/password", async (req, reply) => {
+    try {
+      const ctx = requireIdentity();
+      const body = (req.body ?? {}) as { currentPassword?: string; newPassword?: string };
+      const current = body.currentPassword ?? "";
+      const next = (body.newPassword ?? "").trim();
+      if (next.length < 10) throw new DomainError("new password must be at least 10 characters");
+      const identity = await prisma.platIdentity.findUnique({ where: { id: ctx.identityId } });
+      // 403 (not 401): the SESSION is valid, only the supplied current password is
+      // wrong — a 401 would make the client's api() wrapper force a full sign-out.
+      if (!identity || !verifyPassword(current, identity.passwordHash ?? null)) {
+        throw new AuthError("current password is incorrect");
+      }
+      if (verifyPassword(next, identity.passwordHash)) throw new DomainError("new password must differ from the current one");
+      await prisma.platIdentity.update({ where: { id: identity.id }, data: { passwordHash: hashPassword(next), mustChangePassword: false } });
+      // Kill all existing sessions for this identity, then mint a fresh one so the
+      // caller stays signed in on this device with a token the old password can't reach.
+      await prisma.platSession.updateMany({ where: { identityId: identity.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      const { token } = await createSession(identity.id, new Date());
+      await recordAudit({ organizationId: SYSTEM_ORG_ID, actorPrincipalId: identity.id, action: "identity.password.change", targetRef: `identity:${identity.id}`, decision: "allow", reason: "member changed their own password" });
+      return { ok: true, token };
+    } catch (err) {
+      return fail(reply, err);
+    }
   });
 
   app.post("/v1/auth/logout", async (req, reply) => {
@@ -329,8 +380,34 @@ export function registerControlRoutes(app: FastifyInstance) {
       if (!body.subject) throw new DomainError("subject is required");
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
       const identity = await ensureIdentity(body.subject, body.email ?? null);
+      // A member needs a credential to sign in (the dev shim is off in prod). Mint a
+      // one-time password ONLY when this identity has none yet — if they already have
+      // one (already a member elsewhere, or re-invited), don't reset it; they keep
+      // their existing credential and just gain this membership.
+      const temporaryPassword = identity.passwordHash ? undefined : await issueMemberCredential(identity.id, ctx.organizationId, ctx.principal.id);
       const membership = await addMembership(identity.id, ctx.organizationId);
-      return reply.code(201).send({ identityId: identity.id, organizationId: ctx.organizationId, membershipId: membership.id });
+      // temporaryPassword is returned to the admin EXACTLY once (to convey out-of-band);
+      // it is never stored in the clear nor audited.
+      return reply.code(201).send({ identityId: identity.id, organizationId: ctx.organizationId, membershipId: membership.id, temporaryPassword });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Admin reset: re-issue a one-time password for a member of THIS org (org-admin
+  // gated). The only recovery path with no email/SSO flow. Returns the plaintext
+  // once; the member must change it on next sign-in.
+  app.post("/v1/members/:id/reset-password", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const identityId = (req.params as { id: string }).id;
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      // The target must be a member of the caller's org — never reset an identity
+      // you can't see (no cross-org credential reset).
+      const membership = await prisma.platOrgMembership.findFirst({ where: { identityId, organizationId: ctx.organizationId } });
+      if (!membership) throw new DomainError("member not found in this organization");
+      const temporaryPassword = await issueMemberCredential(identityId, ctx.organizationId, ctx.principal.id);
+      return { ok: true, identityId, temporaryPassword };
     } catch (err) {
       return fail(reply, err);
     }

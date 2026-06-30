@@ -1223,7 +1223,14 @@ function parseHash() {
 }
 
 function navigate(hash) {
-  if (location.hash === hash) {
+  // The browser stores the bare/Overview hash as "" but callers pass "#", so a
+  // raw === miss the equality and take the else branch — where assigning
+  // location.hash = "#" gets collapsed back to "" by the browser, fires no
+  // hashchange event, and leaves onHashChange()/ensureMe() un-run (state stays
+  // stale, e.g. a freshly created org missing from the switcher). Normalise both
+  // sides so the "same view" case reliably triggers the manual reload below.
+  const norm = (h) => (h === "#" ? "" : h);
+  if (norm(location.hash) === norm(hash)) {
     // hash unchanged — manually trigger reload
     onHashChange();
   } else {

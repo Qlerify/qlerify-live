@@ -14,6 +14,7 @@ import { createAuthoredAdapter } from "../packs/adapters/authored.js";
 import { createSimulatedAdapter } from "../packs/adapters/simulated.js";
 import { adapterCfg, authorAdapterBody, resetAdapter, removeAdapter } from "../packs/author.js";
 import { getOntology } from "../ontology/model.js";
+import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import type { AdapterConfig, ProvMode } from "../packs/types.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -60,7 +61,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
       const abs = isAbsolute(cfg.bodyPath) ? cfg.bodyPath : join(ROOT, cfg.bodyPath);
       if (existsSync(abs)) { source = readFileSync(abs, "utf8"); exists = true; }
     }
-    return { id: cfg.id, kind: cfg.kind, bodyPath: cfg.bodyPath ?? null, source, exists, hasKey: !!process.env.ANTHROPIC_API_KEY };
+    return { id: cfg.id, kind: cfg.kind, bodyPath: cfg.bodyPath ?? null, source, exists, hasKey: (await resolveAnthropicStatus()).configured };
   });
 
   // Generate / repair the body with AI. Key-gated; stop-and-show — it writes a NEW
@@ -68,8 +69,8 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   app.post("/api/adapters/:id/code/generate", async (req, reply) => {
     const cfg = adapterCfg((req.params as any).id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return reply.code(400).send({ error: "NO_API_KEY", message: "ANTHROPIC_API_KEY not set — cannot author an adapter body" });
+    if (!(await resolveAnthropicStatus()).configured) {
+      return reply.code(400).send({ error: "NO_API_KEY", message: "No Anthropic key — set your organization's key in Organisation admin, or the platform ANTHROPIC_API_KEY in .env" });
     }
     const errorReport = (req.body as any)?.errorReport;
     try {

@@ -179,6 +179,11 @@ const state = {
   modelStatus: null,    // GET /v1/workflow/model/status → { versions, current, total, currentVersion, sourceUrl }
   modelContent: null,   // GET /v1/workflow/model/content → raw current workflow.json
   modelBusy: false,     // a restore/reload is in flight
+  // Global blocking loading overlay (dim scrim + spinner card). Ref-counted so
+  // nested shows (e.g. a workflow switch whose loader opens its own overlay)
+  // don't clear early; `active` is gated behind a short delay so quick ops don't
+  // flash a scrim. Emitted by wrap() → survives every innerHTML rebuild.
+  overlay: { count: 0, active: false, label: "", timer: null },
 };
 
 // --- Tenant auth/session (localStorage-backed) ------------------------------
@@ -872,17 +877,20 @@ function bindWorkflowModel() {
       state.projModelErr = "Paste a Qlerify model link (or upload/paste a workflow.json under Advanced)."; render(); return;
     }
     state.projModelBusy = true; state.projModelErr = null; render();
+    showOverlay("Loading model…");
     try {
       const res = await api("/v1/workflow/model", { method: "PUT", body: JSON.stringify(payload) });
       state.projModelOpen = false; state.projModelBusy = false; state.projModelText = ""; state.projModelUrl = "";
       state.modelMsg = { ok: true, text: "Workflow model updated — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
       await ensureMe();
-      onHashChange();
+      await onHashChange();
       setTimeout(() => { state.modelMsg = null; render(); }, 4000);
     } catch (e) {
       state.projModelBusy = false;
       state.projModelErr = (e && e.message) ? e.message : "Failed to set the model.";
       render();
+    } finally {
+      hideOverlay();
     }
   });
 }
@@ -1068,16 +1076,17 @@ function rebuildSummaryText(rebuild) {
 async function reloadWorkflowModel() {
   if (state.modelBusy) return;
   state.modelBusy = true; render();
+  showOverlay("Reloading model…");
   try {
     const res = await api("/v1/workflow/model/reload", { method: "POST", body: "{}" });
     state.modelMsg = { ok: true, text: "Reloaded the latest model from the source link — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
     await refreshModelPage();
     await ensureMe();
-    onHashChange();
+    await onHashChange();
   } catch (e) {
     state.modelMsg = { ok: false, text: (e && e.message) ? e.message : "Reload failed." };
   } finally {
-    state.modelBusy = false; render();
+    state.modelBusy = false; hideOverlay();
     setTimeout(() => { state.modelMsg = null; render(); }, 3000);
   }
 }
@@ -1086,16 +1095,17 @@ async function reloadWorkflowModel() {
 async function restoreWorkflowVersion(versionId) {
   if (state.modelBusy || !versionId) return;
   state.modelBusy = true; render();
+  showOverlay("Restoring model…");
   try {
     const res = await api("/v1/workflow/model/restore", { method: "POST", body: JSON.stringify({ versionId }) });
     state.modelMsg = { ok: true, text: "Restored that version — rebuilt this workflow." + rebuildSummaryText(res && res.rebuild) };
     await refreshModelPage();
     await ensureMe();
-    onHashChange();
+    await onHashChange();
   } catch (e) {
     state.modelMsg = { ok: false, text: (e && e.message) ? e.message : "Restore failed." };
   } finally {
-    state.modelBusy = false; render();
+    state.modelBusy = false; hideOverlay();
     setTimeout(() => { state.modelMsg = null; render(); }, 3000);
   }
 }
@@ -1133,6 +1143,60 @@ function modelToast() {
       ${escapeHtml(state.modelMsg.text)}
     </div>
   `;
+}
+
+// Global blocking loading overlay — a dim scrim + a centered spinner card with a
+// contextual label, shown while a long, server-synchronous op runs (model
+// load/rebuild, workflow/org switch, explorer data load/delete/refresh). Driven
+// purely by state.overlay and emitted from wrap(), so it reappears on every
+// render and the scrim blocks all clicks until the op finishes. Mirrors the
+// modelToast() pattern (return "" when inactive). z-[60] sits above dialogs
+// (z-50) and the toast (z-40).
+function overlayView() {
+  const o = state.overlay;
+  if (!o || o.count <= 0 || !o.active) return "";
+  return `
+    <div class="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center" role="status" aria-live="polite" aria-busy="true">
+      <div class="bg-white rounded-xl shadow-xl px-6 py-5 flex items-center gap-3">
+        <div class="w-6 h-6 border-2 border-stone-300 border-t-stone-700 rounded-full animate-spin"></div>
+        <div class="text-sm text-stone-700">${escapeHtml(o.label || "Working…")}</div>
+      </div>
+    </div>`;
+}
+
+// Show the loading overlay with `label`. Ref-counted: the first show (0→1) arms a
+// short delay so a sub-150ms op never flashes a scrim; nested shows just bump the
+// count and update the label.
+function showOverlay(label) {
+  const o = state.overlay;
+  o.label = label || "Working…";
+  o.count += 1;
+  if (o.count === 1 && !o.active && o.timer === null) {
+    o.timer = setTimeout(() => { o.timer = null; o.active = true; render(); }, 150);
+  }
+  render();
+}
+
+// Hide one level of the overlay. On the final hide (→0) cancel a still-pending
+// delay (so a quick op never shows) and clear the active scrim.
+function hideOverlay() {
+  const o = state.overlay;
+  o.count = Math.max(0, o.count - 1);
+  if (o.count === 0) {
+    if (o.timer !== null) { clearTimeout(o.timer); o.timer = null; }
+    o.active = false;
+    o.label = "";
+  }
+  render();
+}
+
+// Convenience wrapper: show the overlay for the duration of `fn`, clearing it
+// even if `fn` throws. The primary API for call sites; existing per-button busy
+// flags stay (they drive disabled state + button labels — the overlay is additive).
+async function withOverlay(label, fn) {
+  showOverlay(label);
+  try { return await fn(); }
+  finally { hideOverlay(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -2036,14 +2100,18 @@ async function selectExpEntity(name) {
   e.entity = name; e.page = 0; e.filters = []; e.busy = true;
   activateConnectorChat(e.system, name); // swap in this table's own connector thread
   render();
+  showOverlay("Loading data…"); // 150ms-delayed → quick table loads won't flash
   try {
-    const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(name)}&limit=300`);
-    e.items = d.rows || [];
-    e.tableMissing = !!d.tableMissing;
-  } catch (_err) { e.items = []; e.tableMissing = true; }
-  e.rowEvents = {}; // events belong to the previous table — drop them
-  e.rowEvents = await fetchRowEvents(e);
-  e.busy = false; render();
+    try {
+      const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(name)}&limit=300`);
+      e.items = d.rows || [];
+      e.tableMissing = !!d.tableMissing;
+    } catch (_err) { e.items = []; e.tableMissing = true; }
+    e.rowEvents = {}; // events belong to the previous table — drop them
+    e.rowEvents = await fetchRowEvents(e);
+  } finally {
+    e.busy = false; hideOverlay();
+  }
 }
 
 // Fetch the per-row event trail for the selected table: { rowId: [event, …] }.
@@ -2071,12 +2139,15 @@ async function expFetchRows() {
   const adapter = adapters[0];
   if (!confirm(`Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; rows with an id already in the table are skipped.`)) return;
   e.busy = true; render();
+  showOverlay("Refreshing data…");
   try {
     const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 1000 }) });
     await refreshExplorerAfterChat(); // re-pulls rows, adapters AND (if shown) the per-row events so the auto-derived events land in the ⚡ Events column
+    hideOverlay(); // drop the scrim before the blocking result alert
     const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
     alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}`);
   } catch (err) {
+    hideOverlay();
     alert("Fetch failed: " + err.message);
   } finally {
     e.busy = false; render();
@@ -2088,12 +2159,15 @@ async function expClearRows() {
   if (e.busy || !e.entity || !e.system) return;
   if (!confirm(`Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table AND the simulated events derived from it. Connectors are kept.`)) return;
   e.busy = true; render();
+  showOverlay("Deleting rows…");
   try {
     const r = await api(`/api/bc/${encodeURIComponent(e.system)}/clear`, { method: "POST", body: JSON.stringify({ entity: e.entity }) });
     await refreshExplorerAfterChat(); // re-pulls rows AND adapters so the new "cleared" note shows in the history
+    hideOverlay(); // drop the scrim before the blocking result alert
     const evt = r.eventsDeleted ? ` and ${r.eventsDeleted} derived event(s)` : "";
     alert(r.deleted ? `Deleted ${r.deleted} row(s)${evt} from ${e.entity}.` : `No rows to delete in ${e.entity}.`);
   } catch (err) {
+    hideOverlay();
     alert("Delete failed: " + err.message);
   } finally {
     e.busy = false; render();
@@ -2109,14 +2183,17 @@ async function expReimportAll() {
   if (e.busy) return;
   if (!confirm("Empty ALL base-data tables and the entire event log, then reimport the base data from every configured connector?\n\nThis clears every ingested row and derived event across all systems, then re-pulls each connector from its source. Connectors and the model are kept.")) return;
   e.busy = true; render();
+  showOverlay("Resetting & reimporting…");
   try {
     const r = await api("/api/data/reimport-all", { method: "POST", body: JSON.stringify({ limit: 1000 }) });
     await refreshExplorerAfterChat();
     try { e.health = await api("/api/bc/health"); } catch (_e) { /* keep prior */ } // refresh status dots even if no table is selected
+    hideOverlay(); // drop the scrim before the blocking result alert
     const ev = r.derived ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
     const failed = r.failures && r.failures.length ? `\nConnectors that failed: ${r.failures.length} (${r.failures.map((f) => f.id).join(", ")})` : "";
     alert(`Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}`);
   } catch (err) {
+    hideOverlay();
     alert("Reset & reimport failed: " + err.message);
   } finally {
     e.busy = false; render();
@@ -2136,11 +2213,14 @@ async function expDeleteConnector(id) {
     `The connector is removed — you would build a new one from scratch. This cannot be undone.`,
   )) return;
   e.busy = true; render();
+  showOverlay("Deleting connector…");
   try {
     const r = await api(`/api/bc/${encodeURIComponent(e.system)}/connector/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" });
     await refreshExplorerAfterChat(); // connector is gone → card disappears, table empties
+    hideOverlay(); // drop the scrim before the blocking result alert
     alert(`Connector "${id}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s), plus its code, credentials, and history.`);
   } catch (err) {
+    hideOverlay();
     alert("Delete failed: " + err.message);
   } finally {
     e.busy = false; render();
@@ -4761,7 +4841,7 @@ function renderView() {
   // Every main view is wrapped with the tenant shell (scope bar + workflow
   // section tabs) so the whole app reads as a multi-tenant console.
   const shell = () => `${tenantBar()}${sectionBar()}`;
-  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${shell()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${newOrgDialog()}${newWfDialog()}`;
+  const wrap = (inner) => `<div class="${mainShiftCls} flex flex-col min-h-screen transition-[margin-right] duration-200">${shell()}${registryBanner()}${inner}</div>${chatPanel()}${modelToast()}${newOrgDialog()}${newWfDialog()}${overlayView()}`;
 
   if (state.view === "login") {
     root.innerHTML = loginView();
@@ -5445,6 +5525,7 @@ function bindTenantBar() {
       state.newWfErr = "A model is required — paste a Qlerify link (or upload/paste a workflow.json under Advanced)."; render(); return;
     }
     state.newWfBusy = true; state.newWfErr = null; render();
+    showOverlay("Creating workflow…");
     try {
       const wss = await api("/v1/workspaces");
       const workspaceId = (wss[0] || {}).id;
@@ -5458,6 +5539,8 @@ function bindTenantBar() {
       state.newWfBusy = false;
       state.newWfErr = (e && e.message) ? e.message : "Failed to create the workflow.";
       render();
+    } finally {
+      hideOverlay();
     }
   };
   // --- Workflow menu (switcher dropdown: all / switch / create) ---------------
@@ -5475,11 +5558,13 @@ function bindTenantBar() {
     const id = el.getAttribute("data-wf-pick");
     state.wfMenuOpen = false;
     if (id === AUTH.workflow()) { render(); return; }
-    AUTH.setWorkflow(id);
-    state.me = null;
-    await ensureMe();
-    if (state.view === "org" || (location.hash || "").startsWith("#org")) navigate("#");
-    else onHashChange();
+    await withOverlay("Loading workflow…", async () => {
+      AUTH.setWorkflow(id);
+      state.me = null;
+      await ensureMe();
+      if (state.view === "org" || (location.hash || "").startsWith("#org")) navigate("#");
+      else await onHashChange();
+    });
   }));
   const openCreateWorkflow = () => {
     state.wfMenuOpen = false;
@@ -5522,13 +5607,15 @@ function bindTenantBar() {
   });
   document.getElementById("org-menu-backdrop")?.addEventListener("click", dismissOrgMenu);
   document.getElementById("org-menu-admin")?.addEventListener("click", () => { state.orgMenuOpen = false; navigate("#admin"); });
-  document.querySelectorAll("[data-org-pick]").forEach((el) => el.addEventListener("click", () => {
+  document.querySelectorAll("[data-org-pick]").forEach((el) => el.addEventListener("click", async () => {
     const id = el.getAttribute("data-org-pick");
     state.orgMenuOpen = false;
     if (id === (state.me?.organizationId || "")) { render(); return; }
-    AUTH.setOrg(id); // also clears the selected workflow
     state.orgMemberCount = null; state.orgMemberCountFor = null; // invalidate the cached subtitle for the new org
-    onHashChange(); // reloads whoami + the current view for the newly selected org
+    await withOverlay("Switching organisation…", async () => {
+      AUTH.setOrg(id); // also clears the selected workflow
+      await onHashChange(); // reloads whoami + the current view for the newly selected org
+    });
   }));
   document.getElementById("org-menu-create")?.addEventListener("click", () => {
     state.orgMenuOpen = false;
@@ -5742,7 +5829,8 @@ function bindLogin() {
 
 async function loadAdmin() {
   const tab = state.admin?.tab || "general";
-  const [members, roles, markings, environments, workspaces, workflows, audit] = await Promise.all([
+  const orgId = state.me?.organizationId;
+  const [members, roles, markings, environments, workspaces, workflows, audit, anthropic] = await Promise.all([
     api("/v1/members").catch(() => []),
     api("/v1/role-assignments").catch(() => []),
     api("/v1/markings").catch(() => []),
@@ -5750,8 +5838,9 @@ async function loadAdmin() {
     api("/v1/workspaces").catch(() => []),
     api("/v1/workflows").catch(() => []),
     api("/v1/audit?limit=60").catch(() => []),
+    orgId ? api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`).catch(() => null) : Promise.resolve(null),
   ]);
-  state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit };
+  state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit, anthropic };
   render();
 }
 
@@ -5788,6 +5877,50 @@ function roleChip(k) {
   return `<span class="text-[11px] px-1.5 py-px rounded ${tone}">${escapeHtml(k)}</span>`;
 }
 
+// A handful of current Claude models the org can pin (empty = platform default).
+// Keep IDs exact — they're validated against the Anthropic API on save.
+const ANTHROPIC_MODELS = [
+  ["", "Platform default"],
+  ["claude-opus-4-8", "Claude Opus 4.8 — most capable Opus"],
+  ["claude-sonnet-4-6", "Claude Sonnet 4.6 — balanced (default)"],
+  ["claude-haiku-4-5", "Claude Haiku 4.5 — fastest / cheapest"],
+  ["claude-fable-5", "Claude Fable 5 — most powerful"],
+];
+
+// General-tab card: bring-your-own Anthropic account. `llm` is the masked status
+// from GET /v1/organizations/:id/anthropic-config (never the raw key).
+function anthropicCard(llm) {
+  const usingOrg = !!llm && llm.source === "org";
+  const status = !llm
+    ? `<span class="text-stone-400">checking…</span>`
+    : usingOrg
+    ? `Using <b>your organisation's key</b> <span class="mono">${escapeHtml(llm.hint || "")}</span>${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}`
+    : llm.configured
+    ? `Using the <b>platform default</b> key${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}`
+    : `<span class="text-rose-600">No key configured — AI features are disabled until a key is set.</span>`;
+  // Pre-select the org's saved model; surface a legacy/custom value not in the list.
+  const curModel = usingOrg && llm.model ? llm.model : "";
+  const models = ANTHROPIC_MODELS.some(([v]) => v === curModel) ? ANTHROPIC_MODELS : [...ANTHROPIC_MODELS, [curModel, `${curModel} (custom)`]];
+  const modelOpts = models
+    .map(([v, label]) => `<option value="${escapeHtml(v)}"${v === curModel ? " selected" : ""}>${escapeHtml(label)}</option>`)
+    .join("");
+  return `
+        <div class="rounded-lg border border-stone-200 bg-white p-5">
+          <div class="text-sm font-semibold text-stone-900">AI · Anthropic account</div>
+          <div class="text-xs text-stone-500 mt-0.5 mb-3">Plug in your own Anthropic API key so this organisation's AI features (chat assistant, code &amp; connector generation) run on — and are billed to — your own account. The key is stored encrypted; only a masked preview is ever shown. Leave unset to use the platform default.</div>
+          <div class="text-xs text-stone-700 mb-3 rounded-md bg-stone-50 border border-stone-200 px-3 py-2">Status: ${status}</div>
+          <label class="block text-xs text-stone-500 mb-1">Anthropic API key</label>
+          <input id="anthropic-key" type="password" autocomplete="off" placeholder="${usingOrg ? "Enter a new key to replace the current one" : "sk-ant-…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" />
+          <label class="block text-xs text-stone-500 mb-1">Model <span class="text-stone-400">(optional)</span></label>
+          <select id="anthropic-model" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3 bg-white">${modelOpts}</select>
+          <div class="flex items-center gap-2">
+            <button id="anthropic-save" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save key</button>
+            ${usingOrg ? `<button id="anthropic-clear" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Revert to platform default</button>` : ""}
+          </div>
+          <div id="anthropic-msg" class="text-xs mt-2"></div>
+        </div>`;
+}
+
 function adminTabContent(tab, a) {
   if (tab === "general") {
     const curOrg = (state.orgs || []).find((o) => o.id === state.me?.organizationId) || {};
@@ -5821,6 +5954,7 @@ function adminTabContent(tab, a) {
           <div id="org-name-msg" class="text-xs mt-2"></div>
           ${isSystem ? `<div class="text-xs text-stone-400 mt-1">The system organisation can't be renamed.</div>` : ""}
         </div>
+        ${anthropicCard(a.anthropic)}
         <div class="rounded-lg border border-rose-300 bg-rose-50/40 p-5">
           <div class="text-sm font-semibold text-rose-800">Danger zone</div>
           <div class="text-xs text-rose-700 mt-0.5 mb-3">Deleting this organisation permanently removes all of its workflows, models, data, members, and history. This action cannot be undone.</div>
@@ -6025,6 +6159,37 @@ function bindAdmin() {
       setMsg("text-emerald-700", `Renamed to "${updated.name}".`);
     } catch (e) {
       setMsg("text-rose-600", e.message);
+    }
+  });
+
+  // --- General tab: per-org Anthropic key -----------------------------------
+  const anthropicMsg = (cls, html) => { const m = document.getElementById("anthropic-msg"); if (m) { m.className = `text-xs mt-2 ${cls}`; m.innerHTML = html; } };
+  document.getElementById("anthropic-save")?.addEventListener("click", async () => {
+    const apiKey = (document.getElementById("anthropic-key")?.value || "").trim();
+    const model = (document.getElementById("anthropic-model")?.value || "").trim();
+    if (!apiKey) { anthropicMsg("text-rose-600", "Enter an API key."); return; }
+    anthropicMsg("text-stone-400", "Validating key with Anthropic…");
+    const btn = document.getElementById("anthropic-save"); if (btn) btn.disabled = true;
+    try {
+      const orgId = state.me?.organizationId;
+      const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`, { method: "PUT", body: JSON.stringify({ apiKey, model: model || undefined }) });
+      await loadAdmin(); // repaints the card with the new masked status
+      anthropicMsg("text-emerald-700", `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>${r.model ? ` · model <span class="mono">${escapeHtml(r.model)}</span>` : ""}.`);
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      anthropicMsg("text-rose-600", escapeHtml(e.message));
+    }
+  });
+  document.getElementById("anthropic-clear")?.addEventListener("click", async () => {
+    if (!confirm("Revert to the platform default Anthropic key? Your organisation's key will be removed.")) return;
+    anthropicMsg("text-stone-400", "Reverting…");
+    try {
+      const orgId = state.me?.organizationId;
+      await api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`, { method: "PUT", body: JSON.stringify({ clear: true }) });
+      await loadAdmin();
+      anthropicMsg("text-emerald-700", "Reverted to the platform default key.");
+    } catch (e) {
+      anthropicMsg("text-rose-600", escapeHtml(e.message));
     }
   });
 

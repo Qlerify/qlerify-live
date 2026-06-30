@@ -27,6 +27,7 @@ import { prisma } from "../db.js";
 import { EVENTS, events, registryError } from "../events/registry.js";
 import { ontologyView, getOntology } from "../ontology/model.js";
 import { runAgentTurn } from "../chat/agent.js";
+import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
 import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
@@ -313,13 +314,20 @@ export function registerRoutes(app: FastifyInstance) {
   registerOrgRoutes(app);
 
   // ---------------- Chat assistant ----------------
-  app.get("/chat/info", async () => ({
-    model: process.env.CHAT_MODEL ?? "claude-sonnet-4-6",
-    effort: process.env.CHAT_EFFORT ?? "medium",
-    apiKeyConfigured: !!process.env.ANTHROPIC_API_KEY,
-    systemPrompt: systemPromptSize(),
-    toolCount: TOOLS.length,
-  }));
+  app.get("/chat/info", async () => {
+    // Per-org aware: an org's own key (set in Organisation admin) overrides the
+    // platform default. `source`/`keyHint` let the UI show which is in use.
+    const llm = await resolveAnthropicStatus();
+    return {
+      model: llm.model,
+      effort: process.env.CHAT_EFFORT ?? "medium",
+      apiKeyConfigured: llm.configured,
+      keySource: llm.source,
+      keyHint: llm.hint,
+      systemPrompt: systemPromptSize(),
+      toolCount: TOOLS.length,
+    };
+  });
 
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as { messages?: unknown };

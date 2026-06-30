@@ -96,6 +96,12 @@ model PlatOrganization {
   // BYOK/CMK config slot (§13) — key REFERENCES only, never key material. Off in inc 1.
   kekReference      String?
   byokEnabled       Boolean  @default(false)
+  // Per-org Anthropic account (BYOK for the LLM, distinct from the §13 KEK slot above).
+  // The key is stored encrypted at rest (AES-256-GCM via src/platform/secrets/secret-box.ts);
+  // only the masked hint is ever returned to the client. Null on all three = use platform default.
+  anthropicKeyCiphertext String?   // "gcm$<ivHex>$<tagHex>$<ctHex>"
+  anthropicKeyHint       String?   // masked preview, e.g. "sk-ant-…ab12"
+  anthropicModel         String?   // optional model-id override; null = platform default
   createdAt         DateTime @default(now())
 
   customerAccount   PlatCustomerAccount @relation(fields: [customerAccountId], references: [id])

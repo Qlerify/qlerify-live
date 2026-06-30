@@ -11,10 +11,10 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { getOntology, type EntitySchema } from "../../ontology/model.js";
+import { getAnthropicClient } from "../../llm/anthropic.js";
 import type { AdapterConfig } from "../types.js";
 import { denyScan } from "./deny-scan.js";
 
-const MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export function sha256(s: string): string {
@@ -109,12 +109,11 @@ export interface GenerateResult extends WriteBodyResult {
 export async function generateAdapterBody(cfg: AdapterConfig, errorReport?: string): Promise<GenerateResult> {
   const entity = getOntology().entity(cfg.targetEntity);
   if (!entity) throw new Error(`entity "${cfg.targetEntity}" not in the loaded model`);
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set — cannot author an adapter body");
 
   const prompt = buildAdapterPrompt(cfg, entity) + (errorReport ? `\n\nThe previous body failed. Fix it. Error + trace (secrets redacted):\n${errorReport}` : "");
-  const client = new Anthropic();
+  const { client, model } = await getAnthropicClient();
   const res = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 2048,
     system: "You write a single TypeScript module (an adapter body). Output only code, no markdown fences, no prose.",
     messages: [{ role: "user", content: prompt }],

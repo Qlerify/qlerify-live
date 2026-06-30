@@ -23,6 +23,8 @@ import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
 import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
 import { hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
+import { invalidateAnthropicCache, validateAnthropicKey } from "../../llm/anthropic.js";
+import { encryptSecret, maskSecret } from "../secrets/secret-box.js";
 import { SYSTEM_ORG_ID, SYSTEM_STACK_ID, SYSTEM_WORKFLOW_ID, newId, slugify } from "../ids.js";
 import type { BuiltinRoleKey, PrincipalType, ScopeType } from "../types.js";
 
@@ -302,6 +304,66 @@ export async function updateOrganization(
     reason: `renamed "${org.name}" → "${name}"`,
   });
   return { id: updated.id, name: updated.name, slug: updated.slug, homeRegion: updated.homeRegion, status: updated.status };
+}
+
+export interface OrgAnthropicStatus {
+  configured: boolean;
+  source: "org" | "platform";
+  hint: string | null;
+  model: string | null;
+}
+
+/** Set (or clear) the organization's own Anthropic account. The key is
+ * validated against the API before it is stored (a bad key is rejected, never
+ * persisted), then encrypted at rest — only a masked hint is kept readable. The
+ * raw key never leaves this function and is NEVER written to the audit log. */
+export async function setOrgAnthropicConfig(
+  organizationId: string,
+  patch: { apiKey?: string; model?: string; clear?: boolean },
+  actorPrincipalId?: string | null,
+): Promise<OrgAnthropicStatus> {
+  const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
+  if (!org) throw new DomainError("organization not found");
+
+  if (patch.clear) {
+    await prisma.platOrganization.update({
+      where: { id: organizationId },
+      data: { anthropicKeyCiphertext: null, anthropicKeyHint: null, anthropicModel: null },
+    });
+    invalidateAnthropicCache(organizationId);
+    await recordAudit({
+      organizationId,
+      actorPrincipalId: actorPrincipalId ?? null,
+      action: "organization.anthropicKey.clear",
+      targetRef: `organization:${organizationId}`,
+      decision: "allow",
+      reason: "reverted to platform default Anthropic key",
+    });
+    return { configured: false, source: "platform", hint: null, model: null };
+  }
+
+  const apiKey = (patch.apiKey ?? "").trim();
+  if (!apiKey) throw new DomainError("apiKey is required");
+  const model = (patch.model ?? "").trim() || null;
+
+  await validateAnthropicKey(apiKey, model ?? undefined);
+
+  const hint = maskSecret(apiKey);
+  await prisma.platOrganization.update({
+    where: { id: organizationId },
+    data: { anthropicKeyCiphertext: encryptSecret(apiKey), anthropicKeyHint: hint, anthropicModel: model },
+  });
+  invalidateAnthropicCache(organizationId);
+  await recordAudit({
+    organizationId,
+    actorPrincipalId: actorPrincipalId ?? null,
+    action: "organization.anthropicKey.set",
+    targetRef: `organization:${organizationId}`,
+    decision: "allow",
+    // key hint + model ONLY — never the raw key (audit rows are readable via /v1/audit).
+    reason: `set organization Anthropic key ${hint}${model ? ` · model ${model}` : ""}`,
+  });
+  return { configured: true, source: "org", hint, model };
 }
 
 /** Delete an organization and CASCADE everything it owns. Irreversible.

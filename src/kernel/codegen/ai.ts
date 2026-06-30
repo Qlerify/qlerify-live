@@ -13,8 +13,8 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { descriptorsForBoundedContext, type CommandDescriptor } from "./introspect.js";
 import { getOntology } from "../../ontology/model.js";
+import { getAnthropicClient } from "../../llm/anthropic.js";
 
-const MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, "..", "..", "..");
 
@@ -46,11 +46,12 @@ export function buildLogicPrompt(d: CommandDescriptor): string {
 export async function regenerateLogic(commandName: string, bc: string): Promise<string> {
   const d = descriptorsForBoundedContext(bc).find((x) => x.commandName === commandName);
   if (!d) throw new Error(`command ${commandName} not found in bounded context ${bc}`);
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set — cannot regenerate AI logic");
 
-  const client = new Anthropic();
+  // CLI-invoked (no request/org context) → the resolver falls back to the
+  // platform ANTHROPIC_API_KEY; it throws a clear error if that is unset too.
+  const { client, model } = await getAnthropicClient();
   const res = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 2048,
     system: "You write a single TypeScript module. Output only code, no markdown fences, no prose.",
     messages: [{ role: "user", content: buildLogicPrompt(d) }],

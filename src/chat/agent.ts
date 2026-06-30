@@ -6,22 +6,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_BLOCKS } from "./system-prompt.js";
 import { TOOLS, runTool } from "./tools.js";
+import { getAnthropicClient } from "../llm/anthropic.js";
 
-const MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 const EFFORT = (process.env.CHAT_EFFORT ?? "medium") as "low" | "medium" | "high";
 // Headroom for the connector build→test→repair→ingest loop (each is a tool turn).
 const MAX_ITERATIONS = 14;
-
-let _client: Anthropic | null = null;
-function client(): Anthropic {
-  if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error("ANTHROPIC_API_KEY not set — copy .env.example to .env and fill it in, then restart the server.");
-    }
-    _client = new Anthropic();
-  }
-  return _client;
-}
 
 export interface ChatTurnResult {
   messages: Anthropic.MessageParam[];
@@ -40,10 +29,14 @@ export async function runAgentTurn(messages: Anthropic.MessageParam[]): Promise<
   const toolCalls: ChatTurnResult["toolCalls"] = [];
   const usage = { cacheCreationInputTokens: 0, cacheReadInputTokens: 0, inputTokens: 0, outputTokens: 0, iterations: 0 };
 
+  // Resolve once per turn — the org's own key (or the platform default) — and
+  // reuse the same client + model across every iteration of the agentic loop.
+  const { client, model } = await getAnthropicClient();
+
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     usage.iterations++;
-    const response = await client().messages.create({
-      model: MODEL,
+    const response = await client.messages.create({
+      model,
       max_tokens: 4096,
       thinking: { type: "adaptive" },
       output_config: { effort: EFFORT },

@@ -24,8 +24,10 @@ import {
   deleteOrganization,
   deleteWorkflow,
   ensureIdentity,
+  setOrgAnthropicConfig,
   updateOrganization,
 } from "../provisioning/index.js";
+import { resolveAnthropicStatus } from "../../llm/anthropic.js";
 import { requireIdentity, requireTenant, runWithTenant } from "../tenancy/context.js";
 import { applyWorkflowModel } from "../../twin/apply.js";
 import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
@@ -226,6 +228,34 @@ export function registerControlRoutes(app: FastifyInstance) {
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
       const body = (req.body ?? {}) as { name?: string };
       return await updateOrganization(ctx.organizationId, { name: body.name }, ctx.principal.id);
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Per-org Anthropic account (BYOK). The masked status only — never the key.
+  app.get("/v1/organizations/:id/anthropic-config", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const id = (req.params as { id: string }).id;
+      if (id !== ctx.organizationId) throw new DomainError("you can only read the organization you are signed into");
+      await assertOrgAdmin(ctx);
+      return await resolveAnthropicStatus();
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // Set or clear the current org's own Anthropic key + optional model override.
+  // Org-admin gated; validate-on-save rejects a bad key; response is masked.
+  app.put("/v1/organizations/:id/anthropic-config", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const id = (req.params as { id: string }).id;
+      if (id !== ctx.organizationId) throw new DomainError("you can only modify the organization you are signed into");
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const body = (req.body ?? {}) as { apiKey?: string; model?: string; clear?: boolean };
+      return await setOrgAnthropicConfig(ctx.organizationId, body, ctx.principal.id);
     } catch (err) {
       return fail(reply, err);
     }

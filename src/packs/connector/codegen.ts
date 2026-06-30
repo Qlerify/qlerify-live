@@ -7,9 +7,8 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { EntitySchema } from "../../ontology/model.js";
+import { getAnthropicClient } from "../../llm/anthropic.js";
 import { scanImports } from "./runtime.js";
-
-const MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 
 export interface ConnectorGenInput {
   /** The model kind the connector must produce rows for. */
@@ -145,10 +144,9 @@ export function buildDescribePrompt(input: ConnectorDescribeInput): string {
 /** Key-gated: document a built connector. Returns one short factual paragraph.
  * Throws on no key / empty output so the caller can fall back deterministically. */
 export async function describeConnector(input: ConnectorDescribeInput): Promise<string> {
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set — cannot describe a connector");
-  const client = new Anthropic();
+  const { client, model } = await getAnthropicClient();
   const res = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 512,
     system: "You write one short, factual paragraph documenting a data connector for an operator. Plain text only: no markdown, no preamble, no bullet points.",
     messages: [{ role: "user", content: buildDescribePrompt(input) }],
@@ -244,7 +242,6 @@ function validRole(name: string | undefined, candidates: string[]): string | und
  * candidate timestamp fields. Best-effort — returns {} on no key, a parse failure,
  * or any error, so the caller keeps the heuristic. Never throws. */
 async function classifyDateRolesAI(input: DateRolesInput, candidates: string[]): Promise<DateRoles> {
-  if (!process.env.ANTHROPIC_API_KEY) return {};
   const prompt = [
     `A data connector populates the table "${input.target.name}". Some of its columns may be timestamps the SOURCE records: when the record was first CREATED, and when it was LAST MODIFIED.`,
     ``,
@@ -256,9 +253,11 @@ async function classifyDateRolesAI(input: DateRolesInput, candidates: string[]):
     `Respond with ONLY a JSON object, no prose: {"created": "<column or null>", "updated": "<column or null>"}.`,
   ].join("\n");
   try {
-    const client = new Anthropic();
+    // Best-effort: a missing key (no org key + no platform default) makes the
+    // resolver throw, which the catch turns into {} so the heuristic stands.
+    const { client, model } = await getAnthropicClient();
     const res = await client.messages.create({
-      model: MODEL,
+      model,
       max_tokens: 128,
       system: "You classify timestamp columns for a data connector. Output only a single JSON object.",
       messages: [{ role: "user", content: prompt }],
@@ -300,11 +299,10 @@ export async function proposeDateRoles(input: DateRolesInput): Promise<DateRoles
 /** Key-gated: author (or repair) a connector module. Returns the ESM source and
  * the npm packages it imports. No file I/O here — the caller persists. */
 export async function generateConnectorModule(input: ConnectorGenInput): Promise<ConnectorGenResult> {
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set — cannot author a connector");
   const prompt = buildConnectorPrompt(input);
-  const client = new Anthropic();
+  const { client, model } = await getAnthropicClient();
   const res = await client.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 4096,
     system: "You write a single ESM JavaScript module — a data connector. Output only the module source: no markdown fences, no prose.",
     messages: [{ role: "user", content: prompt }],

@@ -50,7 +50,7 @@ export async function buildServer() {
     }
     const status = (err as any)?.statusCode ?? 500;
     if (status >= 500) req.log.error({ err }, "unhandled error"); // keep Fastify's default observability
-    return reply.code(status).send({ error: (err as any)?.code ?? "INTERNAL", message: err.message });
+    return reply.code(status).send({ error: (err as any)?.code ?? "INTERNAL", message: (err as any)?.message });
   });
 
   registerRoutes(app);

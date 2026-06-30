@@ -277,7 +277,12 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
     await ev2(aRisk, "DemandCreated", D0);
     await ev2(aRisk, "DemandPlanned", at(D0, 5));
     // Predicted-late: just started; commitment 1 day out, but ~2 expected days remain.
-    await ev2(pLate, "DemandCreated", now, { payload: { dueDate: at(now, 1).toISOString().slice(0, 10) } });
+    // Anchor businessAt to midnight UTC so the projected finish (businessAt + 2 whole
+    // baseline days) lands an exact day past the date-only dueDate — otherwise the
+    // round() in slip = daysBetween(due, predicted) flips 1→2 once now's UTC time
+    // passes noon, making the slipDays assertion time-of-day flaky.
+    const today0 = new Date(now.toISOString().slice(0, 10));
+    await ev2(pLate, "DemandCreated", today0, { payload: { dueDate: at(today0, 1).toISOString().slice(0, 10) } });
     // On-time: just started; commitment 10 days out.
     await ev2(onT, "DemandCreated", now, { payload: { dueDate: at(now, 10).toISOString().slice(0, 10) } });
   });

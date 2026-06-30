@@ -14,7 +14,7 @@
 // Prisma client directly rather than the tenant-scoped store — you cannot be
 // "inside" an org you are in the act of creating.
 
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { prisma } from "../../db.js";
@@ -639,6 +639,10 @@ async function seedSuperuser(): Promise<void> {
       );
     }
     try {
+      // A fresh `git clone` has no .qlerify/ (it's gitignored), so create it —
+      // otherwise the write below throws ENOENT, gets swallowed, and the random
+      // superuser password is lost, leaving the install impossible to sign into.
+      mkdirSync(QLERIFY_DIR, { recursive: true });
       writeFileSync(
         join(QLERIFY_DIR, "superadmin.local.txt"),
         `Qlerify Platform — superuser account\nusername: ${SUPERADMIN_SUBJECT}\npassword: ${cred.plaintext}\n` +

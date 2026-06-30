@@ -141,18 +141,49 @@ export async function buildServer() {
   return app;
 }
 
+/** Turn a pre-listen boot failure (almost always an uninitialised database)
+ *  into a plain, actionable message instead of a raw unhandled-rejection stack. */
+function reportStartupFailure(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  const dbNotReady =
+    /no such table/i.test(msg) ||
+    /unable to open.*database/i.test(msg) ||
+    /Environment variable not found: DATABASE_URL/i.test(msg);
+  console.error("\n✖ The server could not start.\n");
+  if (dbNotReady) {
+    console.error(
+      "  The database isn't initialised yet. Run:\n\n" +
+        "    npm run setup\n\n" +
+        "  then start it again with `npm run dev`.\n",
+    );
+  } else {
+    console.error(`  ${msg}\n`);
+  }
+  if (process.env.LOG_LEVEL === "debug") console.error(err);
+}
+
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const port = Number(process.env.PORT ?? 3001);
   const host = process.env.HOST ?? "0.0.0.0";
-  buildServer().then(async (app) => {
-    try {
-      await app.listen({ port, host });
-      app.log.info(`server listening on http://${host}:${port}`);
-    } catch (err) {
-      app.log.error(err);
-      await prisma.$disconnect();
+  buildServer()
+    .then(async (app) => {
+      try {
+        await app.listen({ port, host });
+        app.log.info(`server listening on http://${host}:${port}`);
+      } catch (err) {
+        app.log.error(err);
+        await prisma.$disconnect();
+        process.exit(1);
+      }
+    })
+    .catch(async (err) => {
+      reportStartupFailure(err);
+      try {
+        await prisma.$disconnect();
+      } catch {
+        /* ignore — we're already exiting */
+      }
       process.exit(1);
-    }
-  });
+    });
 }

@@ -174,7 +174,7 @@ qlerify-live/
 
 - **Node.js 22** and npm
 - **OpenSSL** (required by Prisma's query engine)
-- An **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)) for AI features
+- An **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)) for AI features — added per-org in the UI after sign-in; **not** required to install or boot
 
 ### Install & run (local dev)
 
@@ -182,36 +182,34 @@ qlerify-live/
 # 1. install dependencies (keep devDeps — tsx + the Prisma CLI run at runtime)
 npm ci
 
-# 2. create your env file and fill it in
-cp .env.example .env
-#    → set DATABASE_URL to an ABSOLUTE path (see the gotcha below)
-#    → set ANTHROPIC_API_KEY
-
-# 3. generate the Prisma client and create the SQLite schema
-npx prisma generate
-npm run db:push
-
-# 4. start the dev server (tsx watch)
+# 2. start it — that's it
 npm run dev
 ```
+
+No `.env` editing. The first `npm run dev` runs a guarded one-time setup (`npm run setup`)
+that creates `.env`, fills in an absolute `DATABASE_URL`, generates a `PLATFORM_ENCRYPTION_KEY`,
+generates the Prisma client, and creates the SQLite schema. Warm starts skip it (and never
+re-run `db push`). You can also run `npm run setup` explicitly.
 
 The server listens on **http://localhost:3001** by default (`PORT` / `HOST` to override).
 
 > In local dev, leave `NODE_ENV` unset to use the forgeable dev auth shim. The first run seeds a **superuser**; if you don't set `SUPERADMIN_PASSWORD`, a random one is generated and written once to `.qlerify/superadmin.local.txt` (gitignored). A fresh install has **zero organizations** — sign in as the superuser, create the first org, then a workspace, then a workflow (which must be created with a model).
 
-> ⚠️ **`DATABASE_URL` must be an absolute path** (`file:/abs/path/to/qlerify-live/prisma/dev.db`). A relative `file:./dev.db` resolves differently for the Prisma CLI vs. the generated client at runtime, silently splitting reads and writes across two different `.db` files.
+> **Anthropic key:** no `.env` edit needed — sign in, open **Organisation admin**, and paste your key there (stored encrypted, per org). Setting a platform-default `ANTHROPIC_API_KEY` in `.env` is optional.
+
+> **`DATABASE_URL` is handled for you.** Setup writes an absolute path and the runtime self-heals a blank/relative value to `prisma/dev.db`, so the Prisma CLI and the generated client always agree. (A hand-written relative `file:./dev.db` would otherwise split reads/writes across two `.db` files — that footgun is now closed.)
 
 ---
 
 ## Configuration
 
-All configuration is via environment variables (see `.env.example`):
+All configuration is via environment variables (see `.env.example`). For **local dev**, everything below is auto-provisioned by `npm run setup` (run automatically by `npm run dev`) — the table is for reference and overrides. For **Docker / Fly**, you supply secrets like `ANTHROPIC_API_KEY` and `PLATFORM_ENCRYPTION_KEY` yourself (see [Deployment](#deployment)) — setup does not run there.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `DATABASE_URL` | ✅ | SQLite path — **must be absolute** (see gotcha above) |
-| `ANTHROPIC_API_KEY` | ✅ for AI | Platform-default Claude key; per-org keys override it in Org Admin |
-| `PLATFORM_ENCRYPTION_KEY` | optional | 32-byte hex (`openssl rand -hex 32`) to encrypt per-org BYOK secrets at rest. Without it, orgs fall back to the platform keys. **Rotating it invalidates stored per-org keys.** |
+| `DATABASE_URL` | auto | SQLite path — **auto-filled** (absolute) by setup; runtime self-heals a blank/relative value. Set it only to point at a custom DB location. |
+| `ANTHROPIC_API_KEY` | optional | Optional platform-default Claude key; per-org keys set in Org Admin override it. Leave blank and add per org in the UI. |
+| `PLATFORM_ENCRYPTION_KEY` | auto | 32-byte hex encrypting per-org BYOK secrets at rest — **auto-generated** by setup. **Do not change once set: rotating it invalidates stored per-org keys.** |
 | `QLERIFY_MCP_URL`, `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify MCP creds for "Reload from link". In dev they fall back to `~/.claude.json`. |
 | `CHAT_MODEL` | optional | Override the default Claude model (`claude-sonnet-4-6`) |
 | `CHAT_EFFORT` | optional | Reasoning effort: `low` / `medium` (default) / `high` |
@@ -226,6 +224,7 @@ All configuration is via environment variables (see `.env.example`):
 
 | Script | What it does |
 |--------|--------------|
+| `npm run setup` | idempotent first-run: creates `.env`, fills `DATABASE_URL`, generates `PLATFORM_ENCRYPTION_KEY`, runs `prisma generate` + `db push`. Auto-run (guarded) before `dev`/`start`. |
 | `npm run dev` | `tsx watch src/server.ts` — dev server with hot reload |
 | `npm run build` | `tsc` → `dist/` (exists, but **not** the deploy path) |
 | `npm start` | `node dist/server.js` (compiled path; not used in deploy) |
@@ -264,17 +263,25 @@ docker build -t qlerify-live .
 docker run -p 3001:3001 \
   -v qlerify-data:/data \
   -e DATABASE_URL=file:/data/dev.db \
+  -e PLATFORM_ENCRYPTION_KEY=<stable 64-hex; openssl rand -hex 32> \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   qlerify-live
 ```
 
 `node:22-slim` base, installs OpenSSL + all deps (devDeps included — `tsx` and the Prisma CLI run at runtime), generates the Prisma client, and bakes in `NODE_ENV=production` (the security boundary that disables the dev auth shim). The entrypoint places the SQLite DB and `.qlerify` model cache on `/data`, applies the schema when its hash changes, then starts the server.
 
+> Unlike local dev, the container does **not** run `npm run setup`, so it does not auto-generate `PLATFORM_ENCRYPTION_KEY`. Provide a **stable** value (and keep it — rotating it invalidates every org's stored BYOK secret) to enable per-org Anthropic/Qlerify keys. `ANTHROPIC_API_KEY` is an optional platform default; orgs can instead add their own key in the UI.
+
 ### Fly.io
 
 ```bash
 # one-time: create the persistent volume
 fly volumes create data --size 1 --region arn
+
+# one-time: secrets (NOT in fly.toml). The encryption key enables per-org BYOK and
+# must stay stable once set; the Anthropic key is an optional platform default.
+fly secrets set PLATFORM_ENCRYPTION_KEY=$(openssl rand -hex 32)
+# fly secrets set ANTHROPIC_API_KEY=sk-ant-...
 
 # deploy (single machine only!)
 fly deploy --ha=false

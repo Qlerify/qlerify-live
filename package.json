@@ -6,7 +6,10 @@
   "description": "Model-driven runtime that turns a Qlerify domain model into a live, multi-tenant app",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "setup": "tsx scripts/setup.ts",
+    "predev": "tsx scripts/setup.ts --if-needed",
     "dev": "tsx watch src/server.ts",
+    "prestart": "tsx scripts/setup.ts --if-needed",
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,0 +1,37 @@
+name: Deploy to Fly
+
+on:
+  push:
+    branches: [main]
+
+# Never run two deploys onto the single machine + volume at the same time.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  # Gate: the app runs under tsx (no compile), so type errors would otherwise
+  # only surface at runtime. Fail the deploy here instead.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+
+  deploy:
+    needs: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # --remote-only builds on Fly's builder (no Docker in CI);
+      # --ha=false keeps the app on its single machine + volume.
+      - run: flyctl deploy --remote-only --ha=false
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

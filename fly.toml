@@ -1,0 +1,43 @@
+# Fly.io config for qlerify-live (main — multi-tenant platform).
+# Single machine + one persistent volume (SQLite DB + runtime model cache on /data).
+# Do NOT scale beyond 1 machine — each machine gets its own volume, splitting state.
+# Deploy with: fly deploy --ha=false
+app = "qlerify-live"
+primary_region = "arn"  # Stockholm
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3001"
+  # SQLite file lives on the mounted volume so it survives restarts/redeploys.
+  DATABASE_URL = "file:/data/dev.db"
+
+# Persistent volume — created once with: fly volumes create data --size 1 --region arn
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  # Keep one machine always warm so the live demo has no cold-start lag.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Health check hits "/" — the tenant plugin is deny-by-default, so /sim/health
+  # would 401; the static shell at "/" is the one auth-exempt GET that returns 200.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[vm]]
+  # 2 shared vCPUs + 2 GB: headroom for the tsx transpiler + runtime table
+  # rebuilds, and smoother latency under concurrent clicks. Bump to
+  # `performance-1x` (dedicated vCPU) if the demo needs maximum snappiness.
+  size = "shared-cpu-2x"
+  memory = "2048mb"

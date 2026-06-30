@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.idea
+*.db
+*.db-journal
+prisma/dev.db*
+.env
+.DS_Store
+# main ships no committed model; .qlerify is a runtime dir on the volume.
+.qlerify

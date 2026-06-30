@@ -8,6 +8,10 @@ prisma/dev.db*
 web/dist/
 web/node_modules/
 
+# IDE / local-only files
+.idea/
+CLAUDE.md
+
 # Runtime model version history (created by the in-app "Fetch model" button)
 .qlerify/history/
 # Optional per-machine model source URL override

@@ -114,6 +114,10 @@ async function resolveModelInput(body: ModelInputBody): Promise<{ workflow: stri
     try {
       workflow = await fetchSpecificationFromUrl(sourceUrl);
     } catch (e: any) {
+      // A missing/invalid Qlerify key is a configuration problem, not a fetch
+      // failure — let its DomainError surface as-is (422 + "add a key in
+      // Organisation admin") instead of being masked as a generic 502.
+      if (e instanceof DomainError) throw e;
       throw new FetchError(e?.message ?? String(e));
     }
   }
@@ -823,6 +827,9 @@ export function registerControlRoutes(app: FastifyInstance) {
       try {
         workflow = await fetchSpecificationFromUrl(cur.sourceUrl);
       } catch (e: any) {
+        // Config problem (no Qlerify key/URL) → surface its DomainError verbatim;
+        // only a real transport/HTTP failure becomes a 502 FetchError.
+        if (e instanceof DomainError) throw e;
         throw new FetchError(e?.message ?? String(e));
       }
       const result = await applyWorkflowModel(workflow, null, { source: "fetch", sourceUrl: cur.sourceUrl });

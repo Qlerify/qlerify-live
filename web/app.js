@@ -1080,7 +1080,11 @@ async function reloadWorkflowModel() {
     state.modelMsg = { ok: false, text: (e && e.message) ? e.message : "Reload failed." };
   } finally {
     state.modelBusy = false; hideOverlay();
-    setTimeout(() => { state.modelMsg = null; render(); }, 3000);
+    // Auto-dismiss the success toast; leave an error banner up so a config
+    // message (e.g. "add a Qlerify key in Organisation admin") stays readable
+    // and actionable until the next action replaces it.
+    if (state.modelMsg && state.modelMsg.ok) setTimeout(() => { state.modelMsg = null; render(); }, 3000);
+    else render();
   }
 }
 

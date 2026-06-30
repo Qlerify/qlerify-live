@@ -69,8 +69,10 @@ function defaultUrl(): string {
   const dev = readDevCreds();
   if (dev) return dev.url;
   throw new DomainError(
-    "No Qlerify MCP URL configured — set QLERIFY_MCP_URL in .env, or set your " +
-      "organization's MCP URL in Organisation admin.",
+    "No Qlerify endpoint URL is configured for this organisation. Add your " +
+      "Qlerify MCP URL in Organisation admin → Qlerify integration. (Operators " +
+      "can instead set a platform-wide default with QLERIFY_MCP_URL in the " +
+      "server environment.)",
   );
 }
 
@@ -98,9 +100,11 @@ function platformCreds(): QlerifyCreds {
   }
   if (!resolved) {
     throw new DomainError(
-      "No Qlerify credentials available — set QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY " +
-        "in .env (the platform default), or configure your organization's own key in " +
-        "Organisation admin.",
+      "No Qlerify API key is configured for this organisation. Add one in " +
+        "Organisation admin → Qlerify integration to enable “Reload from link” " +
+        "(no .env editing needed). (Operators can instead set a platform-wide " +
+        "default with QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY in the server " +
+        "environment.)",
     );
   }
   cache.set(PLATFORM_SLOT, { ciphertext: null, resolved });

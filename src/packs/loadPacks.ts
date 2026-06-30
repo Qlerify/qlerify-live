@@ -2,8 +2,8 @@
 // and registers their adapters. DYNAMIC import (never a static boot import), so:
 //   (1) adding a pack folder needs no edit to any barrel, and
 //   (2) a broken pack can't crash boot — it's skipped, fail-soft.
-// Re-runnable on onOntologyReload. This is the seam that forces src/packs/ into
-// existence; commands/widgets/ingestion layers join the same Pack later.
+// Re-runnable (idempotent registration). This is the seam that forces src/packs/
+// into existence; commands/widgets/ingestion layers join the same Pack later.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

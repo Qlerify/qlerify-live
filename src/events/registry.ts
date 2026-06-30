@@ -2,15 +2,14 @@
 // simulator runner, and the demo UI to render the timeline.
 //
 // Every fact here is sourced from the live model: the event identity, role,
-// bounded context and aggregate root come from the Qlerify ontology
-// (.qlerify/workflow.json); the linear *order*, 5-act *phase* grouping, and
-// *derived* flag come from the overlay sidecar (.qlerify/overlay.json), merged
-// into the ontology by src/ontology/model.ts. Nothing is hardcoded to a specific
-// domain anymore — swap the model + overlay and EVENTS reconfigures itself.
-// A conformance test locks the linkage: tests/ontology/conformance.test.ts.
+// bounded context and aggregate root come from the Qlerify ontology; the linear
+// *order*, 5-act *phase* grouping, and *derived* flag come from the overlay
+// sidecar, merged into the ontology by src/ontology/model.ts. The model is
+// per-workflow (bound from the content-addressed store), so events() resolves
+// the ACTIVE workflow's events; EVENTS is the system-context binding (empty).
 
 import type { Role } from "../auth.js";
-import { getOntology, onOntologyReload, ontologyCacheKey } from "../ontology/model.js";
+import { getOntology, ontologyCacheKey } from "../ontology/model.js";
 
 export interface EventDef {
   name: string;
@@ -49,8 +48,8 @@ function buildEvents(): EventDef[] {
 }
 
 // `let` + reassignment makes this an ESM live binding: importers always see the
-// latest array, so a hot-reload of the model (onOntologyReload) is reflected
-// everywhere EVENTS is used without any consumer changes.
+// latest array. EVENTS is the SYSTEM-context event list, which is always empty
+// (the system model carries no events); per-workflow consumers use events().
 export let EVENTS: ReadonlyArray<EventDef> = [];
 
 // If buildEvents() throws (e.g. a malformed model slipped past the loader), we
@@ -73,7 +72,6 @@ function rebuildEvents(): void {
 }
 
 rebuildEvents();
-onOntologyReload(rebuildEvents);
 
 // Per-WORKFLOW events. EVENTS (above) stays the SYSTEM/current-model live binding
 // for system-context consumers (chat, the legacy stepper, conformance); events()
@@ -97,9 +95,6 @@ export function events(): ReadonlyArray<EventDef> {
     return key === "system" ? EVENTS : [];
   }
 }
-
-// A system-model reload changes what the "system" key resolves to → drop the cache.
-onOntologyReload(() => eventsByKey.clear());
 
 export function findEvent(ref: string): EventDef {
   const ev = events().find((e) => e.ref === ref);

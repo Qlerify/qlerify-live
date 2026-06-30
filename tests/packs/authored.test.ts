@@ -9,6 +9,8 @@ import { ingestPull } from "../../src/packs/ingest.js";
 import { registerAdapter } from "../../src/packs/registry.js";
 import { prisma } from "../../src/db.js";
 import * as store from "../../src/twin/projection-store.js";
+import { getOntology } from "../../src/ontology/model.js";
+import { modelHarness } from "../helpers/po-model.js";
 import type { AdapterConfig } from "../../src/packs/types.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -30,10 +32,18 @@ const cfg = (bodyPath?: string): AdapterConfig => ({
   id: "test-authored-sap", kind: "authored", boundedContext: "SAP", targetEntity: ENTITY, phase: "built", mode: "live", bodyPath,
 });
 
+// The model is bound per-workflow (no global .qlerify/workflow.json anymore);
+// adapter pull/ingest call getOntology() internally, so they run inside the
+// harness's tenant context, which also scopes the gen__p<hex>_ projection table.
+const model = modelHarness();
+
 let writtenPath = "";
 afterAll(async () => {
   if (writtenPath && existsSync(join(ROOT, writtenPath))) rmSync(join(ROOT, writtenPath));
-  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "gen_${ENTITY}"`);
+  await model.run(async () => {
+    const e = getOntology().entity(ENTITY);
+    if (e) await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${store.tableFor(e)}"`);
+  });
 });
 
 describe("deny-scan", () => {
@@ -50,7 +60,7 @@ describe("writeBody — unique-path (Fix 1) + deny-scan gate", () => {
   it("writes a content-hash path, is idempotent, and refuses denied code", () => {
     const r1 = writeBody(cfg(), CLEAN_BODY);
     writtenPath = r1.bodyPath;
-    expect(r1.bodyPath).toContain("src/packs/SAP/generated/test-authored-sap.");
+    expect(r1.bodyPath).toContain("src/packs/sap/generated/test-authored-sap.");
     expect(r1.skipped).toBe(false);
 
     const r2 = writeBody(cfg(), CLEAN_BODY);
@@ -66,30 +76,33 @@ describe("writeBody — unique-path (Fix 1) + deny-scan gate", () => {
 });
 
 describe("authored host — the Lambda execution", () => {
-  it("runs the body via a capability ctx and shapes rows; respects limit", async () => {
-    const a = createAuthoredAdapter(cfg(writtenPath));
-    expect(a.mode).toBe("live");
-    const pulled = await a.pull({ limit: 3 });
-    expect(pulled.count).toBe(3);
-    expect(pulled.rows[ENTITY]).toHaveLength(3);
-    expect(pulled.rows[ENTITY][0].status).toBe("DRAFT");
-    expect((await a.healthcheck()).ok).toBe(true);
-  });
+  it("runs the body via a capability ctx and shapes rows; respects limit", () =>
+    model.run(async () => {
+      const a = createAuthoredAdapter(cfg(writtenPath));
+      expect(a.mode).toBe("live");
+      const pulled = await a.pull({ limit: 3 });
+      expect(pulled.count).toBe(3);
+      expect(pulled.rows[ENTITY]).toHaveLength(3);
+      expect(pulled.rows[ENTITY][0].status).toBe("DRAFT");
+      expect((await a.healthcheck()).ok).toBe(true);
+    }));
 
-  it("ingests authored rows into gen_ stamped with the adapter's mode", async () => {
-    const a = createAuthoredAdapter(cfg(writtenPath));
-    registerAdapter(a);
-    const summary = await ingestPull(a.id, { limit: 4 });
-    expect(summary.inserted).toBe(4);
-    expect(summary.mode).toBe("live");
-    const rows = await store.findMany(ENTITY, 50);
-    expect(rows.length).toBeGreaterThanOrEqual(4);
-    for (const r of rows) expect(r._provenance).toBe("live");
-  });
+  it("ingests authored rows into gen_ stamped with the adapter's mode", () =>
+    model.run(async () => {
+      const a = createAuthoredAdapter(cfg(writtenPath));
+      registerAdapter(a);
+      const summary = await ingestPull(a.id, { limit: 4 });
+      expect(summary.inserted).toBe(4);
+      expect(summary.mode).toBe("live");
+      const rows = await store.findMany(ENTITY, 50);
+      expect(rows.length).toBeGreaterThanOrEqual(4);
+      for (const r of rows) expect(r._provenance).toBe("live");
+    }));
 
-  it("fails soft on a missing body — registers fine, never throws at boot", async () => {
-    const a = createAuthoredAdapter(cfg("src/packs/SAP/generated/does-not-exist.logic.ts"));
-    expect((await a.healthcheck()).ok).toBe(false); // no throw
-    await expect(a.pull({ limit: 1 })).rejects.toThrow(/missing/);
-  });
+  it("fails soft on a missing body — registers fine, never throws at boot", () =>
+    model.run(async () => {
+      const a = createAuthoredAdapter(cfg("src/packs/sap/generated/does-not-exist.logic.ts"));
+      expect((await a.healthcheck()).ok).toBe(false); // no throw
+      await expect(a.pull({ limit: 1 })).rejects.toThrow(/missing/);
+    }));
 });

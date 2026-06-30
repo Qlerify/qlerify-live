@@ -1,4 +1,7 @@
-// The Qlerify ontology, loaded at runtime from .qlerify/workflow.json.
+// The Qlerify ontology. The live model is per-workflow: a workflow's model
+// content is bound from the content-addressed ontology store (setWorkflowModel)
+// and parsed via loadOntologyFromStrings. There is no global model file — the
+// legacy .qlerify/workflow.json is gone; the system context is always empty.
 //
 // This is the single source of truth for the *declarative* layer of the
 // domain: the domain-event graph (who follows whom), the role that emits each
@@ -21,16 +24,16 @@
 // linear 28-step ordering, the 5-act `phase` grouping, and the `derived` flag
 // for rules-engine events. Those live as a thin overlay in events/registry.ts.
 
-import { readFileSync, existsSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
 import { ModelNotLoadedError } from "../errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-/** Absolute path to the .qlerify directory holding workflow.json (and the
- * model fetch/version history). Exported so the model-sync module writes to
- * exactly the file this loader reads. */
+/** Absolute path to the .qlerify directory (per-org CAS, connectors, adapters,
+ * superadmin token, …). Exported for the modules that read those sidecars.
+ * NOTE: the legacy global model file .qlerify/workflow.json is NOT used — the
+ * live model is per-workflow, bound from the content-addressed store. */
 export const QLERIFY_DIR = join(here, "..", "..", ".qlerify");
 
 // ---------------------------------------------------------------------------
@@ -230,10 +233,6 @@ function refTail(ref: string): string {
   return i >= 0 ? ref.slice(i + 1) : ref;
 }
 
-function readJson<T>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf-8")) as T;
-}
-
 /** Raw on-disk field → public SchemaField: resolve `relatedEntity.$ref` to its
  * terminal name and carry the `array` flag, dropping nothing else. */
 function normalizeField(f: RawSchemaField): SchemaField {
@@ -252,24 +251,9 @@ function normalizeField(f: RawSchemaField): SchemaField {
 // Loader
 // ---------------------------------------------------------------------------
 
-/** Read the optional overlay sidecar. A missing file is fine (returns {}); a
- * malformed one throws, which (via reloadOntology) leaves the previous model in
- * place — the same fail-soft contract as a malformed workflow.json. */
-function readOverlay(qlerifyDir: string): RawOverlay {
-  const path = join(qlerifyDir, "overlay.json");
-  if (!existsSync(path)) return {};
-  return readJson<RawOverlay>(path);
-}
-
-export function loadOntology(qlerifyDir: string = QLERIFY_DIR): Ontology {
-  const wf = readJson<RawWorkflow>(join(qlerifyDir, "workflow.json"));
-  const overlay = readOverlay(qlerifyDir);
-  return buildOntology(wf, overlay);
-}
-
-/** Build an Ontology from parsed workflow + overlay STRINGS (no fs). The disk
- * loader above and the per-workflow content loader (a workflow's model lives in the
- * content-addressed store, not on disk) both funnel through buildOntology. */
+/** Build an Ontology from parsed workflow + overlay STRINGS (no fs). The
+ * per-workflow content loader (a workflow's model lives in the content-addressed
+ * store, not on disk) funnels through buildOntology. */
 export function loadOntologyFromStrings(workflowJson: string, overlayJson: string | null): Ontology {
   const wf = JSON.parse(workflowJson) as RawWorkflow;
   const overlay = (overlayJson ? JSON.parse(overlayJson) : {}) as RawOverlay;
@@ -531,9 +515,9 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
 let cached: Ontology | undefined;
 
 /** A valid but EMPTY ontology — the "no model loaded" baseline (zero events,
- * entities, commands, roles). Returned by the system path when there is no model
- * on disk, so boot, module-load (the event registry, the chat system prompt) and
- * every system-context getOntology() caller keep working instead of crashing.
+ * entities, commands, roles). The system path always returns this, so boot,
+ * module-load (the event registry, the chat system prompt) and every
+ * system-context getOntology() caller keep working instead of crashing.
  * There is no preset/demo model anymore — a workflow's model arrives only via
  * the per-workflow set-model flow (PUT /v1/workflow/model). */
 export function emptyOntology(): Ontology {
@@ -545,15 +529,13 @@ export function emptyOntology(): Ontology {
 // Every workflow's model content is bound via setWorkflowModel() by the request
 // pipeline (the onRequest hook loads it from the content-addressed store BEFORE
 // the handler runs, so the sync getOntology() never has to do I/O). The system
-// context (no request / boot / module-load) resolves to the empty ontology
-// unless a model has been placed on disk (none is, by default).
+// context (no request / boot / module-load) always resolves to the EMPTY
+// ontology — there is no global model file (the legacy .qlerify/workflow.json is
+// gone for good); a model exists only per-workflow.
 
-/** The system-context model. Empty unless a workflow.json happens to be on disk
- * (none is shipped — the preset demo was removed). Memoized for the process. */
+/** The system-context model — always empty. Memoized for the process. */
 function getSystemOntology(): Ontology {
-  if (!cached) {
-    cached = existsSync(join(QLERIFY_DIR, "workflow.json")) ? loadOntology() : emptyOntology();
-  }
+  if (!cached) cached = emptyOntology();
   return cached;
 }
 
@@ -639,58 +621,4 @@ export function ontologyView(ontology: Ontology = getOntology()) {
     entities: ontology.entities,
     queries: ontology.queries,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Hot reload — re-read the model when .qlerify/workflow.json changes, without
-// restarting the process. Derived snapshots that are captured at import time
-// (events/registry.ts EVENTS, chat/system-prompt.ts SYSTEM_BLOCKS) subscribe
-// via onOntologyReload and rebuild themselves once the new model is in place.
-// ---------------------------------------------------------------------------
-
-const reloadListeners = new Set<() => void>();
-
-/** Register a callback to run after each reload (in registration order, after
- * the new model is swapped in). Returns an unsubscribe function. */
-export function onOntologyReload(listener: () => void): () => void {
-  reloadListeners.add(listener);
-  return () => reloadListeners.delete(listener);
-}
-
-/** Re-read the model from disk and swap it in. If the file is mid-write or
- * invalid, loadOntology throws and the previous model is left untouched. */
-export function reloadOntology(): Ontology {
-  const next = loadOntology(); // throws → `cached` unchanged
-  cached = next;
-  for (const listener of reloadListeners) listener();
-  return next;
-}
-
-interface WatchLogger {
-  info?(...args: unknown[]): void;
-  error?(...args: unknown[]): void;
-}
-
-let watching = false;
-
-/** Watch .qlerify for changes to workflow.json and hot-reload on change.
- * Idempotent and opt-out via ONTOLOGY_WATCH=off. Watching the directory (not
- * the file) survives atomic-rename saves and re-downloads. Writes are debounced
- * so a multi-event save reloads once, and a failed parse keeps the old model. */
-export function startOntologyWatch(log?: WatchLogger): void {
-  if (watching || process.env.ONTOLOGY_WATCH === "off") return;
-  watching = true;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  watch(QLERIFY_DIR, (_event, filename) => {
-    if (filename && filename !== "workflow.json" && filename !== "overlay.json") return;
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      try {
-        reloadOntology();
-        log?.info?.("ontology hot-reloaded from .qlerify/workflow.json");
-      } catch (err) {
-        log?.error?.({ err }, "ontology reload failed — keeping previous model");
-      }
-    }, 150);
-  });
 }

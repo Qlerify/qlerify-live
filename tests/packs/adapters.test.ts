@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { applyFieldMap } from "../../src/packs/types.js";
 import { synthesizeRow } from "../../src/twin/synthesize.js";
 import { createSimulatedAdapter } from "../../src/packs/adapters/simulated.js";
@@ -8,16 +8,21 @@ import { loadPacks } from "../../src/packs/loadPacks.js";
 import { getOntology } from "../../src/ontology/model.js";
 import * as store from "../../src/twin/projection-store.js";
 import { prisma } from "../../src/db.js";
+import { modelHarness } from "../helpers/po-model.js";
 
-const TEST_ENTITY = "PurchaseOrder"; // an arbitrary entity name for the gen_ projection table
+const TEST_ENTITY = "PurchaseOrder";
 
-// Clean slate: drop any stale gen_ table from a prior session (it may predate the
-// _provenance column) so ensureTable recreates it fresh with the current schema.
-beforeAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "gen_${TEST_ENTITY}"`);
-});
+// The model is bound per-workflow (the legacy global .qlerify/workflow.json is
+// gone). A fresh workflow id ⇒ a fresh gen__p<hex>_ projection namespace, so this
+// file's rows never collide with another file's. Code under test calls
+// getOntology() internally, so it must run inside the harness's tenant context.
+const model = modelHarness();
+
 afterAll(async () => {
-  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "gen_${TEST_ENTITY}"`);
+  await model.run(async () => {
+    const e = getOntology().entity(TEST_ENTITY);
+    if (e) await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${store.tableFor(e)}"`);
+  });
 });
 
 describe("applyFieldMap", () => {
@@ -30,37 +35,40 @@ describe("applyFieldMap", () => {
 });
 
 describe("synthesizeRow", () => {
-  it("fills every required field, generates an id, and varies by seed", () => {
-    const e = getOntology().entity(TEST_ENTITY)!;
-    const r1 = synthesizeRow(e, { seed: 1 });
-    const r2 = synthesizeRow(e, { seed: 2 });
-    for (const req of e.required) expect(r1[req]).toBeDefined();
-    expect(typeof r1.id).toBe("string");
-    expect(r1.id).not.toBe(r2.id);
-  });
-  it("is deterministic for a given seed", () => {
-    const e = getOntology().entity(TEST_ENTITY)!;
-    expect(synthesizeRow(e, { seed: 99 })).toEqual(synthesizeRow(e, { seed: 99 }));
-  });
+  it("fills every required field, generates an id, and varies by seed", () =>
+    model.run(() => {
+      const e = getOntology().entity(TEST_ENTITY)!;
+      const r1 = synthesizeRow(e, { seed: 1 });
+      const r2 = synthesizeRow(e, { seed: 2 });
+      for (const req of e.required) expect(r1[req]).toBeDefined();
+      expect(typeof r1.id).toBe("string");
+      expect(r1.id).not.toBe(r2.id);
+    }));
+  it("is deterministic for a given seed", () =>
+    model.run(() => {
+      const e = getOntology().entity(TEST_ENTITY)!;
+      expect(synthesizeRow(e, { seed: 99 })).toEqual(synthesizeRow(e, { seed: 99 }));
+    }));
 });
 
 describe("SimulatedAdapter + ingestPull", () => {
-  it("pulls synthesized rows into the gen_ table, stamped with provenance", async () => {
-    const adapter = createSimulatedAdapter({ id: "test-sim", boundedContext: "SAP", targetEntity: TEST_ENTITY, seed: 7 });
-    registerAdapter(adapter);
+  it("pulls synthesized rows into the gen_ table, stamped with provenance", () =>
+    model.run(async () => {
+      const adapter = createSimulatedAdapter({ id: "test-sim", boundedContext: "SAP", targetEntity: TEST_ENTITY, seed: 7 });
+      registerAdapter(adapter);
 
-    const pulled = await adapter.pull({ limit: 4 });
-    expect(pulled.count).toBe(4);
-    expect(pulled.rows[TEST_ENTITY]).toHaveLength(4);
+      const pulled = await adapter.pull({ limit: 4 });
+      expect(pulled.count).toBe(4);
+      expect(pulled.rows[TEST_ENTITY]).toHaveLength(4);
 
-    const summary = await ingestPull("test-sim", { limit: 4 });
-    expect(summary.inserted).toBe(4);
-    expect(summary.mode).toBe("simulated");
+      const summary = await ingestPull("test-sim", { limit: 4 });
+      expect(summary.inserted).toBe(4);
+      expect(summary.mode).toBe("simulated");
 
-    const rows = await store.findMany(TEST_ENTITY, 50);
-    expect(rows.length).toBeGreaterThanOrEqual(4);
-    for (const r of rows) expect(r._provenance).toBe("simulated");
-  });
+      const rows = await store.findMany(TEST_ENTITY, 50);
+      expect(rows.length).toBeGreaterThanOrEqual(4);
+      for (const r of rows) expect(r._provenance).toBe("simulated");
+    }));
 });
 
 describe("loadPacks", () => {

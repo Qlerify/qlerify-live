@@ -98,8 +98,8 @@ export function currentWorkflowId(): string {
   throw new NoActiveWorkflowError();
 }
 
-/** True when running in the virtual SYSTEM context — the empty system-context
- * model (empty unless a workflow.json is on disk) + un-prefixed gen_ tables. This
+/** True when running in the virtual SYSTEM context — the (always) empty
+ * system-context model + un-prefixed gen_ tables. This
  * is ONLY the no-store path (boot/module-load/sim/tests). A bound org — with or
  * without a workflow — is never the system context, so the data plane never
  * mistakes an empty tenant org for it. */

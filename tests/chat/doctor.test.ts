@@ -2,8 +2,13 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { runTool } from "../../src/chat/tools.js";
 import { registerAdapter } from "../../src/packs/registry.js";
 import { createSimulatedAdapter } from "../../src/packs/adapters/simulated.js";
+import { modelHarness } from "../helpers/po-model.js";
 
 const ID = "doctor-test-sap";
+
+// adapter_dry_run synthesizes a sample by reading the model via getOntology(), so
+// that one tool call runs inside a workflow tenant context with the model bound.
+const model = modelHarness();
 
 beforeAll(() => {
   registerAdapter(createSimulatedAdapter({ id: ID, boundedContext: "SAP", targetEntity: "PurchaseOrder", seed: 5 }));
@@ -37,12 +42,13 @@ describe("Connection Doctor tools", () => {
     expect(parse(await runTool("run_adapter_healthcheck", { adapterId: ID })).ok).toBe(true);
   });
 
-  it("adapter_dry_run returns a sample without writing", async () => {
-    const d = parse(await runTool("adapter_dry_run", { adapterId: ID, limit: 2 }));
-    expect(d.ok).toBe(true);
-    expect(d.count).toBe(2);
-    expect(d.missingRequired).toEqual([]);
-  });
+  it("adapter_dry_run returns a sample without writing", () =>
+    model.run(async () => {
+      const d = parse(await runTool("adapter_dry_run", { adapterId: ID, limit: 2 }));
+      expect(d.ok).toBe(true);
+      expect(d.count).toBe(2);
+      expect(d.missingRequired).toEqual([]);
+    }));
 
   it("regenerate_adapter_body refuses without confirmation", async () => {
     const r = await runTool("regenerate_adapter_body", { adapterId: ID, confirmed: false });

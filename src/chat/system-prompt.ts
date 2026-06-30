@@ -9,7 +9,7 @@
 // prefix hits cache from request #2 onward.
 
 import { EVENTS } from "../events/registry.js";
-import { getOntology, onOntologyReload } from "../ontology/model.js";
+import { getOntology } from "../ontology/model.js";
 
 // ---------------------------------------------------------------------------
 // Build the workflow dump section — derived from the merged ontology, so it
@@ -180,12 +180,9 @@ function buildBlocks() {
   ];
 }
 
-// `let` + reassignment = ESM live binding, so a model hot-reload refreshes the
-// chat assistant's workflow dump without a restart.
+// Built once from the (empty) system model. The chat assistant resolves a
+// workflow's own model per request; this system-context dump carries no events.
 export let SYSTEM_BLOCKS = buildBlocks();
-onOntologyReload(() => {
-  SYSTEM_BLOCKS = buildBlocks();
-});
 
 // Exported for diagnostics — `npm run dev` can print this at boot to verify size.
 export function systemPromptSize() {

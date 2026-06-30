@@ -330,15 +330,16 @@ export function registerControlRoutes(app: FastifyInstance) {
     }
   });
 
-  // Set or clear the current org's own Qlerify key + optional MCP URL override.
-  // Org-admin gated; validate-on-save rejects a bad key; response is masked.
+  // Set or clear the current org's own Qlerify key. The MCP endpoint is fixed (the
+  // platform default), so there is no URL to set. Org-admin gated; validate-on-save
+  // rejects a bad key; response is masked.
   app.put("/v1/organizations/:id/qlerify-config", async (req, reply) => {
     try {
       const ctx = requireTenant();
       const id = (req.params as { id: string }).id;
       if (id !== ctx.organizationId) throw new DomainError("you can only modify the organization you are signed into");
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
-      const body = (req.body ?? {}) as { apiKey?: string; mcpUrl?: string; clear?: boolean };
+      const body = (req.body ?? {}) as { apiKey?: string; clear?: boolean };
       return await setOrgQlerifyConfig(ctx.organizationId, body, ctx.principal.id);
     } catch (err) {
       return fail(reply, err);

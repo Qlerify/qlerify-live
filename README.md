@@ -210,7 +210,8 @@ All configuration is via environment variables (see `.env.example`). For **local
 | `DATABASE_URL` | auto | SQLite path — **auto-filled** (absolute) by setup; runtime self-heals a blank/relative value. Set it only to point at a custom DB location. |
 | `ANTHROPIC_API_KEY` | optional | Optional platform-default Claude key; per-org keys set in Org Admin override it. Leave blank and add per org in the UI. |
 | `PLATFORM_ENCRYPTION_KEY` | auto | 32-byte hex encrypting per-org BYOK secrets at rest — **auto-generated** by setup. **Do not change once set: rotating it invalidates stored per-org keys.** |
-| `QLERIFY_MCP_URL`, `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify MCP creds for "Reload from link". In dev they fall back to `~/.claude.json`. |
+| `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify key for "Reload from link"; per-org keys set in Org Admin override it. In dev it falls back to `~/.claude.json`. |
+| `QLERIFY_MCP_URL` | rare | Qlerify Modeller endpoint. Defaults to `https://mcp.qlerify.com`; set only to point at a white-labelled Modeller. |
 | `CHAT_MODEL` | optional | Override the default Claude model (`claude-sonnet-4-6`) |
 | `CHAT_EFFORT` | optional | Reasoning effort: `low` / `medium` (default) / `high` |
 | `NODE_ENV` | prod | `production` **disables the forgeable dev auth shim** — required for real auth |

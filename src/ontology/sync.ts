@@ -58,6 +58,29 @@ function serialize(spec: unknown): string {
   return JSON.stringify(spec, null, 2) + "\n";
 }
 
+/** True when a Qlerify MCP response means the API key was rejected — signalled
+ * either by the HTTP status (401/403) or a JSON-RPC auth error envelope (the
+ * modeller returns code -32001 "Authentication required" for a bad/expired key). */
+function isQlerifyAuthFailure(status: number, envError?: { code?: number; message?: string } | null): boolean {
+  if (status === 401 || status === 403) return true;
+  const code = envError?.code;
+  const msg = (envError?.message ?? "").toLowerCase();
+  return code === -32001 || /auth|unauthori[sz]ed|forbidden|api[ -]?key/.test(msg);
+}
+
+/** A clean, user-facing error for a rejected Qlerify key. Deliberately hides the
+ * raw provider envelope (status line + JSON-RPC body) and points at where to fix
+ * the key — the UI first, the env/dev fallback second. */
+function qlerifyAuthError(): DomainError {
+  return new DomainError(
+    "Qlerify rejected the API key — it is missing, invalid, or expired. " +
+      "Add or update this organisation's key in Organisation admin → Qlerify " +
+      "integration. (A platform-wide default can be set via QLERIFY_MCP_API_KEY " +
+      "in the server environment; in local dev the key falls back to " +
+      "~/.claude.json → mcpServers.qlerify.)",
+  );
+}
+
 /** Fetch a workflow's `.specification` object from the Qlerify modeller via MCP,
  * for explicit (projectId, workflowId). */
 async function fetchSpecificationFor(projectId: string, workflowId: string): Promise<unknown> {
@@ -73,11 +96,17 @@ async function fetchSpecificationFor(projectId: string, workflowId: string): Pro
     }),
   });
   if (!res.ok) {
-    throw new Error(`Qlerify fetch failed: HTTP ${res.status} ${await res.text().catch(() => "")}`.trim());
+    // A rejected key is a fixable config problem (→ clean DomainError, 422); any
+    // other HTTP failure is a genuine upstream/transport issue (→ 502 via the
+    // route's FetchError wrap). Either way, never surface the raw JSON-RPC body.
+    if (isQlerifyAuthFailure(res.status)) throw qlerifyAuthError();
+    await res.text().catch(() => "");
+    throw new Error(`Couldn't reach the Qlerify modeller (HTTP ${res.status}). Please try again in a moment.`);
   }
   const env = parseRpcEnvelope(await res.text());
   if (env.error) {
-    throw new Error(`Qlerify MCP error: ${env.error.message ?? JSON.stringify(env.error)}`);
+    if (isQlerifyAuthFailure(200, env.error)) throw qlerifyAuthError();
+    throw new Error(`Qlerify modeller error: ${env.error.message ?? "unknown error"}`);
   }
   const text = env?.result?.content?.[0]?.text;
   if (typeof text !== "string") {
@@ -114,10 +143,17 @@ export async function validateQlerifyCreds(url: string, apiKey: string): Promise
     throw new DomainError(`Qlerify key validation failed: ${e?.message ?? String(e)}`);
   }
   if (!res.ok) {
-    throw new DomainError(`Qlerify key validation failed: HTTP ${res.status} ${await res.text().catch(() => "")}`.trim());
+    await res.text().catch(() => "");
+    if (isQlerifyAuthFailure(res.status)) {
+      throw new DomainError("That Qlerify API key was rejected (authentication failed). Check the key — it may be invalid, expired, or revoked — and try again.");
+    }
+    throw new DomainError(`Couldn't validate the key — the Qlerify modeller returned HTTP ${res.status}. Please try again in a moment.`);
   }
   const env = parseRpcEnvelope(await res.text());
   if (env.error) {
-    throw new DomainError(`Qlerify key validation failed: ${env.error.message ?? JSON.stringify(env.error)}`);
+    if (isQlerifyAuthFailure(200, env.error)) {
+      throw new DomainError("That Qlerify API key was rejected (authentication failed). Check the key — it may be invalid, expired, or revoked — and try again.");
+    }
+    throw new DomainError(`Couldn't validate the key — Qlerify returned: ${env.error.message ?? "unknown error"}.`);
   }
 }

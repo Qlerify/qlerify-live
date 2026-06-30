@@ -118,7 +118,7 @@ model PlatOrganization {
   // platform default (QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY env).
   qlerifyKeyCiphertext   String?   // "gcm$<ivHex>$<tagHex>$<ctHex>" — the MCP x-api-key, encrypted
   qlerifyKeyHint         String?   // masked preview, e.g. "qk_…ab12"
-  qlerifyMcpUrl          String?   // optional per-org MCP endpoint; null = platform default
+  qlerifyMcpUrl          String?   // DEPRECATED/unused — per-org MCP URL override was removed (endpoint is always the platform default). Kept (always null) to avoid a destructive migration; do not reintroduce a UI for it.
   createdAt         DateTime @default(now())
 
   customerAccount   PlatCustomerAccount @relation(fields: [customerAccountId], references: [id])

@@ -21,9 +21,12 @@ mkdir -p /data/qlerify
 rm -rf /app/.qlerify
 ln -s /data/qlerify /app/.qlerify
 
-# ~/.claude.json for the Qlerify MCP (no-op without the secrets).
-if [ -n "$QLERIFY_MCP_URL" ] && [ -n "$QLERIFY_MCP_API_KEY" ]; then
-  echo "[entrypoint] writing ~/.claude.json with Qlerify MCP creds"
+# ~/.claude.json for the Qlerify MCP (no-op without a key). Only the KEY is
+# required — the endpoint URL defaults to the hosted Qlerify Modeller; set
+# QLERIFY_MCP_URL only to point at a white-labelled deployment.
+if [ -n "$QLERIFY_MCP_API_KEY" ]; then
+  export QLERIFY_MCP_URL="${QLERIFY_MCP_URL:-https://mcp.qlerify.com}"
+  echo "[entrypoint] writing ~/.claude.json with Qlerify MCP creds (url=$QLERIFY_MCP_URL)"
   node -e 'const fs=require("fs"),os=require("os");fs.writeFileSync(os.homedir()+"/.claude.json",JSON.stringify({mcpServers:{qlerify:{url:process.env.QLERIFY_MCP_URL,headers:{"x-api-key":process.env.QLERIFY_MCP_API_KEY}}}}))'
 fi
 

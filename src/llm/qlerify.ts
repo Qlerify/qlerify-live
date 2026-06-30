@@ -1,10 +1,11 @@
 // The single seam for resolving Qlerify MCP credentials (endpoint URL + x-api-key)
 // used to fetch a workflow model from the modeller — the network call behind the
 // Model page's "⤓ Reload from link". Every fetch resolves its credentials through
-// here so that a per-organization key (set in Organisation admin, stored encrypted
-// on PlatOrganization) transparently overrides the platform default
-// (QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY env), falling back to those env vars and,
-// for local dev only, to ~/.claude.json — when the org has not configured its own.
+// here so that a per-organization KEY (set in Organisation admin, stored encrypted
+// on PlatOrganization) transparently overrides the platform-default key
+// (QLERIFY_MCP_API_KEY env), falling back to that env var and, for local dev only,
+// to ~/.claude.json — when the org has not configured its own. The endpoint URL is
+// NOT user-settable (always the built-in default; see DEFAULT_QLERIFY_MCP_URL).
 //
 // The org is read from the request-bound tenant context (AsyncLocalStorage), so
 // callers never thread an org id through their signatures. Off-request callers
@@ -21,6 +22,14 @@ import { tenantContext } from "../platform/tenancy/context.js";
 import { decryptSecret } from "../platform/secrets/secret-box.js";
 
 type QlerifySource = "org" | "platform";
+
+// The Qlerify Modeller's hosted MCP endpoint. This is effectively constant — it
+// only differs for a white-labelled deployment — so it's the built-in default and
+// nobody configures it. It is NOT user-settable: the only override is the operator
+// env QLERIFY_MCP_URL (for white-labelling), then ~/.claude.json in local dev, then
+// this default. Because the URL always resolves, the only thing anyone supplies is
+// an API key.
+const DEFAULT_QLERIFY_MCP_URL = "https://mcp.qlerify.com";
 
 export interface QlerifyCreds {
   url: string;
@@ -62,38 +71,37 @@ function readDevCreds(): { url: string; apiKey: string } | null {
   }
 }
 
-/** The platform-default MCP endpoint URL: env first, then the dev fallback. */
+/** The platform-default MCP endpoint URL. Always resolves: an explicit env
+ * override, then the local-dev fallback, then the built-in Qlerify endpoint —
+ * so a missing URL is never an error a user has to fix. */
 function defaultUrl(): string {
-  const envUrl = process.env.QLERIFY_MCP_URL;
+  const envUrl = process.env.QLERIFY_MCP_URL?.trim();
   if (envUrl) return envUrl;
   const dev = readDevCreds();
   if (dev) return dev.url;
-  throw new DomainError(
-    "No Qlerify endpoint URL is configured for this organisation. Add your " +
-      "Qlerify MCP URL in Organisation admin → Qlerify integration. (Operators " +
-      "can instead set a platform-wide default with QLERIFY_MCP_URL in the " +
-      "server environment.)",
-  );
+  return DEFAULT_QLERIFY_MCP_URL;
 }
 
-/** The effective MCP URL for a save/validate: the org's override when provided,
- * else the platform default (env, then dev fallback). */
-export function qlerifyMcpUrlFor(orgUrlOverride?: string | null): string {
-  const o = (orgUrlOverride ?? "").trim();
-  return o || defaultUrl();
+/** The Qlerify MCP endpoint to target for a save/validate. There is no per-org
+ * URL — it's always the platform default (the QLERIFY_MCP_URL operator override
+ * when set, else the built-in endpoint). */
+export function qlerifyEndpointUrl(): string {
+  return defaultUrl();
 }
 
-/** Platform-default creds: env (QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY) first, then
- * ~/.claude.json for local dev. Throws a setup-oriented error when neither exists. */
+/** Platform-default creds. Only a KEY is required — the endpoint URL defaults to
+ * the built-in Qlerify MCP endpoint (defaultUrl). Key precedence: QLERIFY_MCP_API_KEY
+ * env, then ~/.claude.json for local dev. Throws a setup-oriented error when no key
+ * exists anywhere. */
 function platformCreds(): QlerifyCreds {
   const hit = cache.get(PLATFORM_SLOT);
   if (hit) return hit.resolved;
 
-  const envUrl = process.env.QLERIFY_MCP_URL;
-  const envKey = process.env.QLERIFY_MCP_API_KEY;
+  const envKey = process.env.QLERIFY_MCP_API_KEY?.trim();
   let resolved: QlerifyCreds | null = null;
-  if (envUrl && envKey) {
-    resolved = { url: envUrl, apiKey: envKey, source: "platform" };
+  if (envKey) {
+    // env key pairs with the env URL override when set, else the built-in default.
+    resolved = { url: defaultUrl(), apiKey: envKey, source: "platform" };
   } else {
     const dev = readDevCreds();
     if (dev) resolved = { url: dev.url, apiKey: dev.apiKey, source: "platform" };
@@ -103,23 +111,22 @@ function platformCreds(): QlerifyCreds {
       "No Qlerify API key is configured for this organisation. Add one in " +
         "Organisation admin → Qlerify integration to enable “Reload from link” " +
         "(no .env editing needed). (Operators can instead set a platform-wide " +
-        "default with QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY in the server " +
-        "environment.)",
+        "default with QLERIFY_MCP_API_KEY in the server environment.)",
     );
   }
   cache.set(PLATFORM_SLOT, { ciphertext: null, resolved });
   return resolved;
 }
 
-/** Resolve the Qlerify MCP creds for the current org. Org key when set, else the
- * platform default. The org may supply only a key (reusing the platform URL) or
- * both a key and its own MCP URL. */
+/** Resolve the Qlerify MCP creds for the current org. The org supplies only a KEY;
+ * the endpoint is always the platform default (defaultUrl). Falls back to the
+ * platform creds when the org has set no key. */
 export async function resolveQlerifyCreds(): Promise<QlerifyCreds> {
   const orgId = currentOrgIdOrNull();
   if (!orgId) return platformCreds();
 
   const org = await prisma.platOrganization
-    .findUnique({ where: { id: orgId }, select: { qlerifyKeyCiphertext: true, qlerifyMcpUrl: true } })
+    .findUnique({ where: { id: orgId }, select: { qlerifyKeyCiphertext: true } })
     .catch(() => null);
   const ciphertext = org?.qlerifyKeyCiphertext ?? null;
   if (!ciphertext) return platformCreds();
@@ -127,8 +134,7 @@ export async function resolveQlerifyCreds(): Promise<QlerifyCreds> {
   const hit = cache.get(orgId);
   if (hit && hit.ciphertext === ciphertext) return hit.resolved;
 
-  const url = (org?.qlerifyMcpUrl && org.qlerifyMcpUrl.trim()) || defaultUrl();
-  const resolved: QlerifyCreds = { url, apiKey: decryptSecret(ciphertext), source: "org" };
+  const resolved: QlerifyCreds = { url: defaultUrl(), apiKey: decryptSecret(ciphertext), source: "org" };
   cache.set(orgId, { ciphertext, resolved });
   return resolved;
 }
@@ -143,7 +149,6 @@ export interface QlerifyStatus {
   configured: boolean; // is any creds available at all (org or platform)?
   source: QlerifySource | "none";
   hint: string | null; // masked org-key preview when source === "org"
-  mcpUrl: string | null; // the org's MCP URL override when source === "org"
 }
 
 /** Non-secret status for the admin UI. Never returns the raw key. */
@@ -153,13 +158,15 @@ export async function resolveQlerifyStatus(): Promise<QlerifyStatus> {
     const org = await prisma.platOrganization
       .findUnique({
         where: { id: orgId },
-        select: { qlerifyKeyCiphertext: true, qlerifyKeyHint: true, qlerifyMcpUrl: true },
+        select: { qlerifyKeyCiphertext: true, qlerifyKeyHint: true },
       })
       .catch(() => null);
     if (org?.qlerifyKeyCiphertext) {
-      return { configured: true, source: "org", hint: org.qlerifyKeyHint ?? null, mcpUrl: org.qlerifyMcpUrl ?? null };
+      return { configured: true, source: "org", hint: org.qlerifyKeyHint ?? null };
     }
   }
-  const platform = !!(process.env.QLERIFY_MCP_URL && process.env.QLERIFY_MCP_API_KEY) || !!readDevCreds();
-  return { configured: platform, source: platform ? "platform" : "none", hint: null, mcpUrl: null };
+  // The endpoint URL always resolves (built-in default), so a platform default is
+  // "configured" as soon as a KEY exists — env key, or the local-dev fallback.
+  const platform = !!process.env.QLERIFY_MCP_API_KEY?.trim() || !!readDevCreds();
+  return { configured: platform, source: platform ? "platform" : "none", hint: null };
 }

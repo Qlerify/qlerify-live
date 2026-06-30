@@ -6005,7 +6005,7 @@ function qlerifyCard(q) {
   const status = !q
     ? `<span class="text-stone-400">checking…</span>`
     : usingOrg
-    ? `Using <b>your organisation's key</b> <span class="mono">${escapeHtml(q.hint || "")}</span>${q.mcpUrl ? ` · endpoint <span class="mono">${escapeHtml(q.mcpUrl)}</span>` : ""}`
+    ? `Using <b>your organisation's key</b> <span class="mono">${escapeHtml(q.hint || "")}</span>`
     : q.configured
     ? `Using the <b>platform default</b> Qlerify credentials`
     : `<span class="text-rose-600">No Qlerify credentials configured — "Reload from link" is disabled until a key is set.</span>`;
@@ -6015,9 +6015,7 @@ function qlerifyCard(q) {
           <div class="text-xs text-stone-500 mt-0.5 mb-3">Plug in your own Qlerify MCP API key so this organisation's model fetches (the Model page's "⤓ Reload from link") run against — and are scoped to — your own Qlerify account. The key is stored encrypted; only a masked preview is ever shown. Leave unset to use the platform default.</div>
           <div class="text-xs text-stone-700 mb-3 rounded-md bg-stone-50 border border-stone-200 px-3 py-2">Status: ${status}</div>
           <label class="block text-xs text-stone-500 mb-1">Qlerify API key</label>
-          <input id="qlerify-key" type="password" autocomplete="off" placeholder="${usingOrg ? "Enter a new key to replace the current one" : "x-api-key…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" />
-          <label class="block text-xs text-stone-500 mb-1">MCP endpoint URL <span class="text-stone-400">(optional)</span></label>
-          <input id="qlerify-url" type="text" autocomplete="off" value="${escapeHtml(usingOrg && q.mcpUrl ? q.mcpUrl : "")}" placeholder="Leave blank for the platform default endpoint" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" />
+          <input id="qlerify-key" type="password" autocomplete="off" placeholder="${usingOrg ? "Enter a new key to replace the current one" : "x-api-key…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" />
           <div class="flex items-center gap-2">
             <button id="qlerify-save" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save key</button>
             ${usingOrg ? `<button id="qlerify-clear" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Revert to platform default</button>` : ""}
@@ -6322,15 +6320,14 @@ function bindAdmin() {
   const qlerifyMsg = (cls, html) => { const m = document.getElementById("qlerify-msg"); if (m) { m.className = `text-xs mt-2 ${cls}`; m.innerHTML = html; } };
   document.getElementById("qlerify-save")?.addEventListener("click", async () => {
     const apiKey = (document.getElementById("qlerify-key")?.value || "").trim();
-    const mcpUrl = (document.getElementById("qlerify-url")?.value || "").trim();
     if (!apiKey) { qlerifyMsg("text-rose-600", "Enter an API key."); return; }
     qlerifyMsg("text-stone-400", "Validating key with Qlerify…");
     const btn = document.getElementById("qlerify-save"); if (btn) btn.disabled = true;
     try {
       const orgId = state.me?.organizationId;
-      const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/qlerify-config`, { method: "PUT", body: JSON.stringify({ apiKey, mcpUrl: mcpUrl || undefined }) });
+      const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/qlerify-config`, { method: "PUT", body: JSON.stringify({ apiKey }) });
       await loadAdmin(); // repaints the card with the new masked status
-      qlerifyMsg("text-emerald-700", `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>${r.mcpUrl ? ` · endpoint <span class="mono">${escapeHtml(r.mcpUrl)}</span>` : ""}.`);
+      qlerifyMsg("text-emerald-700", `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>.`);
     } catch (e) {
       if (btn) btn.disabled = false;
       qlerifyMsg("text-rose-600", escapeHtml(e.message));

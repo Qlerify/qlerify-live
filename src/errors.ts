@@ -54,6 +54,17 @@ export class ModelNotLoadedError extends Error {
   }
 }
 
-export function isHandledError(err: unknown): err is DomainError | AuthError | UnauthenticatedError | NotFoundError | NoActiveWorkflowError | ModelNotLoadedError {
-  return err instanceof DomainError || err instanceof AuthError || err instanceof UnauthenticatedError || err instanceof NotFoundError || err instanceof NoActiveWorkflowError || err instanceof ModelNotLoadedError;
+export function isHandledError(err: unknown): err is DomainError | AuthError | UnauthenticatedError | NotFoundError | NoActiveWorkflowError | ModelNotLoadedError | LlmError {
+  return err instanceof DomainError || err instanceof AuthError || err instanceof UnauthenticatedError || err instanceof NotFoundError || err instanceof NoActiveWorkflowError || err instanceof ModelNotLoadedError || err instanceof LlmError;
+}
+
+// An upstream AI-provider (Anthropic) call failed — invalid/expired API key, rate
+// limit, or the provider being unreachable. Carries a clean, user-facing message so
+// the raw provider response (status line, request_id, JSON body) is NEVER surfaced
+// to the user; the original error is still logged server-side. code/status vary by
+// failure mode (see friendlyLlmError in llm/anthropic.ts).
+export class LlmError extends Error {
+  constructor(message: string, readonly code: string = "LLM_ERROR", readonly status: number = 502) {
+    super(message);
+  }
 }

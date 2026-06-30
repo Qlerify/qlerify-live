@@ -10,9 +10,9 @@
 // env client. All Anthropic SDK construction lives here; nothing else should
 // `new Anthropic()` directly.
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { prisma } from "../db.js";
-import { DomainError } from "../errors.js";
+import { DomainError, LlmError } from "../errors.js";
 import { tenantContext } from "../platform/tenancy/context.js";
 import { decryptSecret } from "../platform/secrets/secret-box.js";
 
@@ -125,5 +125,39 @@ export async function validateAnthropicKey(apiKey: string, model?: string): Prom
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new DomainError(`Anthropic key validation failed: ${msg}`);
+  }
+}
+
+/** Translate a raw Anthropic SDK error into a clean, user-facing LlmError — or null
+ * if `err` isn't a provider error (the caller then handles it generically). The raw
+ * provider body (status line, JSON, request_id) is deliberately dropped from the
+ * user-facing message; callers should still log the original server-side. This is
+ * what turns the opaque `500 INTERNAL: 401 {…invalid x-api-key…}` into a sentence a
+ * user can act on. */
+export function friendlyLlmError(err: unknown): LlmError | null {
+  if (!(err instanceof APIError)) return null;
+  switch ((err as { status?: number }).status) {
+    case 401:
+      return new LlmError(
+        "The Anthropic API key was rejected (invalid, revoked, or from the wrong account). " +
+          "An org admin can set a valid key in Org Admin → Anthropic key, or update the platform ANTHROPIC_API_KEY.",
+        "LLM_KEY_INVALID", 502);
+    case 403:
+      return new LlmError(
+        "The Anthropic API key isn't permitted to use the requested model — check the key's plan or model access.",
+        "LLM_FORBIDDEN", 502);
+    case 429:
+      return new LlmError(
+        "The AI provider is rate-limiting right now. Wait a few seconds and try again.",
+        "LLM_RATE_LIMIT", 503);
+    case 400:
+      return new LlmError(
+        "The AI provider rejected the request (usually a model-name or payload issue, not your input). Please report this if it persists.",
+        "LLM_BAD_REQUEST", 502);
+    default:
+      // 5xx / overloaded / APIConnectionError (network, no status) all land here.
+      return new LlmError(
+        "The AI provider is unavailable right now. Please try again in a moment.",
+        "LLM_UNAVAILABLE", 502);
   }
 }

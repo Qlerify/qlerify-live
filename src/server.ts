@@ -3,8 +3,9 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
 import { loadPacks } from "./packs/loadPacks.js";
@@ -19,6 +20,21 @@ import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(here, "..", "web");
+
+// Self-hosted Monaco editor (the connector "Code" tab). CSP forbids foreign script
+// origins, so we serve Monaco's prebuilt AMD bundle from node_modules over the same
+// origin under /vendor/monaco/ (public — it carries no tenant data, and bearer-token
+// auth isn't sent on <script>/Worker subresource requests anyway). The bundle's base
+// editor worker has a content-hashed filename; we resolve it once at boot so the
+// frontend doesn't have to hardcode a hash that changes on every Monaco upgrade.
+const requireFromHere = createRequire(import.meta.url);
+function monacoMinDir(): string | null {
+  try {
+    return join(dirname(requireFromHere.resolve("monaco-editor/package.json")), "min");
+  } catch {
+    return null;
+  }
+}
 
 // Content-Security-Policy — defense-in-depth behind output escaping. script-src
 // has NO 'unsafe-inline', so injected <script> and inline event handlers
@@ -53,6 +69,24 @@ export async function buildServer() {
 
   if (existsSync(webRoot)) {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
+  }
+
+  // Monaco editor assets (loader, language modes, workers) on the same origin.
+  const monacoMin = monacoMinDir();
+  if (monacoMin && existsSync(monacoMin)) {
+    await app.register(fastifyStatic, { root: monacoMin, prefix: "/vendor/monaco/", decorateReply: false });
+    // The base editor worker's filename is content-hashed; the language workers
+    // (ts/json/css/html) self-resolve via Monaco's own require.toUrl, so only this
+    // one needs to be told to the client. Resolve it from disk at boot.
+    const assetsDir = join(monacoMin, "vs", "assets");
+    const editorWorker = existsSync(assetsDir)
+      ? (readdirSync(assetsDir).find((f) => /^editor\.worker-.*\.js$/.test(f)) ?? null)
+      : null;
+    app.get("/vendor/monaco/manifest.json", async () => ({
+      loaderUrl: "/vendor/monaco/vs/loader.js",
+      vsPath: "/vendor/monaco/vs",
+      editorWorkerUrl: editorWorker ? `/vendor/monaco/vs/assets/${editorWorker}` : null,
+    }));
   }
 
   // Multi-tenant control plane: seed platform basics (built-in roles + the

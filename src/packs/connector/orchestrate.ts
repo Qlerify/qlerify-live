@@ -12,7 +12,7 @@ import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connect
 import { generateConnectorModule, describeConnector, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS } from "./codegen.js";
 import {
   writeModule, readModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
-  installDeps, deleteConnectorFiles, type InstallResult,
+  installDeps, scanImports, deleteConnectorFiles, type InstallResult,
 } from "./runtime.js";
 import {
   appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatKey,
@@ -217,6 +217,38 @@ export async function buildConnector(id: string, instructions?: string, errorRep
       : `Built connector code (${gen.code.length} bytes${depsNote}).`,
   );
   return { deps: gen.deps, install, bytes: gen.code.length, targetKind };
+}
+
+export interface SaveConnectorCodeResult {
+  deps: string[];
+  install: InstallResult;
+  bytes: number;
+}
+
+/** Persist operator-edited connector code (the Connectors "Code" tab). Mirrors the
+ * tail of buildConnector — install whatever the code now imports, write the module,
+ * refresh the sidecar's dep list + phase, re-register the adapter, and regenerate
+ * the summary — but skips AI codegen: the operator's text IS the source. Stop-and-
+ * show: it does NOT run or ingest; the caller tests it next (adapter_dry_run). */
+export async function saveConnectorCode(id: string, code: string): Promise<SaveConnectorCodeResult> {
+  const cfg = readSidecar(id);
+  if (!cfg) throw new Error(`no connector "${id}"`);
+  if (typeof code !== "string") throw new Error("code must be a string");
+  const deps = scanImports(code);
+  // Install first so a missing-package failure is reported now, not as a cryptic
+  // "Cannot find package" on the next pull. The module is written regardless so a
+  // failed install still leaves the operator's edit on disk to repair.
+  const install = await installDeps(deps);
+  writeModule(id, code);
+  const next: AdapterConfig = { ...cfg, kind: "connector", phase: "built", deps };
+  writeSidecar(next);
+  registerAdapter(createConnectorAdapter(next));
+  // Keep the description in step with the hand-edited code (best-effort; falls back
+  // to a deterministic summary if the AI call fails or no key is configured).
+  await regenerateConnectorSummary(id, code);
+  const depsNote = deps.length ? `, deps: ${deps.join(", ")}` : "";
+  appendNote(id, "edited", `Edited connector code by hand (${code.length} bytes${depsNote}).`);
+  return { deps, install, bytes: code.length };
 }
 
 export interface ConnectorInfo {

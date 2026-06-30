@@ -27,7 +27,7 @@ import { prisma } from "../db.js";
 import { EVENTS, events, registryError } from "../events/registry.js";
 import { ontologyView, getOntology } from "../ontology/model.js";
 import { runAgentTurn } from "../chat/agent.js";
-import { resolveAnthropicStatus } from "../llm/anthropic.js";
+import { resolveAnthropicStatus, friendlyLlmError } from "../llm/anthropic.js";
 import { systemPromptSize } from "../chat/system-prompt.js";
 import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
@@ -363,7 +363,12 @@ export function registerRoutes(app: FastifyInstance) {
       // emitting raw 0x0a inside nested string fields in some cases.
       return reply.type("application/json").send(JSON.stringify(result));
     } catch (e: any) {
-      req.log.error({ err: e }, "chat turn failed");
+      req.log.error({ err: e }, "chat turn failed"); // full provider detail (incl. request_id) stays in server logs
+      // Turn an upstream LLM failure (bad key, rate limit, provider down) — or any
+      // handled domain error — into a clean message instead of a raw 500 that leaks
+      // the provider's JSON/request_id.
+      const handled = friendlyLlmError(e) ?? (isHandledError(e) ? e : null);
+      if (handled) return reply.code(handled.status).send({ error: handled.code, message: handled.message });
       return reply.code(500).send({ error: "INTERNAL", message: e?.message ?? String(e) });
     }
   });

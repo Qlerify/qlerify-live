@@ -17,6 +17,7 @@ import { currentWorkflowId } from "../platform/tenancy/context.js";
 import {
   connectorsInWorkflow, connectorForTarget, connectorOwner, connectorInfo,
   regenerateConnectorSummary, removeConnector, setConnectorDateRoles,
+  readConnectorCode, saveConnectorCode,
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
@@ -127,6 +128,46 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       if (err instanceof Error && /is not a field/.test(err.message)) {
         return reply.code(400).send({ error: "BAD_FIELD", message: err.message });
       }
+      throw err;
+    }
+  });
+
+  // The connector's current source — for the Code tab's editor. `connector.read` is
+  // kill-switch-covered disclosure; workflow scoping (404 for a foreign/unknown id)
+  // is the tenant boundary, same pattern as repoint/date-roles/delete.
+  app.get("/api/connectors/:id/code", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const info = connectorInfo(id);
+      return { id, code: readConnectorCode(id) ?? "", hasCode: info?.hasCode ?? false, deps: cfg.deps ?? [], phase: cfg.phase };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Save operator-edited connector code. This code runs in the connector sandbox, so
+  // hand-authoring it IS the RCE surface — gated by `connector.build` (the same
+  // capability as AI build/repair), not the lighter `connector.edit`. Stop-and-show:
+  // writes the module + installs whatever it now imports + re-registers the adapter,
+  // but does NOT run or ingest — the operator tests it next (Test / Fetch).
+  app.post("/api/connectors/:id/code", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const code = (req.body as any)?.code;
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      if (typeof code !== "string") return reply.code(400).send({ error: "NO_CODE", message: "code (string) required" });
+      const result = await saveConnectorCode(id, code);
+      return { id, ...result };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;
     }
   });

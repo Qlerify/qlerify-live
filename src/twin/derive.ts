@@ -40,6 +40,7 @@ import { emit } from "../events/bus.js";
 import { setBusinessClock } from "../events/clock.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { withActorKind } from "../platform/tenancy/actor.js";
 import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
@@ -427,7 +428,9 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
           // The row's FK columns are in e.payload (buildPayload keeps them), and
           // linearOrder guarantees the referenced parent's events are already
           // logged by the time we reach the child.
-          await emit({
+          // Derived facts come from ingested source data, not a person or the
+          // assistant — attribute them to the adapter origin.
+          await withActorKind("adapter", () => emit({
             ref: e.ref,
             aggregateId: e.aggregateId,
             role: e.role,
@@ -435,7 +438,7 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
             ...(e.provenance ? { provenance: e.provenance } : {}),
             evidenceKind: plan.kind,
             evidence: e.evidence,
-          });
+          }));
         } finally {
           setBusinessClock(null);
         }

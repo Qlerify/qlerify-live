@@ -14,14 +14,42 @@ import { prisma } from "./db.js";
 import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
 import { registerControlRoutes } from "./platform/http/control-routes.js";
 import { seedPlatform } from "./platform/provisioning/index.js";
+import { ensureSchemaUpgrades } from "./platform/db/schema-upgrade.js";
 import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = join(here, "..", "web");
 
+// Content-Security-Policy — defense-in-depth behind output escaping. script-src
+// has NO 'unsafe-inline', so injected <script> and inline event handlers
+// (onerror=, onclick=) cannot run even if an escaping sink is ever missed; foreign
+// script origins are blocked. 'unsafe-eval' + the Tailwind Play CDN are required
+// by its in-browser JIT; Google Fonts + the page's inline <style> need the style
+// allowances. All data fetches are same-origin (connect-src 'self').
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 export async function buildServer() {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
   await app.register(cors, { origin: true });
+
+  // Security headers on every response (static shell + API). CSP is the big one;
+  // nosniff + a tight referrer policy round it out.
+  app.addHook("onRequest", (_req, reply, done) => {
+    reply.header("Content-Security-Policy", CSP);
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Referrer-Policy", "no-referrer");
+    done();
+  });
 
   if (existsSync(webRoot)) {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
@@ -34,6 +62,10 @@ export async function buildServer() {
   // system org; the static web shell is the only public surface so the login
   // screen can load. A fresh install has zero orgs: the superuser signs in and
   // creates the first one.
+  // Apply additive schema upgrades (new columns on EventLog / the audit log)
+  // before anything reads or writes them — seedPlatform may record audit rows.
+  // Idempotent + push-free, so it never drops the runtime gen_ tables.
+  await ensureSchemaUpgrades();
   try {
     await seedPlatform();
   } catch (err) {

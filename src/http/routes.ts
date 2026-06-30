@@ -33,6 +33,7 @@ import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { guardData } from "../platform/authz.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
 export function registerRoutes(app: FastifyInstance) {
@@ -41,6 +42,9 @@ export function registerRoutes(app: FastifyInstance) {
     return async (req: any, reply: any) => {
       try {
         const role = roleFromRequest(req);
+        // PDP is the authorization boundary; x-role is now only the DOMAIN role
+        // recorded on the event. A forged x-role still needs `edit` on the workflow.
+        await guardData("workflow.command.write");
         const out = await handler(req.body as TArgs, role);
         return reply.code(200).send(out);
       } catch (err) {
@@ -78,6 +82,7 @@ export function registerRoutes(app: FastifyInstance) {
     if (!event) return reply.code(404).send({ error: "NOT_FOUND", message: `no command "${name}" in the loaded model` });
     try {
       const role = roleFromRequest(req);
+      await guardData("workflow.command.write");
       assertRole(role, event.role);
       const args = (req.body ?? {}) as Record<string, unknown>;
       const command = ont.command(event.commandName);
@@ -281,6 +286,7 @@ export function registerRoutes(app: FastifyInstance) {
   // adapter's provenance mode.
   app.post("/api/adapters/:id/pull", async (req, reply) => {
     try {
+      await guardData("connector.edit"); // runs connector code + lands rows
       const limit = Number((req.body as any)?.limit ?? 10);
       return await ingestPull((req.params as any).id, { limit });
     } catch (err: any) {
@@ -296,6 +302,7 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/api/data/reimport-all", async (req, reply) => {
     const limit = Number((req.body as any)?.limit ?? 1000);
     try {
+      await guardData("workflow.sim.administer");   // empties every table + the event log
       await genericDeleteAll();                     // empty all gen_ tables + the event log
       const result = await reingestAll({ limit });  // re-pull every connector, derive once
       return { ok: true, ...result };
@@ -352,6 +359,7 @@ export function registerRoutes(app: FastifyInstance) {
   // Create a fresh run of the loaded model (instantiates the root aggregate).
   app.post("/sim/cases", async (_req, reply) => {
     try {
+      await guardData("workflow.sim.write");
       const inst = await genericNewInstance();
       return { id: inst.id, template: { aggregate: inst.aggregate } };
     } catch (err) {
@@ -370,6 +378,7 @@ export function registerRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as { caseId?: string };
     if (!body.caseId) throw new Error("caseId required");
     try {
+      await guardData("workflow.sim.write");
       return await genericStep(body.caseId);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
@@ -381,6 +390,7 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/sim/delete", async (req) => {
     const body = (req.body ?? {}) as { caseId?: string };
     if (!body.caseId) throw new Error("caseId required");
+    await guardData("workflow.sim.administer");
     await genericDeleteInstance(body.caseId);
     return { ok: true };
   });
@@ -389,6 +399,7 @@ export function registerRoutes(app: FastifyInstance) {
   // this removes that one run; without one it clears all runs.
   app.post("/sim/reset", async (req) => {
     const body = (req.body ?? {}) as { caseId?: string };
+    await guardData("workflow.sim.administer");
     if (body.caseId) await genericDeleteInstance(body.caseId);
     else await genericDeleteAll();
     return { ok: true };
@@ -396,6 +407,7 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/sim/run-all", async (req) => {
     const body = (req.body ?? {}) as { caseId?: string };
     if (!body.caseId) throw new Error("caseId required");
+    await guardData("workflow.sim.write");
     const steps: any[] = [];
     for (let guard = 0; guard < 500; guard++) {
       const step = await genericStep(body.caseId);
@@ -411,6 +423,8 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/sim/derive", async (req, reply) => {
     const body = (req.body ?? {}) as { preview?: boolean; limit?: number };
     try {
+      // Preview is a read (no writes); a real derive emits events → write gate.
+      if (!body.preview) await guardData("workflow.sim.write");
       return await deriveFromData({ preview: body.preview, limit: body.limit });
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
@@ -425,6 +439,7 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/sim/rebuild", async (req, reply) => {
     const body = (req.body ?? {}) as { limit?: number };
     try {
+      await guardData("workflow.sim.administer"); // clears the event log first
       return await rebuildFromData({ limit: body.limit });
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });

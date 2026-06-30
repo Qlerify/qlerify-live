@@ -49,12 +49,22 @@ model EventLog {
   // The workflow (within the org) this fact belongs to (null = the system default
   // workflow / legacy). Enables per-workflow data scoping in the simulator.
   workflowId     String?
+  // Governance attribution, stamped at the emit() chokepoint from the tenant
+  // context + the actor-kind ALS (src/platform/tenancy/actor.ts):
+  //   actorPrincipalId = WHO authorized it (the human principal — still the human
+  //     even when the AI acts on their behalf). Null off-request / legacy rows.
+  //   actorKind        = HOW it was performed: human | ai | system | adapter.
+  // Together they power the org dashboard's autonomy-mix / override / guardrail
+  // panels without inferring intent from the domain `role`.
+  actorPrincipalId String?
+  actorKind        String?
 
   @@index([occurredAt])
   @@index([eventRef])
   @@index([caseId, occurredAt])
   @@index([organizationId, occurredAt])
   @@index([workflowId, occurredAt])
+  @@index([workflowId, actorKind])
 }
 
 // ===========================================================================
@@ -378,6 +388,7 @@ model PlatAuditEvent {
   streamId         String                // per-org stream (org id today)
   seq              Int                   // monotonic within (org, stream)
   actorPrincipalId String?
+  actorKind        String?               // human | ai | system | adapter — the surface that drove the action (null = legacy / unattributed). Lets guardrail-block-rate isolate AI-originated denials.
   action           String
   targetRef        String?
   decision         String?               // allow | deny

@@ -16,13 +16,20 @@ import { readDoc, readChat, writeChat, deleteChat, connectorChatId, appendNote }
 import { removeConnector } from "../packs/connector/orchestrate.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { guardData } from "../platform/authz.js";
 import { provenanceMeta } from "../twin/provenance.js";
 import { computeSystemsHealth } from "../twin/systems-health.js";
 import * as store from "../twin/projection-store.js";
 
-/** Per-bounded-context event counts (feeds the provenance rollup). */
+/** Per-bounded-context event counts (feeds the provenance rollup). Scoped to the
+ * active workflow/org — without this the rollup (and the provenance mix it feeds)
+ * would sum EVERY tenant's events. */
 async function eventCounts(): Promise<Record<string, number>> {
-  const rows = await prisma.eventLog.groupBy({ by: ["boundedContext"], _count: { _all: true } });
+  const rows = await prisma.eventLog.groupBy({
+    by: ["boundedContext"],
+    where: eventLogOrgWhere(),
+    _count: { _all: true },
+  });
   const out: Record<string, number> = {};
   for (const r of rows) out[r.boundedContext] = r._count._all;
   return out;
@@ -147,6 +154,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
     if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
     const limit = Math.max(1, Math.min(50, Number((req.body as any)?.limit ?? 5)));
     try {
+      await guardData("connector.edit"); // a dry-run executes tenant connector code
       // getOntology() is inside the try so a workflow with no model yet yields a
       // clean ModelNotLoadedError (409) rather than an unhandled throw.
       const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
@@ -216,6 +224,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
       entitiesForBc(o, bc).some((e) => e.name === entity)
       || valueObjectsForBc(o, bc).some((v) => v.name === entity);
     if (!inBc) return reply.code(400).send({ error: "UNKNOWN_ENTITY", message: `"${entity}" is not a table in ${bc}` });
+    await guardData("workflow.sim.administer"); // destructive: drops rows + derived events
     const { rows: deleted, events: eventsDeleted, tableExisted } = await purgeEntityData(entity);
     // Journal the clear onto the history of every connector targeting this table,
     // mirroring how ingestPull records a "Fetch rows" so both actions show in the
@@ -239,6 +248,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
     const adapter = listAdapters().find((a) => a.id === id);
     if (!adapter || adapter.boundedContext !== bc) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
     if (adapter.kind !== "connector") return reply.code(400).send({ error: "NOT_A_CONNECTOR", message: `"${id}" is not an AI-built connector` });
+    await guardData("connector.administer"); // full teardown: code + creds + data + events
     const entity = adapter.targetEntity;
     const { rows: deletedRows, events: deletedEvents } = await purgeEntityData(entity);
     removeConnector(id); // code + credentials + sidecar + registry entry + journal (chat & doc)
@@ -251,7 +261,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
     const grouped = await prisma.eventLog.groupBy({
       by: ["eventName", "provenance"],
-      where: { boundedContext: bc },
+      where: { boundedContext: bc, ...eventLogOrgWhere() },
       _count: { _all: true },
       _max: { occurredAt: true },
     });

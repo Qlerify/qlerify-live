@@ -24,6 +24,7 @@ import { writeSidecar } from "../packs/sidecar.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
 import { tableExists, countRows } from "../twin/projection-store.js";
 import { purgeEntityData } from "../twin/purge.js";
+import { guardData } from "../platform/authz.js";
 
 export function registerConnectorRoutes(app: FastifyInstance): void {
   // Inventory for the active workflow + the available tables (with occupancy) the
@@ -78,6 +79,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
   // the new table must not already have a connector in this workflow.
   app.post("/api/connectors/:id/repoint", async (req, reply) => {
     try {
+      await guardData("connector.edit");
       const wf = currentWorkflowId();
       const id = String((req.params as any).id ?? "");
       const target = String((req.body as any)?.target ?? "");
@@ -112,6 +114,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
   // Field names are validated against the target schema; null/empty clears a role.
   app.post("/api/connectors/:id/date-roles", async (req, reply) => {
     try {
+      await guardData("connector.edit");
       const wf = currentWorkflowId();
       const id = String((req.params as any).id ?? "");
       const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
@@ -133,6 +136,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
   // scoped and bc-independent, so it works even for an orphan whose system is also gone.
   app.post("/api/connectors/:id/delete", async (req, reply) => {
     try {
+      await guardData("connector.administer");
       const wf = currentWorkflowId();
       const id = String((req.params as any).id ?? "");
       const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);

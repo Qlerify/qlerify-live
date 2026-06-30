@@ -22,6 +22,11 @@ export interface AuditInput {
   targetRef?: string | null;
   decision?: "allow" | "deny" | null;
   reason?: string | null;
+  // The surface that drove the action (human/ai/system/adapter). Supplementary
+  // attribution for governance analytics (guardrail-block-rate). Deliberately
+  // OUTSIDE the hash material: adding it there would invalidate every pre-existing
+  // chain. Integrity stays on principal + action + decision + reason.
+  actorKind?: string | null;
 }
 
 interface ChainRow {
@@ -96,7 +101,8 @@ export function recordAudit(input: AuditInput): Promise<{ seq: number; thisHash:
       occurredAt: new Date(),
     };
     const thisHash = hashRow(row);
-    await prisma.platAuditEvent.create({ data: { id: newId(), ...row, thisHash } });
+    // actorKind is stored but NOT part of `row`/the hash material (see AuditInput).
+    await prisma.platAuditEvent.create({ data: { id: newId(), ...row, thisHash, actorKind: input.actorKind ?? null } });
     return { seq: row.seq, thisHash };
   });
 }

@@ -7,7 +7,8 @@ import { findEvent, type EventDef } from "./registry.js";
 import { getBusinessClock } from "./clock.js";
 import { getOntology } from "../ontology/model.js";
 import { provenanceFor, type ProvMode } from "../twin/provenance.js";
-import { currentOrgId, currentWorkflowId } from "../platform/tenancy/context.js";
+import { currentOrgId, currentWorkflowId, tenantContext } from "../platform/tenancy/context.js";
+import { currentActorKind } from "../platform/tenancy/actor.js";
 import { correlateCaseId } from "../twin/correlate.js";
 import type { Role } from "../auth.js";
 
@@ -151,6 +152,11 @@ export async function emit(ev: EmittedEvent): Promise<void> {
       // contexts). workflowId scopes the simulator's per-workflow data plane.
       organizationId: currentOrgId(),
       workflowId: currentWorkflowId(),
+      // Governance attribution (src/platform/tenancy/actor.ts): WHO (the bound
+      // principal, if any) + HOW (human/ai/system/adapter). Off-request emits have
+      // no principal → null.
+      actorPrincipalId: tenantContext()?.principal.id ?? null,
+      actorKind: currentActorKind(),
     },
   });
 

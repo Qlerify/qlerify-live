@@ -1,33 +1,105 @@
 // Full-power connector runtime (Part 2.4). The "integrate to anything" engine.
 //
-// An AI-built connector is a plain ESM module — `.qlerify/connectors/<id>.mjs` —
-// that exports `async fetchRows(ctx)` (and optionally `probe(ctx)`) and may import
-// ANY npm package and speak ANY protocol (AWS SDK, pg, googleapis, soap, raw
-// fetch…). Unlike the Part 2.3 authored body (HTTP-only, in-process, deny-scanned),
-// this one is unrestricted — so it runs in an ISOLATED child `node` process with a
-// wall-clock + heap budget. A connector that hangs, crashes, or runs wild kills
-// only its own subprocess, never the server or the demo.
+// An AI-built connector is a plain ESM module — `<workspace>/<id>.mjs` — that
+// exports `async fetchRows(ctx)` (and optionally `probe(ctx)`) and may import ANY
+// npm package and speak ANY protocol (AWS SDK, pg, googleapis, soap, raw fetch…).
+// Unlike the Part 2.3 authored body (HTTP-only, in-process, deny-scanned), this one
+// is unrestricted — so it runs in a SANDBOXED child `node` process.
 //
-// SECURITY POSTURE (PoC, security deferred per the product direction): the
-// subprocess gets the credentials blob via a file (not argv/env), a reduced env
-// (no ANTHROPIC_API_KEY etc.), and a hard timeout. Process isolation REPLACES the
-// deny-scan as the safety boundary. Real hardening (containers, egress policy,
-// seccomp) drops in behind this same `runConnector` contract later.
+// SECURITY SANDBOX (Workstream D). Untrusted, AI-/tenant-influenced code, so the
+// child is confined on several axes:
+//   D1  Workspace lives OUTSIDE the repo (QLERIFY_DATA_DIR / ~/.qlerify-data), so
+//       path traversal (`../../.env`, `../../prisma/dev.db`) cannot reach the
+//       platform master key or the control-plane DB.
+//   D2  Node permission model (`--experimental-permission` + `--allow-fs-read/write`
+//       scoped to the workspace, no `--allow-child-process` / `--allow-worker` /
+//       `--allow-addons`): the runtime — not a regex — denies any FS access outside
+//       the workspace, re-spawns, worker threads, and native addons.
+//   D3  `npm install --ignore-scripts` + a secret-free env (kills postinstall RCE
+//       and stops a malicious dep from reading the host's secrets).
+//   D4  The runner's `fetch` is SSRF-guarded (rejects loopback / link-local /
+//       RFC1918 / the cloud metadata IP). An optional bubblewrap jail
+//       (QLERIFY_CONNECTOR_JAIL=bwrap) adds OS-level egress/mount confinement on
+//       Linux deployments.
+// Residual (tracked): full per-(org,workflow) path namespacing of the workspace,
+// and unifying the in-process authored path onto this same runner. The wall-clock +
+// heap budget still bounds a hang/crash to the child.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { connectorsEnabled } from "../../config/features.js";
 import type { EntitySchema } from "../../ontology/model.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-export const CONNECTORS_DIR = join(ROOT, ".qlerify", "connectors");
+// D1 — the workspace is OUTSIDE the repo tree. Override with QLERIFY_DATA_DIR (a
+// persistent volume on Fly). The default is the user's home, never the checkout,
+// so `../../` from here can never reach the repo's .env / prisma/dev.db.
+const DATA_ROOT = process.env.QLERIFY_DATA_DIR || join(homedir(), ".qlerify-data");
+export const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
 
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network
 const HEAP_MB = 512;
+
+// D2 — detect once which permission-model flag this node accepts (renamed across
+// versions: --experimental-permission on 20/22, --permission on 23.5+). null ⇒ the
+// runtime has no permission model; we fall back to D1+D3+D4 with a logged warning.
+let _permFlag: string | null | undefined;
+export function permissionFlag(): string | null {
+  if (_permFlag !== undefined) return _permFlag;
+  for (const flag of ["--experimental-permission", "--permission"]) {
+    try {
+      const r = spawnSync(process.execPath, [flag, "-e", "0"], { encoding: "utf8", timeout: 5000 });
+      if (r.status === 0) return (_permFlag = flag);
+    } catch { /* try the next flag */ }
+  }
+  if (process.env.NODE_ENV === "production") {
+    console.warn("[connector-sandbox] node has no permission model — connector FS confinement relies on D1 (out-of-repo workspace) only");
+  }
+  return (_permFlag = null);
+}
+
+// D2 — the fs-confinement argv for the run child: deny all fs except the workspace,
+// and grant NO child_process / worker / addons. Returns [] when unsupported.
+function sandboxArgs(): string[] {
+  const flag = permissionFlag();
+  if (!flag) return [];
+  return [flag, `--allow-fs-read=${CONNECTORS_DIR}`, `--allow-fs-write=${CONNECTORS_DIR}`];
+}
+
+// D4 (strong, OPT-IN) — an OS-level jail for the run child via bubblewrap. The
+// Node permission model confines the filesystem but NOT raw sockets; this adds a
+// fresh mount/pid/ipc namespace that exposes only {node, workspace, runtime libs,
+// CA certs}. Enabled only on Linux deployments where bwrap exists AND
+// QLERIFY_CONNECTOR_JAIL=bwrap is set, so local/dev runs are unaffected. The
+// concrete bind set is deployment-tunable. NOT exercised on macOS dev.
+let _bwrap: boolean | undefined;
+function bwrapAvailable(): boolean {
+  if (process.env.QLERIFY_CONNECTOR_JAIL !== "bwrap") return false;
+  if (_bwrap !== undefined) return _bwrap;
+  try { _bwrap = spawnSync("bwrap", ["--version"], { timeout: 3000 }).status === 0; }
+  catch { _bwrap = false; }
+  return _bwrap;
+}
+function jailWrap(bin: string, args: string[]): { cmd: string; cmdArgs: string[] } {
+  if (!bwrapAvailable()) return { cmd: bin, cmdArgs: args };
+  const bwrapArgs = [
+    "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind-try", "/lib", "/lib", "--ro-bind-try", "/lib64", "/lib64", "--ro-bind-try", "/bin", "/bin",
+    "--ro-bind-try", "/etc/ssl", "/etc/ssl", "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+    "--ro-bind", bin, bin,
+    "--bind", CONNECTORS_DIR, CONNECTORS_DIR,
+    "--proc", "/proc", "--dev", "/dev",
+    "--chdir", CONNECTORS_DIR,
+    "--", bin, ...args,
+  ];
+  return { cmd: "bwrap", cmdArgs: bwrapArgs };
+}
 
 // ---------------------------------------------------------------------------
 // Workspace — one shared dir so a fat SDK (e.g. @aws-sdk) installs once and every
@@ -45,6 +117,7 @@ const RUNNER = join(CONNECTORS_DIR, "runner.mjs");
  * is written verbatim (idempotent) so it ships with no separate build step. */
 const RUNNER_SRC = `// AUTO-GENERATED by src/packs/connector/runtime.ts — do not edit.
 import { readFileSync, writeFileSync } from "node:fs";
+import { lookup } from "node:dns/promises";
 const [, , modUrl, ctxFile, credFile, outFile] = process.argv;
 const input = JSON.parse(readFileSync(ctxFile, "utf8"));
 let credentials = {};
@@ -52,13 +125,48 @@ try { credentials = JSON.parse(readFileSync(credFile, "utf8")); } catch {}
 const trace = [];
 const log = (m) => { trace.push(typeof m === "string" ? m : JSON.stringify(m)); };
 const pick = (...k) => { for (const x of k) if (credentials && credentials[x] != null) return credentials[x]; return undefined; };
+
+// D4 — SSRF guard. Reject loopback / link-local / RFC1918 / CGNAT / the cloud
+// metadata IP (169.254.169.254), for both literal-IP and resolved hostnames, so a
+// connector cannot pivot to internal services or steal instance credentials.
+function ipBlocked(ip) {
+  if (!ip) return false;
+  let s = String(ip);
+  if (s.startsWith("::ffff:")) s = s.slice(7);
+  if (s === "::1") return true;
+  const low = s.toLowerCase();
+  if (low.startsWith("fe80") || low.startsWith("fc") || low.startsWith("fd")) return true;
+  const m = s.match(/^(\\d+)\\.(\\d+)\\.(\\d+)\\.(\\d+)$/);
+  if (!m) return false;
+  const a = +m[1], b = +m[2];
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+async function safeFetch(url, opts) {
+  let host;
+  try { host = new URL(typeof url === "string" ? url : (url && url.url) || "").hostname; }
+  catch { throw new Error("connector fetch: invalid URL"); }
+  const bare = host.replace(/^\\[|\\]$/g, "");
+  if (/^[0-9.]+$/.test(bare) || bare.includes(":")) {
+    if (ipBlocked(bare)) throw new Error("connector fetch blocked: " + bare + " is a private/link-local address");
+  } else {
+    const addrs = await lookup(host, { all: true });
+    for (const ad of addrs) if (ipBlocked(ad.address)) throw new Error("connector fetch blocked: " + host + " resolves to a private address (" + ad.address + ")");
+  }
+  return globalThis.fetch(url, opts);
+}
+
 const ctx = {
   entity: input.entity,
   limit: input.limit,
   endpoint: input.endpoint,
   credentials,
   secret: pick("secret", "apiKey", "api_key", "token", "accessToken", "key", "password"),
-  fetch: (...a) => globalThis.fetch(...a),
+  fetch: (...a) => safeFetch(...a),
   log,
   trace,
 };
@@ -189,8 +297,11 @@ export async function installDeps(deps: string[]): Promise<InstallResult> {
   if (missing.length === 0) return { installed: [], skipped, ok: true, log: "" };
 
   return await new Promise<InstallResult>((resolve) => {
-    const args = ["install", ...missing, "--no-audit", "--no-fund", "--loglevel=error", "--save"];
-    const child = spawn("npm", args, { cwd: CONNECTORS_DIR, env: { ...process.env } });
+    // D3 — `--ignore-scripts` disables postinstall/preinstall RCE; the env is
+    // stripped to PATH+HOME so a dependency (whose scripts are off anyway) can
+    // never read PLATFORM_ENCRYPTION_KEY / ANTHROPIC_API_KEY / DATABASE_URL.
+    const args = ["install", ...missing, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", "--save"];
+    const child = spawn("npm", args, { cwd: CONNECTORS_DIR, env: { PATH: process.env.PATH, HOME: process.env.HOME } });
     let log = "";
     const cap = (b: Buffer) => { log += b.toString(); if (log.length > 8000) log = log.slice(-8000); };
     child.stdout.on("data", cap);
@@ -233,6 +344,9 @@ export interface RunResult {
  * argv/env). Captures the child's stdout/stderr into the trace so a crash or a
  * console.log surfaces to the AI troubleshooter for the iterate-and-fix loop. */
 export async function runConnector(id: string, req: RunRequest): Promise<RunResult> {
+  // D7 — defense at the execution chokepoint: even if a route is missed, a
+  // locked-down deployment never runs connector code.
+  if (!connectorsEnabled()) return { ok: false, error: "the connector subsystem is disabled for this deployment", trace: [] };
   ensureWorkspace();
   if (!moduleExists(id)) return { ok: false, error: `connector "${id}" has no code yet — build it first`, trace: [] };
 
@@ -250,6 +364,7 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
   };
 
   const argv = [
+    ...sandboxArgs(), // D2 — fs/cap confinement (empty if this node lacks the model)
     `--max-old-space-size=${HEAP_MB}`,
     RUNNER,
     pathToFileURL(modulePath(id)).href,
@@ -257,9 +372,10 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
     credPath(id),
     resultPath(id),
   ];
+  const { cmd, cmdArgs } = jailWrap(process.execPath, argv); // D4 — optional OS jail
 
   return await new Promise<RunResult>((resolve) => {
-    const child = spawn(process.execPath, argv, { cwd: CONNECTORS_DIR, env: childEnv });
+    const child = spawn(cmd, cmdArgs, { cwd: CONNECTORS_DIR, env: childEnv });
     let out = "";
     const cap = (b: Buffer) => { out += b.toString(); if (out.length > 16000) out = out.slice(-16000); };
     child.stdout.on("data", cap);

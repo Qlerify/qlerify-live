@@ -12,6 +12,7 @@
 // ARCHITECTURE.md Part 2.3 "Path to higher security".
 
 import { envCredentialResolver, type AdapterConfig } from "./types.js";
+import { assertSafeUrl } from "./net-guard.js";
 import type { EntitySchema } from "../ontology/model.js";
 
 const TIMEOUT_MS = 8000;
@@ -53,6 +54,7 @@ export async function createRunContext(cfg: AdapterConfig, entity: EntitySchema,
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     trace.push(`fetch ${redact(String(url))}`);
     try {
+      await assertSafeUrl(String(url)); // SSRF guard (same policy as the connector runner)
       const res = await fetch(url, { ...init, signal: ctrl.signal });
       const len = Number(res.headers.get("content-length") ?? 0);
       if (len && len > MAX_BYTES) throw new Error(`response too large: ${len} bytes (cap ${MAX_BYTES})`);

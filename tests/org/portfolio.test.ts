@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../../src/db.js";
 import { newId } from "../../src/platform/ids.js";
+import { recordAudit } from "../../src/platform/audit/index.js";
 import { ensureOntologyResource, createVersion } from "../../src/platform/ontology-store/ontology-store.js";
 import { setMeta } from "../../src/twin/projection-store.js";
 import {
@@ -352,5 +353,67 @@ describe("derived baseline → cycle index, at-risk, predicted lateness", () => 
     expect(p.connectorFreshness.sources.some((s) => s.name === "Sales")).toBe(true);
     expect(p.connectorFreshness.sources[0]).toHaveProperty("slaMinutes");
     expect(p.connectorFreshness.sources[0]).toHaveProperty("status");
+  });
+});
+
+// Workstream C — the AI Activity & Trust panel: autonomy mix (actorKind),
+// override (ai→human on the same aggregate), and guardrail-block-rate (denied AI
+// writes from the audit log). Own org so the exact counts above are untouched.
+describe("AI activity & trust panel", () => {
+  const ca3 = newId(), org3 = newId(), ws3 = newId(), wf4 = newId();
+  let carol: string;
+  const A2 = newId(); // the aggregate an AI touched and a human later corrected
+  const t = (mins: number) => new Date(now.getTime() - mins * 60_000);
+
+  async function ev3(key: string, actorKind: string, aggregateId: string, occurredAt: Date) {
+    await prisma.eventLog.create({
+      data: {
+        id: newId(), eventName: key, eventRef: REF(key), boundedContext: "Sales", aggregateRoot: "Demand",
+        aggregateId, caseId: newId(), role: ROLE[key] ?? "Planner", payload: "{}",
+        occurredAt, businessAt: occurredAt, provenance: "live", organizationId: org3, workflowId: wf4, actorKind,
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    await prisma.platCustomerAccount.create({ data: { id: ca3, name: `CA3 ${SFX}` } });
+    await prisma.platOrganization.create({ data: { id: org3, customerAccountId: ca3, name: `Org3 ${SFX}`, slug: `org3-${SFX}` } });
+    const env = await prisma.platEnvironment.create({ data: { id: newId(), organizationId: org3, name: "development", region: "local" } });
+    await prisma.platWorkspace.create({ data: { id: ws3, organizationId: org3, environmentId: env.id, name: "Default" } });
+    carol = (await prisma.platIdentity.create({ data: { id: newId(), subject: `od3-${SFX}` } })).id;
+    await prisma.platOrgMembership.create({ data: { id: newId(), identityId: carol, organizationId: org3 } });
+    await prisma.platWorkflow.create({ data: { id: wf4, organizationId: org3, workspaceId: ws3, name: "Assisted Ops" } });
+
+    // 2 human, 2 ai. The ai event on A2 is later corrected by a human on A2 (override).
+    await ev3("DemandCreated", "human", newId(), t(50));
+    await ev3("DemandPlanned", "ai", A2, t(40));        // AI acts on A2
+    await ev3("DemandDelivered", "human", A2, t(30));   // human corrects A2 → override
+    await ev3("DemandPlanned", "ai", newId(), t(20));   // AI, not overridden
+    await ev3("DemandCreated", "human", newId(), t(10));
+
+    // Guardrail: two AI write attempts in the audit log, one denied.
+    await recordAudit({ organizationId: org3, actorPrincipalId: carol, action: "connector.edit", decision: "allow", actorKind: "ai" });
+    await recordAudit({ organizationId: org3, actorPrincipalId: carol, action: "connector.edit", decision: "deny", actorKind: "ai" });
+  });
+
+  afterAll(async () => {
+    await prisma.platAuditEvent.deleteMany({ where: { organizationId: org3 } });
+    await prisma.eventLog.deleteMany({ where: { organizationId: org3 } });
+    await prisma.platWorkflow.deleteMany({ where: { organizationId: org3 } });
+    await prisma.platWorkspace.deleteMany({ where: { organizationId: org3 } });
+    await prisma.platEnvironment.deleteMany({ where: { organizationId: org3 } });
+    await prisma.platOrgMembership.deleteMany({ where: { organizationId: org3 } });
+    await prisma.platIdentity.deleteMany({ where: { id: carol } });
+    await prisma.platOrganization.deleteMany({ where: { id: org3 } });
+    await prisma.platCustomerAccount.deleteMany({ where: { id: ca3 } });
+  });
+
+  it("computes autonomy mix, override rate, and guardrail-block-rate", async () => {
+    const a = (await computePortfolio(org3)).aiActivity;
+    expect(a.live).toBe(true);
+    expect(a.byKind).toMatchObject({ human: 3, ai: 2 });
+    expect(a.aiActionShare).toMatchObject({ ai: 2, human: 3, pct: 40 }); // 2 / (2+3)
+    expect(a.override).toMatchObject({ aiEvents: 2, overridden: 1, pct: 50 }); // A2 corrected
+    expect(a.guardrail).toMatchObject({ aiAttempts: 2, aiBlocked: 1, pct: 50 });
   });
 });

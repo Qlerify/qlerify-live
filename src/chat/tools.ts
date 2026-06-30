@@ -20,6 +20,26 @@ import {
 } from "../packs/connector/orchestrate.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { ingestPull } from "../packs/ingest.js";
+import { guardData } from "../platform/authz.js";
+
+// Chat WRITE tools → the PDP action they require. The chat loop runs each tool
+// under withActorKind("ai"), so a deny here is audited as an AI guardrail block
+// (Workstream C) and returned to the model as a tool error. Tools absent from this
+// map are reads (no state change) and stay membership-scoped. This server-side
+// gate — not the model-asserted `confirmed:true` flag — is the security boundary,
+// so a prompt-injected turn can never escalate past the caller's own grants.
+const TOOL_WRITE_ACTIONS: Record<string, string> = {
+  next_step: "workflow.sim.write",
+  create_case: "workflow.sim.write",
+  regenerate_adapter_body: "connector.edit",
+  reset_adapter: "connector.administer",
+  create_connector: "connector.edit",
+  set_connector_credentials: "connector.edit",
+  build_connector: "connector.edit",
+  ingest_connector: "connector.edit",
+  copy_connector_credentials: "connector.edit",
+  remove_connector: "connector.administer",
+};
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -357,6 +377,11 @@ function err(message: string): ToolResult {
 export async function runTool(name: string, input: unknown): Promise<ToolResult> {
   const args = (input ?? {}) as Record<string, any>;
   try {
+    // Authorize write tools against the active workflow before dispatch. A deny
+    // throws here, is audited (ensureAllowed), and surfaces to the model as a
+    // tool error via the catch below.
+    const action = TOOL_WRITE_ACTIONS[name];
+    if (action) await guardData(action);
     switch (name) {
       case "list_cases":
         return ok(await handleListCases(args.olderThanSeconds));

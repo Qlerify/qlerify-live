@@ -737,9 +737,9 @@ function eventLogBody() {
       <details class="border-b border-stone-100">
         <summary class="px-4 py-2.5 cursor-pointer select-none hover:bg-stone-50">
           <span class="text-[11px] tabular-nums text-stone-400 mr-1">${i + 1}</span>
-          <span class="font-medium text-stone-900">${e.eventName}</span> ${provChip(e.provenance)} ${evidenceChip(e.evidenceKind)}
+          <span class="font-medium text-stone-900">${escapeHtml(e.eventName)}</span> ${provChip(e.provenance)} ${evidenceChip(e.evidenceKind)}
           <div class="text-xs text-stone-500 mt-0.5 ml-5">
-            <span class="mono">${e.boundedContext}</span> · ${e.role} · ${new Date(e.occurredAt).toLocaleTimeString()}${biz ? ` · <span title="business date">${biz}</span>` : ""}
+            <span class="mono">${escapeHtml(e.boundedContext)}</span> · ${escapeHtml(e.role)} · ${new Date(e.occurredAt).toLocaleTimeString()}${biz ? ` · <span title="business date">${biz}</span>` : ""}
           </div>
         </summary>
         <div class="px-4 pb-3 pl-9">
@@ -1811,6 +1811,43 @@ function orgFreshnessPanel(o) {
     </section>`;
 }
 
+// --- AI Activity & Trust — live, from the EventLog actorKind stamp + PDP audit
+// log (no longer "needs instrumentation"). Autonomy mix, override, guardrails. ---
+function orgAiActivityPanel(o) {
+  const a = o.aiActivity;
+  if (!a) return "";
+  if (!a.live) {
+    return panelShell("AI activity & trust", "Autonomy · override · guardrails",
+      `<div class="text-sm text-stone-400">${escapeHtml(a.note)}</div>`);
+  }
+  const s = a.aiActionShare;
+  const aiPct = s.pct ?? 0;
+  const humanPct = s.pct != null ? 100 - s.pct : 0;
+  const mix = `
+    <div>
+      <div class="flex justify-between text-xs text-stone-600"><span>Autonomy mix</span><span class="tabular-nums">${s.pct != null ? s.pct + "% AI" : "—"}</span></div>
+      <div class="mt-1 h-2.5 bg-stone-100 rounded overflow-hidden flex" title="${s.ai} AI · ${s.human} human state-changing events">
+        <div class="bg-violet-500" style="width:${aiPct}%"></div>
+        <div class="bg-stone-300" style="width:${humanPct}%"></div>
+      </div>
+      <div class="flex gap-3 pt-1 text-[10px] text-stone-500">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-violet-500"></span>AI ${s.ai}</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-sm bg-stone-300"></span>Human ${s.human}</span>
+      </div>
+    </div>`;
+  const stats = `
+    <div class="grid grid-cols-2 gap-3 mt-3">
+      ${orgMiniStat("Override rate", a.override.pct != null ? a.override.pct + "%" : "—", a.override.pct > 0 ? "text-amber-700" : "text-stone-900")}
+      ${orgMiniStat("Guardrail blocks", a.guardrail.pct != null ? a.guardrail.pct + "%" : "—", a.guardrail.aiBlocked > 0 ? "text-rose-700" : "text-stone-900")}
+    </div>
+    <div class="mt-2 grid grid-cols-2 gap-3 text-[10px] text-stone-500 text-center">
+      <div>${a.override.overridden}/${a.override.aiEvents} AI events corrected</div>
+      <div>${a.guardrail.aiBlocked}/${a.guardrail.aiAttempts} AI writes denied</div>
+    </div>`;
+  const note = a.note ? `<div class="mt-3 text-xs text-stone-500">${escapeHtml(a.note)}</div>` : "";
+  return panelShell("AI activity & trust", "Autonomy · override · guardrails", `${mix}${stats}${note}`);
+}
+
 // The currently-focused workflow's name, when one is selected. Derived from the
 // live selection (AUTH.workflow) so it stays in sync with the breadcrumb and
 // survives a Back into that workflow.
@@ -1899,7 +1936,10 @@ function orgView() {
       </div>
       ${grid}
       ${feeds}
-      <div class="mt-6">${orgFreshnessPanel(o)}</div>
+      <div class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-3">
+        ${orgAiActivityPanel(o)}
+        ${orgFreshnessPanel(o)}
+      </div>
     </main>
     <footer class="px-6 py-3 text-xs text-stone-500 border-t border-stone-200 bg-stone-50">
       <span>Organisation portfolio · computed live from the event log across all workflows.</span>
@@ -3707,14 +3747,14 @@ function timeline() {
       <div data-step="${i}" title="View the data as of this event" class="absolute cursor-pointer rounded-md border ${isPast ? "border-emerald-200" : phaseBorder} ${ringClass} ${isPast ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired || isSelected ? "" : "opacity-60"} flex flex-col overflow-hidden"
            style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardHeightFor(e.ref)}px; ${provHatch(provMode)}">
         <div class="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
-          <span class="truncate">${i+1}. ${e.boundedContext}</span>
+          <span class="truncate">${i+1}. ${escapeHtml(e.boundedContext)}</span>
           <span class="flex items-center gap-1 shrink-0">
             ${e.derived ? `<span class="text-amber-600 font-semibold">DERIVED</span>` : ""}
             ${provChip(provMode)}
           </span>
         </div>
-        <div class="text-[12px] font-medium leading-tight text-stone-800">${e.name}</div>
-        <div class="text-[10px] text-stone-500 mt-1">${e.role}</div>
+        <div class="text-[12px] font-medium leading-tight text-stone-800">${escapeHtml(e.name)}</div>
+        <div class="text-[10px] text-stone-500 mt-1">${escapeHtml(e.role)}</div>
         ${footer}
       </div>
     `;
@@ -4277,12 +4317,12 @@ function lastEventInline() {
   return `
     <span class="ml-auto flex items-center gap-1.5 min-w-0">
       <span class="uppercase tracking-widest text-stone-400 font-semibold">Last event</span>
-      <span class="font-medium text-stone-800 truncate">${last.eventName}</span>
+      <span class="font-medium text-stone-800 truncate">${escapeHtml(last.eventName)}</span>
       ${provChip(last.provenance)}
       <span class="text-stone-300">·</span>
-      <span class="mono text-stone-500">${last.boundedContext}</span>
+      <span class="mono text-stone-500">${escapeHtml(last.boundedContext)}</span>
       <span class="text-stone-300">·</span>
-      <span class="text-stone-500">${last.role}</span>
+      <span class="text-stone-500">${escapeHtml(last.role)}</span>
       <span class="text-stone-300">·</span>
       <span class="text-stone-400">${new Date(last.occurredAt).toLocaleTimeString()}</span>
     </span>`;

@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
     environment: "node",
+    globalSetup: ["tests/helpers/global-setup.ts"],
     testTimeout: 15_000,
     pool: "forks",
     // Run the whole suite serially in a single reused child process. In Vitest 4

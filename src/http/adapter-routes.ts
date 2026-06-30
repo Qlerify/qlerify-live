@@ -15,6 +15,7 @@ import { createSimulatedAdapter } from "../packs/adapters/simulated.js";
 import { adapterCfg, authorAdapterBody, resetAdapter, removeAdapter } from "../packs/author.js";
 import { getOntology } from "../ontology/model.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
+import { guardData } from "../platform/authz.js";
 import type { AdapterConfig, ProvMode } from "../packs/types.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -30,6 +31,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // synthesized rows), persists a sidecar, and registers it. The workbench then
   // drives Configure → Generate (AI) → Test → Ingest to climb to recorded/live.
   app.post("/api/bc/:bc/adapter", async (req, reply) => {
+    await guardData("connector.edit");
     const o = getOntology();
     const raw = (req.params as any).bc;
     const bc = o.boundedContexts.find((b) => b.toLowerCase() === String(raw).toLowerCase());
@@ -69,6 +71,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   app.post("/api/adapters/:id/code/generate", async (req, reply) => {
     const cfg = adapterCfg((req.params as any).id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
+    await guardData("connector.edit");
     if (!(await resolveAnthropicStatus()).configured) {
       return reply.code(400).send({ error: "NO_API_KEY", message: "No Anthropic key — set your organization's key in Organisation admin, or the platform ANTHROPIC_API_KEY in .env" });
     }
@@ -85,6 +88,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // generated bodies + stored credentials; re-registers a simulated adapter.
   app.post("/api/adapters/:id/reset", async (req, reply) => {
     try {
+      await guardData("connector.administer");
       return { ok: true, ...resetAdapter((req.params as any).id) };
     } catch (err: any) {
       return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
@@ -94,6 +98,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // Remove an adapter entirely (back to "Connect a system").
   app.delete("/api/adapters/:id", async (req, reply) => {
     try {
+      await guardData("connector.administer");
       removeAdapter((req.params as any).id);
       return { ok: true, removed: (req.params as any).id };
     } catch (err: any) {
@@ -105,6 +110,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   app.put("/api/bc/:bc/adapter/:id/config", async (req, reply) => {
     const cfg = adapterCfg((req.params as any).id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
+    await guardData("connector.edit");
     const body = (req.body ?? {}) as any;
     const next: AdapterConfig = {
       ...cfg,
@@ -124,6 +130,7 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   app.put("/api/bc/:bc/adapter/:id/credential", async (req, reply) => {
     const cfg = adapterCfg((req.params as any).id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
+    await guardData("connector.edit");
     const body = (req.body ?? {}) as any;
     const ref = (typeof body.credentialsRef === "string" && body.credentialsRef) ? body.credentialsRef : cfg.credentialsRef;
     if (!ref) return reply.code(400).send({ error: "NO_REF", message: "credentialsRef required" });

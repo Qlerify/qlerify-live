@@ -183,6 +183,7 @@ type EvtRow = {
   occurredAt: Date;
   provenance: string | null;
   aggregateId: string;
+  actorKind: string | null;
 };
 
 interface InstanceState {
@@ -285,6 +286,20 @@ export interface PortfolioResult {
   timeliness: TimelinessPanel | null;
   valueAtRisk: ValueAtRisk;
   connectorFreshness: ConnectorFreshness;
+  aiActivity: AiActivity;
+}
+
+/** AI Activity & Trust (Workstream C) — now live, fed by the EventLog actorKind
+ * stamp + the PDP audit log. `live=false` only when there has been zero attributed
+ * activity yet (a fresh org), so the UI can show "no AI activity yet" instead of
+ * implying instrumented zeros. */
+export interface AiActivity {
+  live: boolean;
+  byKind: { human: number; ai: number; adapter: number; system: number };
+  aiActionShare: { ai: number; human: number; pct: number | null }; // ai ÷ (ai+human) state-changing events
+  override: { aiEvents: number; overridden: number; pct: number | null }; // ai events a human later corrected on the same aggregate
+  guardrail: { aiAttempts: number; aiBlocked: number; pct: number | null }; // denied AI writes ÷ attempted (cumulative, from the audit log)
+  note: string;
 }
 
 /** Days-first cost-of-delay: exposure measured in DAYS (the unit we actually
@@ -413,6 +428,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     select: {
       workflowId: true, caseId: true, eventRef: true, eventName: true, role: true,
       boundedContext: true, businessAt: true, occurredAt: true, provenance: true, aggregateId: true,
+      actorKind: true,
     },
     orderBy: { occurredAt: "asc" },
   })) as EvtRow[];
@@ -640,6 +656,9 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
   // ---- Connector freshness (PREVIEW: static placeholder until real lastPullAt wiring) ----
   const connectorFreshness = buildConnectorFreshness(loaded);
 
+  // ---- AI Activity & Trust (live, fed by actorKind + the PDP audit log) ----
+  const aiActivity = await computeAiActivity(orgId, events);
+
   return {
     generatedAt: now.toISOString(),
     org: { id: orgId },
@@ -665,6 +684,54 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     timeliness,
     valueAtRisk,
     connectorFreshness,
+    aiActivity,
+  };
+}
+
+/** Autonomy mix + override + guardrail-block-rate over the org's events + audit
+ * log. Honest heuristics, labelled as such: override is a same-aggregate
+ * ai→human correction; guardrail is cumulative denied-AI-writes from the audit
+ * log (not windowed). Legacy rows with no actorKind are bucketed as `system`. */
+async function computeAiActivity(orgId: string, events: EvtRow[]): Promise<AiActivity> {
+  const byKind = { human: 0, ai: 0, adapter: 0, system: 0 };
+  for (const e of events) {
+    const k = (e.actorKind ?? "system") as keyof typeof byKind;
+    if (k in byKind) byKind[k]++;
+    else byKind.system++;
+  }
+
+  // Override: an ai-origin event on an aggregate that a human later acts on (same
+  // aggregateId, later in time). events is already ordered by occurredAt asc.
+  const humanAfter = new Map<string, boolean>(); // aggregateId → a human event seen (scanning newest→oldest)
+  let aiEvents = 0, overridden = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e.aggregateId) continue;
+    if (e.actorKind === "human") humanAfter.set(e.aggregateId, true);
+    else if (e.actorKind === "ai") {
+      aiEvents++;
+      if (humanAfter.get(e.aggregateId)) overridden++;
+    }
+  }
+
+  // Guardrail: denied AI writes ÷ attempted, from the PDP audit log (cumulative).
+  const aiAudits = await prisma.platAuditEvent.findMany({
+    where: { organizationId: orgId, actorKind: "ai" },
+    select: { decision: true },
+  });
+  const aiAttempts = aiAudits.length;
+  const aiBlocked = aiAudits.filter((a) => a.decision === "deny").length;
+
+  const actorTotal = byKind.ai + byKind.human;
+  return {
+    live: byKind.ai > 0 || byKind.human > 0 || aiAttempts > 0,
+    byKind,
+    aiActionShare: { ai: byKind.ai, human: byKind.human, pct: actorTotal ? pct(byKind.ai, actorTotal) : null },
+    override: { aiEvents, overridden, pct: aiEvents ? pct(overridden, aiEvents) : null },
+    guardrail: { aiAttempts, aiBlocked, pct: aiAttempts ? pct(aiBlocked, aiAttempts) : null },
+    note: aiAttempts === 0 && byKind.ai === 0
+      ? "No AI-originated activity yet — the assistant has not written to this org's workflows."
+      : "Override is a same-aggregate ai→human correction heuristic; guardrail-block-rate is cumulative from the audit log.",
   };
 }
 

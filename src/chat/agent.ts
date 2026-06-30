@@ -7,6 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_BLOCKS } from "./system-prompt.js";
 import { TOOLS, runTool } from "./tools.js";
 import { getAnthropicClient } from "../llm/anthropic.js";
+import { withActorKind } from "../platform/tenancy/actor.js";
 
 const EFFORT = (process.env.CHAT_EFFORT ?? "medium") as "low" | "medium" | "high";
 // Headroom for the connector build→test→repair→ingest loop (each is a tool turn).
@@ -62,7 +63,9 @@ export async function runAgentTurn(messages: Anthropic.MessageParam[]): Promise<
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const tu of toolUseBlocks) {
-      const result = await runTool(tu.name, tu.input);
+      // Every state change a chat tool makes is AI-originated: tag the EventLog
+      // (autonomy mix) and any PDP audit (guardrail-block-rate) accordingly.
+      const result = await withActorKind("ai", () => runTool(tu.name, tu.input));
       const preview = result.content.length > 200 ? result.content.slice(0, 200) + "…" : result.content;
       toolCalls.push({ name: tu.name, input: tu.input, isError: result.isError, preview });
       toolResults.push({

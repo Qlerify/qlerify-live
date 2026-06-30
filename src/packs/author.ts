@@ -9,16 +9,23 @@ import { readSidecar, writeSidecar, deleteSidecar } from "./sidecar.js";
 import { createAuthoredAdapter } from "./adapters/authored.js";
 import { createSimulatedAdapter } from "./adapters/simulated.js";
 import { generateAdapterBody, deleteGeneratedBodies, type GenerateResult } from "./codegen/adapter-ai.js";
+import { connectorOwner } from "./connector/orchestrate.js";
 import type { AdapterConfig } from "./types.js";
 
 /** The sidecar config for an adapter: the persisted one, else derived from the
- * registered adapter (so a code-pack simulated adapter can become authored). */
+ * registered adapter (so a code-pack simulated adapter can become authored). When
+ * deriving from a registry-only (pack) adapter that has no sidecar yet, STAMP the
+ * current tenant: the first sidecar write (config / credential / generate / reset)
+ * builds `next` from this cfg, so without the stamp it would persist an UNSTAMPED
+ * sidecar that the fail-closed ownership rule then treats as owned by nobody —
+ * bricking the adapter for every tenant. Off-request derivation carries the system
+ * stamp (harmless — the system context owns everything anyway). */
 export function adapterCfg(id: string): AdapterConfig | null {
   const sc = readSidecar(id);
   if (sc) return sc;
   const a = getAdapter(id);
   if (!a) return null;
-  return { id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, phase: "draft", mode: a.mode };
+  return { id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, phase: "draft", mode: a.mode, ...connectorOwner() };
 }
 
 export async function authorAdapterBody(id: string, errorReport?: string): Promise<GenerateResult> {
@@ -47,9 +54,16 @@ export function resetAdapter(id: string): AdapterConfig {
   if (!cfg) throw new Error(`no adapter "${id}"`);
   deleteGeneratedBodies(cfg);
   clearAdapterSecrets(cfg);
+  // PRESERVE the tenant owner stamp (and targetKind). Dropping organizationId/
+  // workflowId here would leave an UNSTAMPED sidecar that no real tenant owns —
+  // re-opening the cross-tenant connector IDOR after any reset. The ownership
+  // model depends on a tenant-created adapter staying stamped for its whole life.
   const fresh: AdapterConfig = {
     id: cfg.id, kind: "simulated", boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity,
     phase: "draft", mode: "simulated",
+    ...(cfg.targetKind ? { targetKind: cfg.targetKind } : {}),
+    ...(cfg.organizationId ? { organizationId: cfg.organizationId } : {}),
+    ...(cfg.workflowId ? { workflowId: cfg.workflowId } : {}),
   };
   writeSidecar(fresh);
   registerAdapter(createSimulatedAdapter({ id: fresh.id, boundedContext: fresh.boundedContext, targetEntity: fresh.targetEntity }));

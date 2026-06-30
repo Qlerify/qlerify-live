@@ -15,7 +15,7 @@ import {
   installDeps, deleteConnectorFiles, type InstallResult,
 } from "./runtime.js";
 import {
-  appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatId,
+  appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatKey,
 } from "./journal.js";
 import type { AdapterConfig } from "../types.js";
 
@@ -315,5 +315,5 @@ export function removeConnector(id: string): void {
   unregisterAdapter(id);
   deleteChat(id);
   deleteDoc(id);
-  if (cfg) deleteChat(connectorChatId(cfg.boundedContext, cfg.targetEntity));
+  if (cfg) deleteChat(connectorChatKey(cfg.boundedContext, cfg.targetEntity));
 }

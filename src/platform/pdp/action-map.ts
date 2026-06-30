@@ -34,7 +34,13 @@ export const ACTION_PERMISSION_MAP: Record<string, Permission> = {
   "workflow.command.write": "edit",
   "workflow.sim.write": "edit",
   "workflow.sim.administer": "administer", // destructive: reset / delete-all / reimport
-  "connector.edit": "edit",                // create / build / repoint / credentials / ingest
+  "connector.read": "view",                // view connector source / config (kill-switch-covered disclosure)
+  // AUTHORING connector code is the RCE/SSRF/npm-install surface, so it requires
+  // "special access" — for now that is org-admin/owner (administer). A finer
+  // dedicated "connector-builder" grant can be layered on later without moving the
+  // call sites. (Per the maintainer decision on F-17: per-org builders.)
+  "connector.build": "administer",         // create connector / author or repair its code
+  "connector.edit": "edit",                // repoint / credentials / ingest existing connectors
   "connector.administer": "administer",    // delete / reset
 
   // Scope administration.

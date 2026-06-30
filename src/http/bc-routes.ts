@@ -12,8 +12,9 @@ import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/
 import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } from "../ontology/bc-helpers.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
-import { readDoc, readChat, writeChat, deleteChat, connectorChatId, appendNote } from "../packs/connector/journal.js";
+import { readDoc, readChat, writeChat, deleteChat, connectorChatKey, appendNote } from "../packs/connector/journal.js";
 import { removeConnector } from "../packs/connector/orchestrate.js";
+import { ownsAdapterId, listOwnedAdapters } from "../packs/ownership.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { guardData } from "../platform/authz.js";
@@ -97,7 +98,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
   app.get("/api/bc", async () => {
     const o = getOntology();
     const prov = await provenanceMeta(o.boundedContexts, o.events, await eventCounts());
-    const adapters = listAdapters();
+    const adapters = listOwnedAdapters(); // tenant-scoped: adapterCount must not include other tenants' connectors
     return o.boundedContexts.map((bc) => ({
       name: bc,
       eventCount: eventsForBc(o, bc).length,
@@ -129,20 +130,30 @@ export function registerBcRoutes(app: FastifyInstance): void {
       entities: entitiesForBc(o, bc),
       valueObjects: valueObjectsForBc(o, bc),
       commands,
-      adapters: listAdapters().filter((a) => a.boundedContext === bc).map(serializeAdapter),
+      // Owned-only: serializeAdapter embeds the connector journal doc (summary +
+      // credential field names + ingest notes), so the global registry must be
+      // tenant-filtered here or it discloses other tenants' connectors (F-06).
+      adapters: listOwnedAdapters().filter((a) => a.boundedContext === bc).map(serializeAdapter),
       provenance: prov ?? { mode: "simulated", eventCount: 0 },
       defaultEntity: defaultEntityForBc(o, bc),
     };
   });
 
-  // Verify — run the adapter's healthcheck.
+  // Verify — run the adapter's healthcheck. This EXECUTES tenant connector code, so
+  // it is gated on connector.edit (kill-switch-covered) + tenant ownership — without
+  // both, any member could run another tenant's connector as a reachability/cred
+  // oracle (F-20 / cross-tenant exec).
   app.post("/api/bc/:bc/adapter/:id/verify", async (req, reply) => {
-    const a = getAdapter((req.params as any).id);
-    if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
+    const id = (req.params as any).id;
     const at = new Date().toISOString();
     try {
+      await guardData("connector.edit");
+      if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+      const a = getAdapter(id);
+      if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
       return { ...(await a.healthcheck()), at };
     } catch (err: any) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       return { ok: false, detail: err?.message ?? String(err), at };
     }
   });
@@ -150,11 +161,13 @@ export function registerBcRoutes(app: FastifyInstance): void {
   // Test — a DRY-RUN pull + field-map diff. Nothing is inserted; "ingest for real"
   // is the existing POST /api/adapters/:id/pull.
   app.post("/api/bc/:bc/adapter/:id/test", async (req, reply) => {
-    const a = getAdapter((req.params as any).id);
-    if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
+    const id = (req.params as any).id;
     const limit = Math.max(1, Math.min(50, Number((req.body as any)?.limit ?? 5)));
     try {
       await guardData("connector.edit"); // a dry-run executes tenant connector code
+      if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+      const a = getAdapter(id);
+      if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
       // getOntology() is inside the try so a workflow with no model yet yields a
       // clean ModelNotLoadedError (409) rather than an unhandled throw.
       const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
@@ -229,7 +242,10 @@ export function registerBcRoutes(app: FastifyInstance): void {
     // Journal the clear onto the history of every connector targeting this table,
     // mirroring how ingestPull records a "Fetch rows" so both actions show in the
     // builder's notes timeline. No-op when no connector feeds the table.
-    for (const a of listAdapters().filter((a) => a.boundedContext === bc && a.targetEntity === entity)) {
+    // Owned-only: appendNote writes into the connector's (global) journal, so without
+    // the ownership filter a tenant's clear would inject notes into another tenant's
+    // connector history for any same-named bc/entity.
+    for (const a of listAdapters().filter((a) => a.boundedContext === bc && a.targetEntity === entity && ownsAdapterId(a.id))) {
       appendNote(a.id, "cleared", `Cleared ${deleted} row(s) and ${eventsDeleted} derived event(s) from ${entity}.`);
     }
     return { entity, deleted, eventsDeleted, tableMissing: !tableExisted };
@@ -245,10 +261,13 @@ export function registerBcRoutes(app: FastifyInstance): void {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
     const id = String((req.params as any).id ?? "");
+    // Authorize + verify ownership BEFORE any existence/kind check, so the response
+    // is not an existence/kind oracle for another tenant's adapters.
+    await guardData("connector.administer"); // full teardown: code + creds + data + events
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
     const adapter = listAdapters().find((a) => a.id === id);
     if (!adapter || adapter.boundedContext !== bc) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in ${bc}` });
     if (adapter.kind !== "connector") return reply.code(400).send({ error: "NOT_A_CONNECTOR", message: `"${id}" is not an AI-built connector` });
-    await guardData("connector.administer"); // full teardown: code + creds + data + events
     const entity = adapter.targetEntity;
     const { rows: deletedRows, events: deletedEvents } = await purgeEntityData(entity);
     removeConnector(id); // code + credentials + sidecar + registry entry + journal (chat & doc)
@@ -270,16 +289,20 @@ export function registerBcRoutes(app: FastifyInstance): void {
       .sort((a, b) => String(b.lastAt ?? "").localeCompare(String(a.lastAt ?? "")));
   });
 
-  // ---- Connector-builder chat history, persisted per (system, table) --------
-  // Keyed by slug(bc-target) so a thread survives reloads and exists before the
-  // connector is created. The /chat turn endpoint stays stateless; the client
-  // loads on table-select and saves after each turn.
+  // ---- Connector-builder chat history, persisted per (workflow, system, table) --
+  // Keyed by connectorChatKey (workflow-scoped) so two tenants that share a
+  // bounded-context/table NAME cannot read, overwrite, or poison each other's
+  // builder transcript (which may contain pasted secrets) — the F-08/F-12 IDOR.
+  // Gated on connector.edit (the builder is an editor activity; also kill-switch-
+  // covered). The /chat turn endpoint stays stateless; the client loads on
+  // table-select and saves after each turn.
   app.get("/api/bc/:bc/connector-chat", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
     const target = String((req.query as any)?.target ?? "");
     if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
-    const id = connectorChatId(bc, target);
+    await guardData("connector.build"); // the builder transcript is authoring + may hold secrets
+    const id = connectorChatKey(bc, target);
     const chat = readChat(id);
     return { id, messages: chat?.messages ?? [], updatedAt: chat?.updatedAt ?? null };
   });
@@ -291,7 +314,8 @@ export function registerBcRoutes(app: FastifyInstance): void {
     const target = String(body.target ?? (req.query as any)?.target ?? "");
     if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
     if (!Array.isArray(body.messages)) return reply.code(400).send({ error: "NO_MESSAGES", message: "messages[] required" });
-    const id = connectorChatId(bc, target);
+    await guardData("connector.build");
+    const id = connectorChatKey(bc, target);
     writeChat(id, body.messages);
     return { ok: true, id };
   });
@@ -301,7 +325,8 @@ export function registerBcRoutes(app: FastifyInstance): void {
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
     const target = String((req.query as any)?.target ?? "");
     if (!target) return reply.code(400).send({ error: "NO_TARGET", message: "target required" });
-    deleteChat(connectorChatId(bc, target));
+    await guardData("connector.build");
+    deleteChat(connectorChatKey(bc, target));
     return { ok: true };
   });
 }

@@ -16,6 +16,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { QLERIFY_DIR } from "../../ontology/model.js";
+import { currentWorkflowId, isSystemWorkflow } from "../../platform/tenancy/context.js";
 
 const JOURNAL_DIR = join(QLERIFY_DIR, "connector-journal");
 const MAX_NOTES = 100; // keep the doc bounded; oldest notes roll off
@@ -46,6 +47,23 @@ export interface ConnectorChat {
  * in orchestrate.ts / adapter-routes.ts so all three agree on the key. */
 export function connectorChatId(boundedContext: string, target: string): string {
   return slug(`${boundedContext}-${target}`);
+}
+
+/** The CHAT-file key for a (system, target) thread, scoped to the active workflow.
+ * The builder transcript can hold pasted secrets and is keyed by a free-form
+ * (bc, target) the user controls, so two tenants sharing a bc/table name would
+ * otherwise collide on one global file. The workflow id (globally unique) prefix
+ * isolates them. Off-request / system context → the system sentinel. Distinct
+ * from connectorChatId (the connector-id default = slug(bc-target)), which keys
+ * the DOC and must stay stable across tenants for the per-connector history. */
+export function connectorChatKey(boundedContext: string, target: string): string {
+  let wf: string;
+  try {
+    wf = isSystemWorkflow() ? "sys" : currentWorkflowId();
+  } catch {
+    wf = "sys";
+  }
+  return slug(`${wf}-${boundedContext}-${target}`);
 }
 
 function slug(s: string): string {

@@ -21,6 +21,7 @@ import { getOntology, type EntitySchema } from "../../ontology/model.js";
 import type { AdapterConfig, SourceAdapter } from "../types.js";
 import { createRunContext, runWithBudget, type AdapterBody } from "../authored-runtime.js";
 import { denyScan } from "../codegen/deny-scan.js";
+import { connectorsEnabled } from "../../config/features.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const RUN_BUDGET_MS = 15000;
@@ -34,6 +35,10 @@ export function createAuthoredAdapter(cfg: AdapterConfig): SourceAdapter {
 
   // LAZY: imported only when a run actually happens, after a deny-scan.
   async function loadBody(): Promise<AdapterBody> {
+    // D7 kill-switch: never execute an AI-authored body when the connector / AI-
+    // codegen subsystem is disabled (this is the in-process execution path the
+    // subprocess runConnector guard does not cover — pull() + healthcheck()).
+    if (!connectorsEnabled()) throw new Error("the connector / AI-codegen subsystem is disabled for this deployment");
     if (!cfg.bodyPath) throw new Error(`adapter "${cfg.id}": no body authored yet — generate one first`);
     const abs = isAbsolute(cfg.bodyPath) ? cfg.bodyPath : join(ROOT, cfg.bodyPath);
     if (!existsSync(abs)) throw new Error(`adapter "${cfg.id}": body file missing (${cfg.bodyPath})`);

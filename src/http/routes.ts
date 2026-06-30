@@ -34,6 +34,7 @@ import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.
 import { codegenStatus } from "../kernel/codegen/status.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { guardData } from "../platform/authz.js";
+import { ownsAdapterId } from "../packs/ownership.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
 
 export function registerRoutes(app: FastifyInstance) {
@@ -269,13 +270,21 @@ export function registerRoutes(app: FastifyInstance) {
   // ---------------- Source adapters (Part 2.2) ----------------
   // Registered packs' adapters. Additive + model-generic; the registry is filled
   // by loadPacks() at boot and on every ontology reload.
+  // Filtered to adapters owned by the active workflow — otherwise this enumerates
+  // every tenant's connector ids + targets (the F-01 recon primitive).
   app.get("/api/adapters", async () =>
-    listAdapters().map((a) => ({
+    listAdapters().filter((a) => ownsAdapterId(a.id)).map((a) => ({
       id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
     })),
   );
   app.get("/api/adapters/:id", async (req, reply) => {
-    const a = getAdapter((req.params as any).id);
+    const id = (req.params as any).id;
+    // This GET executes the adapter healthcheck (connector/authored code), so it
+    // requires connector.edit like the sibling exec routes (/pull, /verify, /test)
+    // — not just membership — and is covered by the D7 kill-switch.
+    await guardData("connector.edit");
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+    const a = getAdapter(id);
     if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
     return {
       id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
@@ -286,9 +295,16 @@ export function registerRoutes(app: FastifyInstance) {
   // adapter's provenance mode.
   app.post("/api/adapters/:id/pull", async (req, reply) => {
     try {
+      const id = (req.params as any).id;
       await guardData("connector.edit"); // runs connector code + lands rows
+      // Ownership is the fix for the F-01 critical: without it a member could pull
+      // ANOTHER org's connector (running its code with its stored credentials) and
+      // land that org's source rows into their own tables. The `!getAdapter(id)`
+      // arm makes a foreign-owned id and an unknown id return the IDENTICAL 404, so
+      // the response is not a cross-tenant existence oracle.
+      if (!ownsAdapterId(id) || !getAdapter(id)) return reply.code(404).send({ error: "NOT_FOUND", message: `no adapter "${id}" in this workflow` });
       const limit = Number((req.body as any)?.limit ?? 10);
-      return await ingestPull((req.params as any).id, { limit });
+      return await ingestPull(id, { limit });
     } catch (err: any) {
       return reply.code(400).send({ error: "PULL_FAILED", message: err?.message ?? String(err) });
     }

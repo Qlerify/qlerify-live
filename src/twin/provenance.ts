@@ -8,6 +8,8 @@
 // which back-fills the entire existing demo truthfully with zero call-site edits.
 
 import { getMeta, setMeta } from "./projection-store.js";
+import { currentWorkflowId } from "../platform/tenancy/context.js";
+import { SYSTEM_WORKFLOW_ID } from "../platform/ids.js";
 
 export type ProvMode = "simulated" | "recorded" | "live";
 export const PROV_MODES: ProvMode[] = ["simulated", "recorded", "live"];
@@ -18,17 +20,32 @@ export interface AdapterMode {
   at?: string; // ISO timestamp the mode was last set
 }
 
-const META_KEY = "adapterModes";
+// The `_app_meta` table is a single GLOBAL key-value store (not per-workflow), so
+// the provenance modes MUST be keyed by the active workflow — otherwise one
+// tenant's `live` connector flips the default provenance for every tenant that
+// shares a bounded-context NAME (the F-28 cross-tenant bleed). Workflow ids are
+// globally unique, so the workflow id alone scopes correctly. Off-request
+// (boot/sim/tests) resolves to the system workflow sentinel.
+function metaKey(): string {
+  let wf: string;
+  try {
+    wf = currentWorkflowId();
+  } catch {
+    wf = SYSTEM_WORKFLOW_ID; // bound org with no workflow → system sentinel (never a real wf)
+  }
+  return `adapterModes::${wf}`;
+}
 
-// In-process cache so `emit()` doesn't hit the DB on every event. Populated
-// lazily; invalidated on every write. (BCs can change on a model swap, but stale
-// entries for absent BCs are simply never read — a new model's BCs default to
-// `simulated`.)
-let cache: Record<string, AdapterMode> | null = null;
+// In-process cache so `emit()` doesn't hit the DB on every event. Keyed per
+// workflow (a single shared object would re-introduce the cross-tenant bleed the
+// meta key closes). Populated lazily; the workflow's entry is invalidated on every
+// write. (BCs can change on a model swap, but stale entries for absent BCs are
+// simply never read — a new model's BCs default to `simulated`.)
+const cache = new Map<string, Record<string, AdapterMode>>();
 
 /** Drop the in-process cache (tests + after an out-of-band meta change). */
 export function invalidateModesCache(): void {
-  cache = null;
+  cache.clear();
 }
 
 function safeParse(raw: string): Record<string, AdapterMode> {
@@ -40,12 +57,15 @@ function safeParse(raw: string): Record<string, AdapterMode> {
   }
 }
 
-/** The configured adapter mode per bounded context (cached). */
+/** The configured adapter mode per bounded context for the active workflow (cached). */
 export async function getAdapterModes(): Promise<Record<string, AdapterMode>> {
-  if (cache) return cache;
-  const raw = await getMeta(META_KEY);
-  cache = raw ? safeParse(raw) : {};
-  return cache;
+  const key = metaKey();
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const raw = await getMeta(key);
+  const modes = raw ? safeParse(raw) : {};
+  cache.set(key, modes);
+  return modes;
 }
 
 /** Default provenance mode for events a bounded context emits (`simulated` if no
@@ -58,10 +78,11 @@ export async function provenanceFor(boundedContext: string): Promise<ProvMode> {
 /** Set the mode for a bounded context (persisted + cached). An adapter flips
  * this as it climbs the mode ladder: simulated → recorded → live. */
 export async function setAdapterMode(boundedContext: string, mode: ProvMode, adapter?: string): Promise<void> {
+  const key = metaKey();
   const modes = { ...(await getAdapterModes()) };
   modes[boundedContext] = { mode, adapter, at: new Date().toISOString() };
-  cache = modes;
-  await setMeta(META_KEY, JSON.stringify(modes));
+  cache.set(key, modes);
+  await setMeta(key, JSON.stringify(modes));
 }
 
 // ---------------------------------------------------------------------------

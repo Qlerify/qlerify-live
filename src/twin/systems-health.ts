@@ -13,7 +13,7 @@
 import { getOntology, type Ontology } from "../ontology/model.js";
 import { entitiesForBc, valueObjectsForBc } from "../ontology/bc-helpers.js";
 import type { ProvMode, SourceAdapter } from "../packs/types.js";
-import { listAdapters } from "../packs/registry.js";
+import { listOwnedAdapters } from "../packs/ownership.js";
 import * as store from "./projection-store.js";
 
 /** The four connection states a table can be in, derived from (adapter wired?,
@@ -104,7 +104,7 @@ export function buildSystemsHealth(
  * build the board. Used by GET /api/bc/health. */
 export async function computeSystemsHealth(): Promise<SystemsHealth> {
   const ont = getOntology();
-  const adapters = listAdapters();
+  const adapters = listOwnedAdapters(); // tenant-scoped: never surface another tenant's connector ids/modes
   const rowCounts = new Map<string, number>();
   for (const bc of ont.boundedContexts) {
     for (const t of [...entitiesForBc(ont, bc), ...valueObjectsForBc(ont, bc)]) {

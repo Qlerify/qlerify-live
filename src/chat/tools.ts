@@ -21,6 +21,9 @@ import {
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { ingestPull } from "../packs/ingest.js";
 import { guardData } from "../platform/authz.js";
+import { ownsAdapterId } from "../packs/ownership.js";
+import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { connectorsEnabled } from "../config/features.js";
 
 // Chat WRITE tools → the PDP action they require. The chat loop runs each tool
 // under withActorKind("ai"), so a deny here is audited as an AI guardrail block
@@ -31,15 +34,41 @@ import { guardData } from "../platform/authz.js";
 const TOOL_WRITE_ACTIONS: Record<string, string> = {
   next_step: "workflow.sim.write",
   create_case: "workflow.sim.write",
-  regenerate_adapter_body: "connector.edit",
+  // Authoring connector/adapter code (the RCE surface) needs special access.
+  regenerate_adapter_body: "connector.build",
+  create_connector: "connector.build",
+  build_connector: "connector.build",
   reset_adapter: "connector.administer",
-  create_connector: "connector.edit",
   set_connector_credentials: "connector.edit",
-  build_connector: "connector.edit",
   ingest_connector: "connector.edit",
   copy_connector_credentials: "connector.edit",
   remove_connector: "connector.administer",
 };
+
+// WRITE/EXEC tools that address an EXISTING adapter/connector by `adapterId`. Each
+// must touch only an adapter owned by the caller's workflow — the registry/sidecar
+// store is process-global and id-keyed, so without this any tenant could
+// run/repair/delete another tenant's connector by guessing its id (F-16 / F-20).
+// The READ tools (get_adapter_config / check_adapter_credential /
+// run_adapter_healthcheck / adapter_dry_run / view_connector_code) enforce
+// ownership INSIDE their handlers instead, returning the SAME not-found shape as an
+// unknown id so a foreign-owned id is not a cross-tenant existence oracle.
+// copy_connector_credentials (from/to) and get_connector_history (optional id) are
+// likewise checked inside their own handlers.
+const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
+  "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
+  "ingest_connector", "remove_connector",
+]);
+
+// Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
+// connector.* kill-switch never fires for them). They disclose connector source /
+// credential field names or execute an authored body, so the D7 kill-switch must
+// gate them directly — otherwise they keep working when the operator has disabled
+// the subsystem (QLERIFY_CONNECTORS_ENABLED=false).
+const TOOL_CONNECTOR_KILLSWITCH: ReadonlySet<string> = new Set([
+  "get_adapter_config", "check_adapter_credential", "run_adapter_healthcheck", "adapter_dry_run",
+  "view_connector_code", "get_connector_history", "list_connector_credentials",
+]);
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -382,6 +411,19 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
     // tool error via the catch below.
     const action = TOOL_WRITE_ACTIONS[name];
     if (action) await guardData(action);
+    // D7 kill-switch for connector read/exec tools (writes are covered by guardData
+    // above, whose connector.* gate already throws when the subsystem is disabled).
+    if (TOOL_CONNECTOR_KILLSWITCH.has(name) && !connectorsEnabled()) {
+      return err("the connector / AI-codegen subsystem is disabled for this deployment");
+    }
+    // Tenant-ownership gate for WRITE/EXEC tools: an id-addressed tool may only
+    // touch an adapter owned by the caller's workflow. (READ tools enforce
+    // ownership inside their handlers with the unknown-id shape, so they don't leak
+    // an existence oracle.)
+    if (TOOL_OWNED_ID.has(name)) {
+      const idArg = typeof args.adapterId === "string" ? args.adapterId : "";
+      if (idArg && !ownsAdapterId(idArg)) return err(`no adapter "${idArg}" in this workflow`);
+    }
     switch (name) {
       case "list_cases":
         return ok(await handleListCases(args.olderThanSeconds));
@@ -485,7 +527,9 @@ async function handleGetCaseDetails(caseId: string) {
 
 async function handleGetEventLog(caseId: string, limit: number) {
   const log = await prisma.eventLog.findMany({
-    where: { caseId },
+    // Scope to the active workflow/org — without this a caseId from another tenant
+    // would disclose that case's event metadata (F-26 cross-tenant read).
+    where: { caseId, ...eventLogOrgWhere() },
     orderBy: { occurredAt: "desc" },
     take: limit,
     select: { eventName: true, eventRef: true, boundedContext: true, role: true, businessAt: true, occurredAt: true },
@@ -561,13 +605,14 @@ async function handleCreateCase(args: Record<string, any>) {
 
 function handleListAdapters() {
   return {
-    adapters: listAdapters().map((a) => ({
+    adapters: listAdapters().filter((a) => ownsAdapterId(a.id)).map((a) => ({
       id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
     })),
   };
 }
 
 function handleGetAdapterConfig(adapterId: string) {
+  if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle)
   const cfg = adapterCfg(adapterId);
   if (!cfg) return { error: `no adapter "${adapterId}"` };
   return {
@@ -579,6 +624,7 @@ function handleGetAdapterConfig(adapterId: string) {
 }
 
 function handleCheckAdapterCredential(adapterId: string) {
+  if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle)
   const cfg = adapterCfg(adapterId);
   if (!cfg) return { error: `no adapter "${adapterId}"` };
   if (!cfg.credentialsRef) return { credentialsRef: null, present: false, note: "no credential key configured for this adapter" };
@@ -586,6 +632,7 @@ function handleCheckAdapterCredential(adapterId: string) {
 }
 
 async function handleRunAdapterHealthcheck(adapterId: string) {
+  if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
   const a = getAdapter(adapterId);
   if (!a) return { error: `no adapter "${adapterId}"` };
   try {
@@ -596,6 +643,7 @@ async function handleRunAdapterHealthcheck(adapterId: string) {
 }
 
 async function handleAdapterDryRun(adapterId: string, limit: number) {
+  if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
   const a = getAdapter(adapterId);
   if (!a) return { error: `no adapter "${adapterId}"` };
   const entity = getOntology().entity(a.targetEntity);
@@ -659,7 +707,7 @@ function handleListModelKinds(bcFilter?: string) {
       entities: entities.map((e) => e.name),
       valueObjects: [...voNames],
       connectors: adapters
-        .filter((a) => a.boundedContext === bc)
+        .filter((a) => a.boundedContext === bc && ownsAdapterId(a.id))
         .map((a) => ({ id: a.id, kind: a.kind, target: a.targetEntity, mode: a.mode })),
     };
   });
@@ -730,6 +778,7 @@ async function handleIngestConnector(args: Record<string, any>) {
 
 function handleViewConnectorCode(id: string) {
   if (!id) return { error: "adapterId required" };
+  if (!ownsAdapterId(id)) return { error: `no connector "${id}"` }; // foreign ≡ unknown (no oracle)
   const info = connectorInfo(id);
   if (!info) return { error: `no connector "${id}"` };
   return { adapterId: id, target: info.target, targetKind: info.targetKind, dependencies: info.deps, hasCode: info.hasCode, credentialKeys: info.credentialKeys, code: readConnectorCode(id) ?? null };
@@ -741,7 +790,9 @@ function handleGetConnectorHistory(args: Record<string, any>) {
     id = connectorChatId(args.boundedContext, args.target); // default connector id = slug(bc-target)
   }
   if (!id) return err("adapterId (or boundedContext + target) required");
-  const doc = readDoc(id);
+  // A non-owned (or unknown) connector returns the same "no history" shape as a
+  // genuinely empty one, so it never discloses another tenant's connector.
+  const doc = ownsAdapterId(id) ? readDoc(id) : null;
   if (!doc) return ok({ adapterId: id, summary: null, notes: [], note: "No update history recorded for this connector yet." });
   return ok({ adapterId: id, summary: doc.summary ?? null, notes: doc.notes, updatedAt: doc.updatedAt });
 }
@@ -750,7 +801,7 @@ function handleGetConnectorHistory(args: Record<string, any>) {
 // the agent can find a source to copy from for "use the same credentials as …".
 function handleListConnectorCredentials() {
   const connectors = listAdapters()
-    .filter((a) => a.kind === "connector")
+    .filter((a) => a.kind === "connector" && ownsAdapterId(a.id))
     .map((a) => {
       const fields = connectorInfo(a.id)?.credentialKeys ?? [];
       return { adapterId: a.id, boundedContext: a.boundedContext, target: a.targetEntity, credentialFields: fields, hasCredentials: fields.length > 0 };
@@ -762,6 +813,10 @@ async function handleCopyConnectorCredentials(args: Record<string, any>) {
   const from = String(args.fromAdapterId ?? "");
   const to = String(args.toAdapterId ?? "");
   if (!from || !to) return err("fromAdapterId and toAdapterId required");
+  // Authorize BOTH ends: the SOURCE check is what stops a tenant copying (and then
+  // echoing back) another tenant's stored credential blob (F-05).
+  if (!ownsAdapterId(from)) return err(`no adapter "${from}" in this workflow`);
+  if (!ownsAdapterId(to)) return err(`no adapter "${to}" in this workflow`);
   const keys = await copyConnectorCredentials(from, to); // throws on bad ids / no creds; values never returned
   return ok({ copied: true, fromAdapterId: from, toAdapterId: to, credentialFields: keys, note: `Reused ${keys.length} credential field(s) from ${from}. Values were copied server-side and never shown.` });
 }

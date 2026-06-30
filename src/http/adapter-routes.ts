@@ -16,6 +16,8 @@ import { adapterCfg, authorAdapterBody, resetAdapter, removeAdapter } from "../p
 import { getOntology } from "../ontology/model.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import { guardData } from "../platform/authz.js";
+import { ownsAdapterId } from "../packs/ownership.js";
+import { connectorOwner } from "../packs/connector/orchestrate.js";
 import type { AdapterConfig, ProvMode } from "../packs/types.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -47,15 +49,23 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
     if (getAdapter(id) || readSidecar(id)) {
       return reply.code(409).send({ error: "EXISTS", message: `adapter "${id}" already exists` });
     }
-    const cfg: AdapterConfig = { id, kind: "simulated", boundedContext: bc, targetEntity, phase: "draft", mode: "simulated" };
+    // Stamp the owning (org, workflow) so the adapter is tenant-isolated from
+    // creation — without this an authored/simulated adapter is unstamped and
+    // reachable cross-tenant via its id (the F-06 disclosure family).
+    const cfg: AdapterConfig = { id, kind: "simulated", boundedContext: bc, targetEntity, phase: "draft", mode: "simulated", ...connectorOwner() };
     writeSidecar(cfg);
     registerAdapter(createSimulatedAdapter({ id, boundedContext: bc, targetEntity }));
     return { ok: true, id, boundedContext: bc, targetEntity, kind: "simulated", mode: "simulated" };
   });
 
-  // View the current generated body source.
+  // View the current generated body source. Gated behind connector.read (so the
+  // kill-switch covers this disclosure too) and tenant ownership (so one tenant
+  // cannot read another's connector source by id — F-06).
   app.get("/api/adapters/:id/code", async (req, reply) => {
-    const cfg = adapterCfg((req.params as any).id);
+    const id = (req.params as any).id;
+    await guardData("connector.read");
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+    const cfg = adapterCfg(id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
     let source = "";
     let exists = false;
@@ -69,9 +79,11 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // Generate / repair the body with AI. Key-gated; stop-and-show — it writes a NEW
   // unique-path body and re-registers the adapter, but does NOT run or promote it.
   app.post("/api/adapters/:id/code/generate", async (req, reply) => {
-    const cfg = adapterCfg((req.params as any).id);
+    const id = (req.params as any).id;
+    await guardData("connector.build"); // authoring code = special access (org admin)
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+    const cfg = adapterCfg(id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
-    await guardData("connector.edit");
     if (!(await resolveAnthropicStatus()).configured) {
       return reply.code(400).send({ error: "NO_API_KEY", message: "No Anthropic key — set your organization's key in Organisation admin, or the platform ANTHROPIC_API_KEY in .env" });
     }
@@ -88,8 +100,11 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // generated bodies + stored credentials; re-registers a simulated adapter.
   app.post("/api/adapters/:id/reset", async (req, reply) => {
     try {
+      const id = (req.params as any).id;
       await guardData("connector.administer");
-      return { ok: true, ...resetAdapter((req.params as any).id) };
+      // Same 404 for foreign-owned and unknown ids (no existence oracle).
+      if (!ownsAdapterId(id) || !getAdapter(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+      return { ok: true, ...resetAdapter(id) };
     } catch (err: any) {
       return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
     }
@@ -98,9 +113,12 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // Remove an adapter entirely (back to "Connect a system").
   app.delete("/api/adapters/:id", async (req, reply) => {
     try {
+      const id = (req.params as any).id;
       await guardData("connector.administer");
-      removeAdapter((req.params as any).id);
-      return { ok: true, removed: (req.params as any).id };
+      // Same 404 for foreign-owned and unknown ids (no existence oracle).
+      if (!ownsAdapterId(id) || !getAdapter(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+      removeAdapter(id);
+      return { ok: true, removed: id };
     } catch (err: any) {
       return reply.code(404).send({ error: "NOT_FOUND", message: err?.message ?? String(err) });
     }
@@ -108,9 +126,11 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
 
   // Configure endpoint / mode / credential KEY (no secret here).
   app.put("/api/bc/:bc/adapter/:id/config", async (req, reply) => {
-    const cfg = adapterCfg((req.params as any).id);
-    if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
+    const id = (req.params as any).id;
     await guardData("connector.edit");
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+    const cfg = adapterCfg(id);
+    if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
     const body = (req.body ?? {}) as any;
     const next: AdapterConfig = {
       ...cfg,
@@ -128,9 +148,11 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
 
   // Set the secret for the credential KEY (dev: process.env; only the KEY persists).
   app.put("/api/bc/:bc/adapter/:id/credential", async (req, reply) => {
-    const cfg = adapterCfg((req.params as any).id);
-    if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
+    const id = (req.params as any).id;
     await guardData("connector.edit");
+    if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
+    const cfg = adapterCfg(id);
+    if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
     const body = (req.body ?? {}) as any;
     const ref = (typeof body.credentialsRef === "string" && body.credentialsRef) ? body.credentialsRef : cfg.credentialsRef;
     if (!ref) return reply.code(400).send({ error: "NO_REF", message: "credentialsRef required" });

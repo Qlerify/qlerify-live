@@ -24,6 +24,8 @@ import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js"
 import { hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
 import { invalidateAnthropicCache, validateAnthropicKey } from "../../llm/anthropic.js";
+import { invalidateQlerifyCache, qlerifyMcpUrlFor } from "../../llm/qlerify.js";
+import { validateQlerifyCreds } from "../../ontology/sync.js";
 import { encryptSecret, maskSecret } from "../secrets/secret-box.js";
 import { SYSTEM_ORG_ID, SYSTEM_STACK_ID, SYSTEM_WORKFLOW_ID, newId, slugify } from "../ids.js";
 import type { BuiltinRoleKey, PrincipalType, ScopeType } from "../types.js";
@@ -364,6 +366,67 @@ export async function setOrgAnthropicConfig(
     reason: `set organization Anthropic key ${hint}${model ? ` · model ${model}` : ""}`,
   });
   return { configured: true, source: "org", hint, model };
+}
+
+export interface OrgQlerifyStatus {
+  configured: boolean;
+  source: "org" | "platform";
+  hint: string | null;
+  mcpUrl: string | null;
+}
+
+/** Set (or clear) the organization's own Qlerify account — the credential behind
+ * "Reload model from link". The key is validated against the MCP endpoint before it
+ * is stored (a bad key is rejected, never persisted), then encrypted at rest — only
+ * a masked hint is kept readable. The raw key never leaves this function and is
+ * NEVER written to the audit log. Mirrors setOrgAnthropicConfig. */
+export async function setOrgQlerifyConfig(
+  organizationId: string,
+  patch: { apiKey?: string; mcpUrl?: string; clear?: boolean },
+  actorPrincipalId?: string | null,
+): Promise<OrgQlerifyStatus> {
+  const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
+  if (!org) throw new DomainError("organization not found");
+
+  if (patch.clear) {
+    await prisma.platOrganization.update({
+      where: { id: organizationId },
+      data: { qlerifyKeyCiphertext: null, qlerifyKeyHint: null, qlerifyMcpUrl: null },
+    });
+    invalidateQlerifyCache(organizationId);
+    await recordAudit({
+      organizationId,
+      actorPrincipalId: actorPrincipalId ?? null,
+      action: "organization.qlerifyKey.clear",
+      targetRef: `organization:${organizationId}`,
+      decision: "allow",
+      reason: "reverted to platform default Qlerify credentials",
+    });
+    return { configured: false, source: "platform", hint: null, mcpUrl: null };
+  }
+
+  const apiKey = (patch.apiKey ?? "").trim();
+  if (!apiKey) throw new DomainError("apiKey is required");
+  const mcpUrl = (patch.mcpUrl ?? "").trim() || null;
+
+  await validateQlerifyCreds(qlerifyMcpUrlFor(mcpUrl), apiKey);
+
+  const hint = maskSecret(apiKey);
+  await prisma.platOrganization.update({
+    where: { id: organizationId },
+    data: { qlerifyKeyCiphertext: encryptSecret(apiKey), qlerifyKeyHint: hint, qlerifyMcpUrl: mcpUrl },
+  });
+  invalidateQlerifyCache(organizationId);
+  await recordAudit({
+    organizationId,
+    actorPrincipalId: actorPrincipalId ?? null,
+    action: "organization.qlerifyKey.set",
+    targetRef: `organization:${organizationId}`,
+    decision: "allow",
+    // key hint + url ONLY — never the raw key (audit rows are readable via /v1/audit).
+    reason: `set organization Qlerify key ${hint}${mcpUrl ? ` · url ${mcpUrl}` : ""}`,
+  });
+  return { configured: true, source: "org", hint, mcpUrl };
 }
 
 /** Delete an organization and CASCADE everything it owns. Irreversible.

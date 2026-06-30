@@ -102,6 +102,13 @@ model PlatOrganization {
   anthropicKeyCiphertext String?   // "gcm$<ivHex>$<tagHex>$<ctHex>"
   anthropicKeyHint       String?   // masked preview, e.g. "sk-ant-…ab12"
   anthropicModel         String?   // optional model-id override; null = platform default
+  // Per-org Qlerify account (BYOK for the modeller fetch behind "Reload from link").
+  // The MCP x-api-key is stored encrypted at rest (same secret-box.ts as above);
+  // only the masked hint is ever returned to the client. Null on all three = use the
+  // platform default (QLERIFY_MCP_URL + QLERIFY_MCP_API_KEY env).
+  qlerifyKeyCiphertext   String?   // "gcm$<ivHex>$<tagHex>$<ctHex>" — the MCP x-api-key, encrypted
+  qlerifyKeyHint         String?   // masked preview, e.g. "qk_…ab12"
+  qlerifyMcpUrl          String?   // optional per-org MCP endpoint; null = platform default
   createdAt         DateTime @default(now())
 
   customerAccount   PlatCustomerAccount @relation(fields: [customerAccountId], references: [id])

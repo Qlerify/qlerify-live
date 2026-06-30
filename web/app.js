@@ -5830,7 +5830,7 @@ function bindLogin() {
 async function loadAdmin() {
   const tab = state.admin?.tab || "general";
   const orgId = state.me?.organizationId;
-  const [members, roles, markings, environments, workspaces, workflows, audit, anthropic] = await Promise.all([
+  const [members, roles, markings, environments, workspaces, workflows, audit, anthropic, qlerify] = await Promise.all([
     api("/v1/members").catch(() => []),
     api("/v1/role-assignments").catch(() => []),
     api("/v1/markings").catch(() => []),
@@ -5839,8 +5839,9 @@ async function loadAdmin() {
     api("/v1/workflows").catch(() => []),
     api("/v1/audit?limit=60").catch(() => []),
     orgId ? api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`).catch(() => null) : Promise.resolve(null),
+    orgId ? api(`/v1/organizations/${encodeURIComponent(orgId)}/qlerify-config`).catch(() => null) : Promise.resolve(null),
   ]);
-  state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit, anthropic };
+  state.admin = { tab, members, roles, markings, environments, workspaces, workflows, audit, anthropic, qlerify };
   render();
 }
 
@@ -5921,6 +5922,35 @@ function anthropicCard(llm) {
         </div>`;
 }
 
+// General-tab card: bring-your-own Qlerify account — the credential the server uses
+// to fetch a model behind the Model page's "⤓ Reload from link". `q` is the masked
+// status from GET /v1/organizations/:id/qlerify-config (never the raw key).
+function qlerifyCard(q) {
+  const usingOrg = !!q && q.source === "org";
+  const status = !q
+    ? `<span class="text-stone-400">checking…</span>`
+    : usingOrg
+    ? `Using <b>your organisation's key</b> <span class="mono">${escapeHtml(q.hint || "")}</span>${q.mcpUrl ? ` · endpoint <span class="mono">${escapeHtml(q.mcpUrl)}</span>` : ""}`
+    : q.configured
+    ? `Using the <b>platform default</b> Qlerify credentials`
+    : `<span class="text-rose-600">No Qlerify credentials configured — "Reload from link" is disabled until a key is set.</span>`;
+  return `
+        <div class="rounded-lg border border-stone-200 bg-white p-5">
+          <div class="text-sm font-semibold text-stone-900">Modeller · Qlerify account</div>
+          <div class="text-xs text-stone-500 mt-0.5 mb-3">Plug in your own Qlerify MCP API key so this organisation's model fetches (the Model page's "⤓ Reload from link") run against — and are scoped to — your own Qlerify account. The key is stored encrypted; only a masked preview is ever shown. Leave unset to use the platform default.</div>
+          <div class="text-xs text-stone-700 mb-3 rounded-md bg-stone-50 border border-stone-200 px-3 py-2">Status: ${status}</div>
+          <label class="block text-xs text-stone-500 mb-1">Qlerify API key</label>
+          <input id="qlerify-key" type="password" autocomplete="off" placeholder="${usingOrg ? "Enter a new key to replace the current one" : "x-api-key…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" />
+          <label class="block text-xs text-stone-500 mb-1">MCP endpoint URL <span class="text-stone-400">(optional)</span></label>
+          <input id="qlerify-url" type="text" autocomplete="off" value="${escapeHtml(usingOrg && q.mcpUrl ? q.mcpUrl : "")}" placeholder="Leave blank for the platform default endpoint" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" />
+          <div class="flex items-center gap-2">
+            <button id="qlerify-save" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save key</button>
+            ${usingOrg ? `<button id="qlerify-clear" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Revert to platform default</button>` : ""}
+          </div>
+          <div id="qlerify-msg" class="text-xs mt-2"></div>
+        </div>`;
+}
+
 function adminTabContent(tab, a) {
   if (tab === "general") {
     const curOrg = (state.orgs || []).find((o) => o.id === state.me?.organizationId) || {};
@@ -5955,6 +5985,7 @@ function adminTabContent(tab, a) {
           ${isSystem ? `<div class="text-xs text-stone-400 mt-1">The system organisation can't be renamed.</div>` : ""}
         </div>
         ${anthropicCard(a.anthropic)}
+        ${qlerifyCard(a.qlerify)}
         <div class="rounded-lg border border-rose-300 bg-rose-50/40 p-5">
           <div class="text-sm font-semibold text-rose-800">Danger zone</div>
           <div class="text-xs text-rose-700 mt-0.5 mb-3">Deleting this organisation permanently removes all of its workflows, models, data, members, and history. This action cannot be undone.</div>
@@ -6190,6 +6221,37 @@ function bindAdmin() {
       anthropicMsg("text-emerald-700", "Reverted to the platform default key.");
     } catch (e) {
       anthropicMsg("text-rose-600", escapeHtml(e.message));
+    }
+  });
+
+  // --- General tab: per-org Qlerify key -------------------------------------
+  const qlerifyMsg = (cls, html) => { const m = document.getElementById("qlerify-msg"); if (m) { m.className = `text-xs mt-2 ${cls}`; m.innerHTML = html; } };
+  document.getElementById("qlerify-save")?.addEventListener("click", async () => {
+    const apiKey = (document.getElementById("qlerify-key")?.value || "").trim();
+    const mcpUrl = (document.getElementById("qlerify-url")?.value || "").trim();
+    if (!apiKey) { qlerifyMsg("text-rose-600", "Enter an API key."); return; }
+    qlerifyMsg("text-stone-400", "Validating key with Qlerify…");
+    const btn = document.getElementById("qlerify-save"); if (btn) btn.disabled = true;
+    try {
+      const orgId = state.me?.organizationId;
+      const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/qlerify-config`, { method: "PUT", body: JSON.stringify({ apiKey, mcpUrl: mcpUrl || undefined }) });
+      await loadAdmin(); // repaints the card with the new masked status
+      qlerifyMsg("text-emerald-700", `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>${r.mcpUrl ? ` · endpoint <span class="mono">${escapeHtml(r.mcpUrl)}</span>` : ""}.`);
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      qlerifyMsg("text-rose-600", escapeHtml(e.message));
+    }
+  });
+  document.getElementById("qlerify-clear")?.addEventListener("click", async () => {
+    if (!confirm("Revert to the platform default Qlerify credentials? Your organisation's key will be removed.")) return;
+    qlerifyMsg("text-stone-400", "Reverting…");
+    try {
+      const orgId = state.me?.organizationId;
+      await api(`/v1/organizations/${encodeURIComponent(orgId)}/qlerify-config`, { method: "PUT", body: JSON.stringify({ clear: true }) });
+      await loadAdmin();
+      qlerifyMsg("text-emerald-700", "Reverted to the platform default credentials.");
+    } catch (e) {
+      qlerifyMsg("text-rose-600", escapeHtml(e.message));
     }
   });
 

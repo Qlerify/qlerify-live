@@ -15,9 +15,10 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 
+import { DomainError } from "../errors.js";
+import { resolveQlerifyCreds } from "../llm/qlerify.js";
 import { QLERIFY_DIR, reloadOntology } from "./model.js";
 
 const HISTORY_DIR = join(QLERIFY_DIR, "history");
@@ -69,26 +70,6 @@ export interface ModelStatus {
 // Qlerify MCP fetch (mirrors the `download` skill: JSON-RPC get_workflow)
 // ---------------------------------------------------------------------------
 
-interface McpCreds {
-  url: string;
-  apiKey: string;
-}
-
-function readMcpCreds(): McpCreds {
-  const path = join(homedir(), ".claude.json");
-  if (!existsSync(path)) {
-    throw new Error("~/.claude.json not found — cannot locate Qlerify MCP credentials");
-  }
-  const cfg = JSON.parse(readFileSync(path, "utf8"));
-  const q = cfg?.mcpServers?.qlerify;
-  const url = q?.url;
-  const apiKey = q?.headers?.["x-api-key"];
-  if (!url || !apiKey) {
-    throw new Error("Qlerify MCP server (url + x-api-key) not configured in ~/.claude.json");
-  }
-  return { url, apiKey };
-}
-
 function readCodegenIds(): { workflowId: string; projectId: string; workflowName: string | null } {
   if (!existsSync(CODEGEN_PATH)) {
     throw new Error(".qlerify/codegen.json not found — need workflowId + projectId to fetch the model");
@@ -108,17 +89,29 @@ function readCodegenIds(): { workflowId: string; projectId: string; workflowName
 // ---------------------------------------------------------------------------
 
 const QLERIFY_APP = "https://app.qlerify.com";
+const QLERIFY_HOST = new URL(QLERIFY_APP).host; // "app.qlerify.com"
 
 /** Deep link to a workflow in the Qlerify modeller. */
 function modellerUrl(projectId: string, workflowId: string): string {
   return `${QLERIFY_APP}/workflow/${projectId}/${workflowId}`;
 }
 
-/** Pull the project/workflow ids out of a modeller URL. */
-function parseWorkflowUrl(url: string): { projectId: string; workflowId: string } {
-  const m = url.match(/\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})/);
+/** Pull the project/workflow ids out of a modeller URL. The host is pinned to the
+ * Qlerify modeller so a caller-supplied sourceUrl can never aim the server's fetch
+ * at an arbitrary host (SSRF) or at a foreign service. Exported for tests. */
+export function parseWorkflowUrl(url: string): { projectId: string; workflowId: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL((url ?? "").trim());
+  } catch {
+    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
+  }
+  if (parsed.host !== QLERIFY_HOST) {
+    throw new Error(`Model link must be on ${QLERIFY_HOST} (got "${parsed.host}")`);
+  }
+  const m = parsed.pathname.match(/^\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})(?:\/|$)/);
   if (!m) {
-    throw new Error("URL must look like https://app.qlerify.com/workflow/<projectId>/<workflowId>");
+    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
   }
   return { projectId: m[1], workflowId: m[2] };
 }
@@ -204,7 +197,7 @@ function parseRpcEnvelope(raw: string): any {
 /** Fetch a workflow's `.specification` object from the Qlerify modeller via MCP,
  * for explicit (projectId, workflowId). */
 async function fetchSpecificationFor(projectId: string, workflowId: string): Promise<unknown> {
-  const { url, apiKey } = readMcpCreds();
+  const { url, apiKey } = await resolveQlerifyCreds();
   const res = await fetch(url, {
     method: "POST",
     headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
@@ -238,6 +231,29 @@ async function fetchSpecificationFor(projectId: string, workflowId: string): Pro
 async function fetchSpecification(): Promise<unknown> {
   const { workflowId, projectId } = effectiveIds();
   return fetchSpecificationFor(projectId, workflowId);
+}
+
+/** Validate a Qlerify MCP credential by making a cheap `tools/list` call. Throws
+ * DomainError on any failure so a bad key is rejected before it is ever persisted
+ * (validate-on-save). Needs only a valid key — no project/workflow id. */
+export async function validateQlerifyCreds(url: string, apiKey: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+  } catch (e: any) {
+    throw new DomainError(`Qlerify key validation failed: ${e?.message ?? String(e)}`);
+  }
+  if (!res.ok) {
+    throw new DomainError(`Qlerify key validation failed: HTTP ${res.status} ${await res.text().catch(() => "")}`.trim());
+  }
+  const env = parseRpcEnvelope(await res.text());
+  if (env.error) {
+    throw new DomainError(`Qlerify key validation failed: ${env.error.message ?? JSON.stringify(env.error)}`);
+  }
 }
 
 /** Fetch + serialize a Qlerify model from a modeller workflow URL — used to set a
@@ -316,7 +332,7 @@ function currentSourceNameSync(): string | null {
 /** Look up a workflow's display name via the MCP `list_workflows` tool. Returns
  * null on any failure — naming is a nicety, never a reason to fail a fetch. */
 async function fetchWorkflowNameFromMcp(projectId: string, workflowId: string): Promise<string | null> {
-  const { url, apiKey } = readMcpCreds();
+  const { url, apiKey } = await resolveQlerifyCreds();
   const res = await fetch(url, {
     method: "POST",
     headers: { "x-api-key": apiKey, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },

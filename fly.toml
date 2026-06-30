@@ -36,8 +36,5 @@ primary_region = "arn"  # Stockholm
     grace_period = "30s"
 
 [[vm]]
-  # 2 shared vCPUs + 2 GB: headroom for the tsx transpiler + runtime table
-  # rebuilds, and smoother latency under concurrent clicks. Bump to
-  # `performance-1x` (dedicated vCPU) if the demo needs maximum snappiness.
-  size = "shared-cpu-2x"
-  memory = "2048mb"
+  size = "shared-cpu-1x"
+  memory = "1024mb"

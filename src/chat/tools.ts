@@ -21,6 +21,7 @@ import {
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { ingestPull } from "../packs/ingest.js";
 import { guardData } from "../platform/authz.js";
+import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import { ownsAdapterId } from "../packs/ownership.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { connectorsEnabled } from "../config/features.js";
@@ -661,13 +662,27 @@ async function handleAdapterDryRun(adapterId: string, limit: number) {
   }
 }
 
+// Pre-flight guard for the AI-authoring tools. Org-aware: resolveAnthropicStatus
+// reads the request-bound tenant context, so an org that configured its own key in
+// Org Admin (BYOK) passes even when no platform ANTHROPIC_API_KEY is set. Checking
+// process.env directly here would reject BYOK-only orgs before the org-aware
+// getAnthropicClient() ever runs.
+async function requireAnthropicConfigured(): Promise<ToolResult | null> {
+  const status = await resolveAnthropicStatus();
+  if (status.configured) return null;
+  return err(
+    "No Anthropic key available — set your organization's key in Org Admin → Anthropic key, or set ANTHROPIC_API_KEY in .env.",
+  );
+}
+
 async function handleRegenerateAdapterBody(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. Summarize the repair, get the user's explicit yes, then call again with confirmed=true.");
   }
   const adapterId = String(args.adapterId ?? "");
   if (!adapterId) return err("adapterId required");
-  if (!process.env.ANTHROPIC_API_KEY) return err("ANTHROPIC_API_KEY not set — cannot author/repair an adapter body");
+  const noKey = await requireAnthropicConfigured();
+  if (noKey) return noKey;
   const r = await authorAdapterBody(adapterId, typeof args.errorReport === "string" ? args.errorReport : undefined);
   return ok({
     regenerated: true, adapterId, bodyPath: r.bodyPath, skipped: r.skipped,
@@ -743,7 +758,8 @@ async function handleBuildConnector(args: Record<string, any>) {
   }
   const id = String(args.adapterId ?? "");
   if (!id) return err("adapterId required");
-  if (!process.env.ANTHROPIC_API_KEY) return err("ANTHROPIC_API_KEY not set — cannot author a connector");
+  const noKey = await requireAnthropicConfigured();
+  if (noKey) return noKey;
   const r = await buildConnector(
     id,
     typeof args.instructions === "string" ? args.instructions : undefined,

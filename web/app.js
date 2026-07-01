@@ -670,7 +670,7 @@ function chatPanel() {
   return shell(`
       ${!apiOk && info ? `
         <div class="px-4 py-3 bg-amber-50 border-b border-amber-200 text-[12px] text-amber-900">
-          <b>ANTHROPIC_API_KEY not configured.</b> Add it to <span class="mono">.env</span> and restart the server.
+          <b>No Anthropic key configured.</b> Set your organization's key in <b>Org Admin → Anthropic key</b>, or add <span class="mono">ANTHROPIC_API_KEY</span> to <span class="mono">.env</span> and restart the server.
         </div>
       ` : ""}
 

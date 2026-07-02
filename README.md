@@ -92,11 +92,19 @@ AI writes the integration code from a natural-language description of the source
 - **Authorization:** an embedded **Policy Decision Point** evaluates, in order, a tenant-boundary check → a mandatory-access-control marking gate → discretionary role/permission inheritance down the containment tree. (The domain `x-role` header is *only* recorded on events; it is **not** the security boundary.)
 - **Audit:** an append-only, per-org, SHA-256 hash-chained log; `GET /v1/audit/verify` recomputes the chain.
 - **Auth:** scrypt passwords, opaque bearer session tokens, login rate-limiting, admin-issued one-time passwords, and a superuser break-glass mode (audited to the target org).
-- **Per-org BYOK:** each org can supply its own Anthropic and Qlerify keys, validated on save and stored **AES-256-GCM encrypted** at rest.
+- **Per-org BYOK:** each org can supply its own AI provider (an Anthropic API key, or AWS Bedrock with its own AWS credentials) and Qlerify key — validated on save and stored **AES-256-GCM encrypted** at rest.
 
 ### 6. AI / Claude integration
 
-All Anthropic SDK construction lives behind one seam, `src/llm/anthropic.ts`. Every AI feature resolves its client there, so a per-org key transparently overrides the platform-default `ANTHROPIC_API_KEY`. The default model is **`claude-sonnet-4-6`** (override with `CHAT_MODEL`; effort via `CHAT_EFFORT`, default `medium`); the UI also offers `claude-opus-4-8`, `claude-haiku-4-5`, and `claude-fable-5`. AI powers the chat assistant (process advisor, connector builder, event-log viewer), connector codegen + repair, and the codegen kernel.
+All LLM SDK construction lives behind one seam, `src/llm/anthropic.ts`. Every AI feature resolves its client there, and two independent axes decide what it gets:
+
+- **Provider** — the first-party **Anthropic API**, or **AWS Bedrock** (Claude through an AWS account). Both clients expose the identical `messages.create` surface, so nothing downstream branches.
+- **Who decides** — three deployment states via `LLM_SETTINGS_LOCKED`:
+  1. **Locked** (`LLM_SETTINGS_LOCKED=true` + a provider in `.env`): the provider is centrally managed. The Org Admin card renders read-only (it explains the pinned provider/model/region, never secrets), per-org writes are rejected **server-side** with 403, and the server refuses to boot if locked without a working provider. This is the dedicated-install mode.
+  2. **Open with fallback**: orgs pick their own provider in **Org Admin → AI · LLM provider** — an Anthropic key, or Bedrock with the org's *own* AWS credentials (region, model, access key ID, secret — validated against Bedrock on save, secret encrypted at rest). Unconfigured orgs use the `.env` platform default.
+  3. **Open without fallback**: no `.env` provider — each org must configure its own before AI features work.
+
+The default model is **`claude-sonnet-4-6`** (override with `CHAT_MODEL`; effort via `CHAT_EFFORT`, default `medium`); the UI also offers `claude-opus-4-8`, `claude-haiku-4-5`, and `claude-fable-5`. On Bedrock, models are addressed by Bedrock model / inference-profile id (e.g. `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`) and must be recent enough to support adaptive thinking + effort (Sonnet 4.x / Opus 4.x and later). AI powers the chat assistant (process advisor, connector builder, event-log viewer), connector codegen + repair, and the codegen kernel.
 
 ---
 
@@ -174,7 +182,7 @@ qlerify-live/
 
 - **Node.js 22** and npm
 - **OpenSSL** (required by Prisma's query engine)
-- An **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)) for AI features — added per-org in the UI after sign-in; **not** required to install or boot
+- An **AI provider** for AI features — an Anthropic API key ([console.anthropic.com](https://console.anthropic.com)) **or** an AWS account with Claude enabled in Bedrock. Added per-org in the UI after sign-in; **not** required to install or boot
 
 ### Install & run (local dev)
 
@@ -195,7 +203,7 @@ The server listens on **http://localhost:3001** by default (`PORT` / `HOST` to o
 
 > In local dev, leave `NODE_ENV` unset to use the forgeable dev auth shim. The first run seeds a **superuser**; if you don't set `SUPERADMIN_PASSWORD`, a random one is generated and written once to `.qlerify/superadmin.local.txt` (gitignored). A fresh install has **zero organizations** — sign in as the superuser, create the first org, then a workspace, then a workflow (which must be created with a model).
 
-> **Anthropic key:** no `.env` edit needed — sign in, open **Organisation admin**, and paste your key there (stored encrypted, per org). Setting a platform-default `ANTHROPIC_API_KEY` in `.env` is optional.
+> **AI provider:** no `.env` edit needed — sign in, open **Organisation admin → AI · LLM provider**, and configure either an Anthropic API key or AWS Bedrock (your own AWS credentials) there, stored encrypted per org. Setting a platform default in `.env` (`ANTHROPIC_API_KEY`, or `LLM_PROVIDER=bedrock` + `BEDROCK_*`) is optional; `LLM_SETTINGS_LOCKED=true` pins that default and makes the per-org setting read-only.
 
 > **`DATABASE_URL` is handled for you.** Setup writes an absolute path and the runtime self-heals a blank/relative value to `prisma/dev.db`, so the Prisma CLI and the generated client always agree. (A hand-written relative `file:./dev.db` would otherwise split reads/writes across two `.db` files — that footgun is now closed.)
 
@@ -208,7 +216,11 @@ All configuration is via environment variables (see `.env.example`). For **local
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `DATABASE_URL` | auto | SQLite path — **auto-filled** (absolute) by setup; runtime self-heals a blank/relative value. Set it only to point at a custom DB location. |
-| `ANTHROPIC_API_KEY` | optional | Optional platform-default Claude key; per-org keys set in Org Admin override it. Leave blank and add per org in the UI. |
+| `ANTHROPIC_API_KEY` | optional | Optional platform-default Claude key (first-party API); per-org providers set in Org Admin override it. Leave blank and configure per org in the UI. |
+| `LLM_SETTINGS_LOCKED` | optional | `true` = the AI provider is **centrally managed**: the per-org UI goes read-only, per-org writes are rejected (403), and the server refuses to boot without a working platform provider. Default `false`. |
+| `LLM_PROVIDER` | optional | Platform-default provider: blank = first-party Anthropic API; `bedrock` = Claude through this deployment's own AWS account (credentials via the standard AWS chain / IAM role). |
+| `BEDROCK_REGION` | with bedrock | AWS region where Claude is enabled (falls back to `AWS_REGION`). |
+| `BEDROCK_MODEL` | with bedrock | Bedrock model or inference-profile id (e.g. `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`) — not a bare model alias. |
 | `PLATFORM_ENCRYPTION_KEY` | auto | 32-byte hex encrypting per-org BYOK secrets at rest — **auto-generated** by setup. **Do not change once set: rotating it invalidates stored per-org keys.** |
 | `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify key for "Reload from link"; per-org keys set in Org Admin override it. In dev it falls back to `~/.claude.json`. |
 | `QLERIFY_MCP_URL` | rare | Qlerify Modeller endpoint. Defaults to `https://mcp.qlerify.com`; set only to point at a white-labelled Modeller. |
@@ -271,7 +283,23 @@ docker run -p 3001:3001 \
 
 `node:22-slim` base, installs OpenSSL + all deps (devDeps included — `tsx` and the Prisma CLI run at runtime), generates the Prisma client, and bakes in `NODE_ENV=production` (the security boundary that disables the dev auth shim). The entrypoint places the SQLite DB and `.qlerify` model cache on `/data`, applies the schema when its hash changes, then starts the server.
 
-> Unlike local dev, the container does **not** run `npm run setup`, so it does not auto-generate `PLATFORM_ENCRYPTION_KEY`. Provide a **stable** value (and keep it — rotating it invalidates every org's stored BYOK secret) to enable per-org Anthropic/Qlerify keys. `ANTHROPIC_API_KEY` is an optional platform default; orgs can instead add their own key in the UI.
+> Unlike local dev, the container does **not** run `npm run setup`, so it does not auto-generate `PLATFORM_ENCRYPTION_KEY`. Provide a **stable** value (and keep it — rotating it invalidates every org's stored BYOK secret) to enable per-org AI/Qlerify credentials. `ANTHROPIC_API_KEY` is an optional platform default; orgs can instead configure their own provider in the UI.
+
+For a **dedicated install pinned to the customer's AWS account** (Claude via Bedrock, no per-org self-service), lock the provider instead of passing an Anthropic key:
+
+```bash
+docker run -p 3001:3001 \
+  -v qlerify-data:/data \
+  -e DATABASE_URL=file:/data/dev.db \
+  -e PLATFORM_ENCRYPTION_KEY=<stable 64-hex> \
+  -e LLM_SETTINGS_LOCKED=true \
+  -e LLM_PROVIDER=bedrock \
+  -e BEDROCK_REGION=eu-north-1 \
+  -e BEDROCK_MODEL=eu.anthropic.claude-sonnet-4-5-20250929-v1:0 \
+  qlerify-live
+```
+
+AWS credentials resolve via the standard chain — prefer an IAM role on the host/task (grant `bedrock:InvokeModel`); the Org Admin card then shows every org a read-only "centrally managed" summary of the pinned provider/model/region. A locked deployment with an incomplete provider config **refuses to boot** with a setup-oriented error.
 
 ### Fly.io
 

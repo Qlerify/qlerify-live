@@ -671,7 +671,7 @@ async function requireAnthropicConfigured(): Promise<ToolResult | null> {
   const status = await resolveAnthropicStatus();
   if (status.configured) return null;
   return err(
-    "No Anthropic key available — set your organization's key in Org Admin → Anthropic key, or set ANTHROPIC_API_KEY in .env.",
+    "No AI provider configured — choose one in Org Admin → AI provider (an Anthropic API key, or AWS Bedrock with your own AWS credentials), or set the platform default in .env.",
   );
 }
 

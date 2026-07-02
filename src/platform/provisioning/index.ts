@@ -18,12 +18,19 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { prisma } from "../../db.js";
-import { DomainError } from "../../errors.js";
+import { AuthError, DomainError } from "../../errors.js";
 import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
 import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
 import { generatePassword, hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
-import { invalidateAnthropicCache, validateAnthropicKey } from "../../llm/anthropic.js";
+import {
+  invalidateAnthropicCache,
+  llmSettingsLocked,
+  resolveAnthropicStatus,
+  validateAnthropicKey,
+  validateBedrockConfig,
+  type AnthropicStatus,
+} from "../../llm/anthropic.js";
 import { invalidateQlerifyCache, qlerifyEndpointUrl } from "../../llm/qlerify.js";
 import { validateQlerifyCreds } from "../../ontology/sync.js";
 import { encryptSecret, maskSecret } from "../secrets/secret-box.js";
@@ -334,40 +341,108 @@ export async function updateOrganization(
   return { id: updated.id, name: updated.name, slug: updated.slug, homeRegion: updated.homeRegion, status: updated.status };
 }
 
-interface OrgAnthropicStatus {
-  configured: boolean;
-  source: "org" | "platform";
-  hint: string | null;
-  model: string | null;
+/** The per-org LLM provider write payload. Back-compat: the pre-provider shape
+ * `{ apiKey, model }` still works — a missing `provider` means "anthropic". */
+export interface OrgLlmPatch {
+  clear?: boolean;
+  provider?: "anthropic" | "bedrock";
+  apiKey?: string; // anthropic: the sk-ant-… key
+  model?: string; // anthropic: optional model override · bedrock: REQUIRED Bedrock model/profile id
+  region?: string; // bedrock: AWS region where Claude is enabled
+  accessKeyId?: string; // bedrock: the org's own AWS access key id
+  secretAccessKey?: string; // bedrock: the org's own AWS secret access key
 }
 
-/** Set (or clear) the organization's own Anthropic account. The key is
- * validated against the API before it is stored (a bad key is rejected, never
- * persisted), then encrypted at rest — only a masked hint is kept readable. The
- * raw key never leaves this function and is NEVER written to the audit log. */
+// All per-org LLM columns, for the exactly-one-active-provider invariant below.
+const LLM_FIELDS_NULL = {
+  llmProvider: null,
+  anthropicKeyCiphertext: null,
+  anthropicKeyHint: null,
+  anthropicModel: null,
+  bedrockRegion: null,
+  bedrockModel: null,
+  bedrockAccessKeyId: null,
+  bedrockSecretCiphertext: null,
+  bedrockSecretHint: null,
+} as const;
+
+/** Set (or clear) the organization's own LLM provider — a first-party Anthropic
+ * key, or AWS Bedrock with the org's own AWS credentials. The config is
+ * validated against the provider before it is stored (a bad key/region/model is
+ * rejected, never persisted), secrets are encrypted at rest, and only masked
+ * hints are kept readable. Raw secrets never leave this function and are NEVER
+ * written to the audit log. Saving one provider clears the other — an org holds
+ * at most one set of stored AI credentials at a time.
+ *
+ * SERVER-SIDE LOCK: when the deployment is centrally managed
+ * (LLM_SETTINGS_LOCKED=true) every write is rejected with 403 — the UI hiding
+ * the form is a convenience, not the boundary. */
 export async function setOrgAnthropicConfig(
   organizationId: string,
-  patch: { apiKey?: string; model?: string; clear?: boolean },
+  patch: OrgLlmPatch,
   actorPrincipalId?: string | null,
-): Promise<OrgAnthropicStatus> {
+): Promise<AnthropicStatus> {
+  if (llmSettingsLocked()) {
+    throw new AuthError(
+      "LLM settings are locked for this deployment (LLM_SETTINGS_LOCKED=true): the AI provider " +
+        "is centrally managed in the server configuration and cannot be changed per organization.",
+    );
+  }
   const org = await prisma.platOrganization.findUnique({ where: { id: organizationId } });
   if (!org) throw new DomainError("organization not found");
 
   if (patch.clear) {
+    await prisma.platOrganization.update({ where: { id: organizationId }, data: { ...LLM_FIELDS_NULL } });
+    invalidateAnthropicCache(organizationId);
+    await recordAudit({
+      organizationId,
+      actorPrincipalId: actorPrincipalId ?? null,
+      action: "organization.llmConfig.clear",
+      targetRef: `organization:${organizationId}`,
+      decision: "allow",
+      reason: "reverted to the platform default AI provider",
+    });
+    return resolveAnthropicStatus(organizationId);
+  }
+
+  const provider = patch.provider ?? "anthropic";
+
+  if (provider === "bedrock") {
+    const region = (patch.region ?? "").trim();
+    const model = (patch.model ?? "").trim();
+    const accessKeyId = (patch.accessKeyId ?? "").trim();
+    const secretAccessKey = (patch.secretAccessKey ?? "").trim();
+    if (!region) throw new DomainError("region is required for AWS Bedrock");
+    if (!model) throw new DomainError("model is required for AWS Bedrock (the Bedrock model or inference-profile id)");
+    if (!accessKeyId) throw new DomainError("accessKeyId is required for AWS Bedrock");
+    if (!secretAccessKey) throw new DomainError("secretAccessKey is required for AWS Bedrock");
+
+    await validateBedrockConfig(region, model, accessKeyId, secretAccessKey);
+
+    const hint = maskSecret(accessKeyId);
     await prisma.platOrganization.update({
       where: { id: organizationId },
-      data: { anthropicKeyCiphertext: null, anthropicKeyHint: null, anthropicModel: null },
+      data: {
+        ...LLM_FIELDS_NULL,
+        llmProvider: "bedrock",
+        bedrockRegion: region,
+        bedrockModel: model,
+        bedrockAccessKeyId: accessKeyId,
+        bedrockSecretCiphertext: encryptSecret(secretAccessKey),
+        bedrockSecretHint: maskSecret(secretAccessKey),
+      },
     });
     invalidateAnthropicCache(organizationId);
     await recordAudit({
       organizationId,
       actorPrincipalId: actorPrincipalId ?? null,
-      action: "organization.anthropicKey.clear",
+      action: "organization.bedrockConfig.set",
       targetRef: `organization:${organizationId}`,
       decision: "allow",
-      reason: "reverted to platform default Anthropic key",
+      // region/model/masked key id ONLY — never the secret (audit rows are readable via /v1/audit).
+      reason: `set AWS Bedrock provider · region ${region} · model ${model} · access key ${hint}`,
     });
-    return { configured: false, source: "platform", hint: null, model: null };
+    return resolveAnthropicStatus(organizationId);
   }
 
   const apiKey = (patch.apiKey ?? "").trim();
@@ -379,7 +454,13 @@ export async function setOrgAnthropicConfig(
   const hint = maskSecret(apiKey);
   await prisma.platOrganization.update({
     where: { id: organizationId },
-    data: { anthropicKeyCiphertext: encryptSecret(apiKey), anthropicKeyHint: hint, anthropicModel: model },
+    data: {
+      ...LLM_FIELDS_NULL,
+      llmProvider: "anthropic",
+      anthropicKeyCiphertext: encryptSecret(apiKey),
+      anthropicKeyHint: hint,
+      anthropicModel: model,
+    },
   });
   invalidateAnthropicCache(organizationId);
   await recordAudit({
@@ -391,7 +472,7 @@ export async function setOrgAnthropicConfig(
     // key hint + model ONLY — never the raw key (audit rows are readable via /v1/audit).
     reason: `set organization Anthropic key ${hint}${model ? ` · model ${model}` : ""}`,
   });
-  return { configured: true, source: "org", hint, model };
+  return resolveAnthropicStatus(organizationId);
 }
 
 interface OrgQlerifyStatus {

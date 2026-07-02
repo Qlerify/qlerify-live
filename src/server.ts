@@ -13,6 +13,7 @@ import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
 import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
+import { assertLlmBootConfig } from "./llm/anthropic.js";
 import { registerControlRoutes } from "./platform/http/control-routes.js";
 import { seedPlatform } from "./platform/provisioning/index.js";
 import { ensureSchemaUpgrades } from "./platform/db/schema-upgrade.js";
@@ -100,6 +101,10 @@ export async function buildServer() {
   // before anything reads or writes them — seedPlatform may record audit rows.
   // Idempotent + push-free, so it never drops the runtime gen_ tables.
   await ensureSchemaUpgrades();
+  // Fail-safe for a locked LLM deployment: LLM_SETTINGS_LOCKED=true with no
+  // working platform provider would disable AI for every org with no override —
+  // refuse to boot with a setup-oriented error instead.
+  assertLlmBootConfig();
   try {
     await seedPlatform();
   } catch (err) {

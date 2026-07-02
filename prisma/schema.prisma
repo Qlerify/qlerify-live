@@ -112,6 +112,20 @@ model PlatOrganization {
   anthropicKeyCiphertext String?   // "gcm$<ivHex>$<tagHex>$<ctHex>"
   anthropicKeyHint       String?   // masked preview, e.g. "sk-ant-…ab12"
   anthropicModel         String?   // optional model-id override; null = platform default
+  // Which LLM provider this org's own config targets: "anthropic" | "bedrock".
+  // Null = not chosen → platform default (legacy orgs with a key but a null
+  // provider are treated as "anthropic"). Ignored entirely while the deployment
+  // is locked (LLM_SETTINGS_LOCKED=true).
+  llmProvider            String?
+  // Per-org AWS Bedrock account (BYOK via the org's own AWS credentials — Way B:
+  // explicit, revocable, billed to the org's AWS account). The secret access key
+  // is encrypted at rest like the Anthropic key; the access key ID is an AWS
+  // identifier (not a secret) but only a masked hint is ever returned to the UI.
+  bedrockRegion           String?  // e.g. "eu-north-1" — where Claude is enabled
+  bedrockModel            String?  // Bedrock model/inference-profile id, e.g. "eu.anthropic.claude-…"
+  bedrockAccessKeyId      String?  // AWS access key id ("AKIA…")
+  bedrockSecretCiphertext String?  // "gcm$<ivHex>$<tagHex>$<ctHex>" — the AWS secret access key
+  bedrockSecretHint       String?  // masked preview of the secret, e.g. "wJalrXU…MPLE"
   // Per-org Qlerify account (BYOK for the modeller fetch behind "Reload from link").
   // The MCP x-api-key is stored encrypted at rest (same secret-box.ts as above);
   // only the masked hint is ever returned to the client. Null on all three = use the

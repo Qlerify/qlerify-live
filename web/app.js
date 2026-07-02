@@ -670,7 +670,7 @@ function chatPanel() {
   return shell(`
       ${!apiOk && info ? `
         <div class="px-4 py-3 bg-amber-50 border-b border-amber-200 text-[12px] text-amber-900">
-          <b>No Anthropic key configured.</b> Set your organization's key in <b>Org Admin → Anthropic key</b>, or add <span class="mono">ANTHROPIC_API_KEY</span> to <span class="mono">.env</span> and restart the server.
+          <b>No AI provider configured.</b> Choose one in <b>Org Admin → AI · LLM provider</b> (an Anthropic API key, or AWS Bedrock with your own AWS credentials), or add <span class="mono">ANTHROPIC_API_KEY</span> to <span class="mono">.env</span> and restart the server.
         </div>
       ` : ""}
 
@@ -5963,35 +5963,108 @@ const ANTHROPIC_MODELS = [
   ["claude-fable-5", "Claude Fable 5 — most powerful"],
 ];
 
-// General-tab card: bring-your-own Anthropic account. `llm` is the masked status
-// from GET /v1/organizations/:id/anthropic-config (never the raw key).
+// Common Bedrock regions + Claude model/inference-profile ids. Datalist
+// SUGGESTIONS only (free text allowed) — what an AWS account actually has
+// enabled varies; the config is validated against Bedrock on save anyway.
+const BEDROCK_REGIONS = [
+  "us-east-1", "us-east-2", "us-west-2", "ca-central-1",
+  "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
+  "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-south-1", "sa-east-1",
+];
+const BEDROCK_MODEL_SUGGESTIONS = [
+  "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "us.anthropic.claude-opus-4-5-20251101-v1:0",
+];
+
+// General-tab card: the organisation's AI/LLM provider. `llm` is the masked
+// status from GET /v1/organizations/:id/anthropic-config (never raw secrets).
+// Three shapes: locked (read-only, centrally managed), org-configured
+// (Anthropic key or the org's own AWS Bedrock account), or platform fallback.
 function anthropicCard(llm) {
+  const providerLabel = (p) => (p === "bedrock" ? "AWS Bedrock" : p === "anthropic" ? "Anthropic API" : "—");
+
+  // LOCKED: the deployment pins the provider in .env — explain exactly what is
+  // active (provider/model/region, no secrets) and render no form at all.
+  if (llm && llm.locked) {
+    const pin = llm.configured
+      ? `AI features are <b>active</b> and pre-set to <b>${providerLabel(llm.provider)}</b> · model <span class="mono">${escapeHtml(llm.model || "")}</span>${llm.region ? ` · region <span class="mono">${escapeHtml(llm.region)}</span>` : ""}.`
+      : `<span class="text-rose-600">The provider lock is on, but no platform provider is configured — contact your administrator.</span>`;
+    return `
+        <div class="rounded-lg border border-stone-200 bg-white p-5">
+          <div class="flex items-center gap-2">
+            <div class="text-sm font-semibold text-stone-900">AI · LLM provider</div>
+            <span class="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5 bg-stone-100 border border-stone-200 text-stone-600">🔒 centrally managed</span>
+          </div>
+          <div class="text-xs text-stone-500 mt-0.5 mb-3">The server operator has locked the AI provider for this deployment (<span class="mono">LLM_SETTINGS_LOCKED</span>), so it cannot be changed per organisation.</div>
+          <div class="text-xs text-stone-700 rounded-md bg-stone-50 border border-stone-200 px-3 py-2">${pin}</div>
+          <div class="text-xs text-stone-400 mt-2">API keys and AWS credentials live in the server configuration and are never shown here.</div>
+        </div>`;
+  }
+
   const usingOrg = !!llm && llm.source === "org";
   const status = !llm
     ? `<span class="text-stone-400">checking…</span>`
+    : usingOrg && llm.provider === "bedrock"
+    ? `Using <b>your AWS Bedrock account</b> · access key <span class="mono">${escapeHtml(llm.hint || "")}</span> · region <span class="mono">${escapeHtml(llm.region || "")}</span> · model <span class="mono">${escapeHtml(llm.model || "")}</span>`
     : usingOrg
-    ? `Using <b>your organisation's key</b> <span class="mono">${escapeHtml(llm.hint || "")}</span>${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}`
+    ? `Using <b>your organisation's Anthropic key</b> <span class="mono">${escapeHtml(llm.hint || "")}</span>${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}`
     : llm.configured
-    ? `Using the <b>platform default</b> key${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}`
-    : `<span class="text-rose-600">No key configured — AI features are disabled until a key is set.</span>`;
-  // Pre-select the org's saved model; surface a legacy/custom value not in the list.
-  const curModel = usingOrg && llm.model ? llm.model : "";
+    ? `Using the <b>platform default</b> — ${providerLabel(llm.provider)}${llm.model ? ` · model <span class="mono">${escapeHtml(llm.model)}</span>` : ""}${llm.region ? ` · region <span class="mono">${escapeHtml(llm.region)}</span>` : ""}`
+    : `<span class="text-rose-600">No AI provider configured — AI features are disabled until one is set.</span>`;
+
+  // Pre-select the org's saved Anthropic model; surface a legacy/custom value not in the list.
+  const curModel = usingOrg && llm.provider === "anthropic" && llm.model ? llm.model : "";
   const models = ANTHROPIC_MODELS.some(([v]) => v === curModel) ? ANTHROPIC_MODELS : [...ANTHROPIC_MODELS, [curModel, `${curModel} (custom)`]];
   const modelOpts = models
     .map(([v, label]) => `<option value="${escapeHtml(v)}"${v === curModel ? " selected" : ""}>${escapeHtml(label)}</option>`)
     .join("");
+  const curProvider = usingOrg ? llm.provider : "platform";
+  const provOpts = [
+    ["platform", "Platform default (managed by the server operator)"],
+    ["anthropic", "Anthropic API — your organisation's own key"],
+    ["bedrock", "AWS Bedrock — your organisation's own AWS account"],
+  ].map(([v, label]) => `<option value="${v}"${v === curProvider ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  const hidden = (p) => (p === curProvider ? "" : " hidden");
   return `
         <div class="rounded-lg border border-stone-200 bg-white p-5">
-          <div class="text-sm font-semibold text-stone-900">AI · Anthropic account</div>
-          <div class="text-xs text-stone-500 mt-0.5 mb-3">Plug in your own Anthropic API key so this organisation's AI features (chat assistant, code &amp; connector generation) run on — and are billed to — your own account. The key is stored encrypted; only a masked preview is ever shown. Leave unset to use the platform default.</div>
+          <div class="text-sm font-semibold text-stone-900">AI · LLM provider</div>
+          <div class="text-xs text-stone-500 mt-0.5 mb-3">Run this organisation's AI features (chat assistant, code &amp; connector generation) on — and billed to — your own account: an Anthropic API key, or your own AWS account via Bedrock. Credentials are stored encrypted; only a masked preview is ever shown.</div>
           <div class="text-xs text-stone-700 mb-3 rounded-md bg-stone-50 border border-stone-200 px-3 py-2">Status: ${status}</div>
-          <label class="block text-xs text-stone-500 mb-1">Anthropic API key</label>
-          <input id="anthropic-key" type="password" autocomplete="off" placeholder="${usingOrg ? "Enter a new key to replace the current one" : "sk-ant-…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" />
-          <label class="block text-xs text-stone-500 mb-1">Model <span class="text-stone-400">(optional)</span></label>
-          <select id="anthropic-model" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3 bg-white">${modelOpts}</select>
+          <label class="block text-xs text-stone-500 mb-1">Provider</label>
+          <select id="llm-provider" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3 bg-white">${provOpts}</select>
+
+          <div id="llm-form-platform"${hidden("platform")}>
+            <div class="text-xs text-stone-500 mb-3">Uses whatever the server operator configured in <span class="mono">.env</span>. Saving deletes any AI credentials stored for this organisation.</div>
+          </div>
+
+          <div id="llm-form-anthropic"${hidden("anthropic")}>
+            <label class="block text-xs text-stone-500 mb-1">Anthropic API key</label>
+            <input id="anthropic-key" type="password" autocomplete="off" placeholder="${usingOrg && llm.provider === "anthropic" ? "Enter a new key to replace the current one" : "sk-ant-…"}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <label class="block text-xs text-stone-500 mb-1">Model <span class="text-stone-400">(optional)</span></label>
+            <select id="anthropic-model" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3 bg-white">${modelOpts}</select>
+          </div>
+
+          <div id="llm-form-bedrock"${hidden("bedrock")}>
+            <div class="text-xs text-stone-500 mb-3">Enter an IAM access key from <b>your AWS account</b>, ideally scoped to <span class="mono">bedrock:InvokeModel</span> only. Replacing the configuration requires re-entering all four fields.</div>
+            <label class="block text-xs text-stone-500 mb-1">AWS region <span class="text-stone-400">(where Claude is enabled)</span></label>
+            <input id="bedrock-region" list="bedrock-regions-list" autocomplete="off" placeholder="eu-north-1" value="${usingOrg && llm.provider === "bedrock" ? escapeHtml(llm.region || "") : ""}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2 mono" />
+            <datalist id="bedrock-regions-list">${BEDROCK_REGIONS.map((r) => `<option value="${r}"></option>`).join("")}</datalist>
+            <label class="block text-xs text-stone-500 mb-1">Bedrock model or inference-profile id</label>
+            <input id="bedrock-model" list="bedrock-models-list" autocomplete="off" placeholder="eu.anthropic.claude-sonnet-4-5-20250929-v1:0" value="${usingOrg && llm.provider === "bedrock" ? escapeHtml(llm.model || "") : ""}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-1 mono" />
+            <datalist id="bedrock-models-list">${BEDROCK_MODEL_SUGGESTIONS.map((m) => `<option value="${m}"></option>`).join("")}</datalist>
+            <div class="text-[11px] text-stone-400 mb-2">Suggestions only — check which Claude models are enabled in your AWS console (Bedrock → Model access).</div>
+            <label class="block text-xs text-stone-500 mb-1">AWS access key ID</label>
+            <input id="bedrock-access-key-id" autocomplete="off" placeholder="AKIA…" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-2 mono" />
+            <label class="block text-xs text-stone-500 mb-1">AWS secret access key</label>
+            <input id="bedrock-secret" type="password" autocomplete="off" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm mb-3" />
+          </div>
+
           <div class="flex items-center gap-2">
-            <button id="anthropic-save" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save key</button>
-            ${usingOrg ? `<button id="anthropic-clear" class="px-3 py-2 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50">Revert to platform default</button>` : ""}
+            <button id="anthropic-save" class="px-4 py-2 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40">Save</button>
           </div>
           <div id="anthropic-msg" class="text-xs mt-2"></div>
         </div>`;
@@ -6285,34 +6358,53 @@ function bindAdmin() {
     }
   });
 
-  // --- General tab: per-org Anthropic key -----------------------------------
+  // --- General tab: per-org AI/LLM provider ---------------------------------
   const anthropicMsg = (cls, html) => { const m = document.getElementById("anthropic-msg"); if (m) { m.className = `text-xs mt-2 ${cls}`; m.innerHTML = html; } };
-  document.getElementById("anthropic-save")?.addEventListener("click", async () => {
-    const apiKey = (document.getElementById("anthropic-key")?.value || "").trim();
-    const model = (document.getElementById("anthropic-model")?.value || "").trim();
-    if (!apiKey) { anthropicMsg("text-rose-600", "Enter an API key."); return; }
-    anthropicMsg("text-stone-400", "Validating key with Anthropic…");
-    const btn = document.getElementById("anthropic-save"); if (btn) btn.disabled = true;
-    try {
-      const orgId = state.me?.organizationId;
-      const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`, { method: "PUT", body: JSON.stringify({ apiKey, model: model || undefined }) });
-      await loadAdmin(); // repaints the card with the new masked status
-      anthropicMsg("text-emerald-700", `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>${r.model ? ` · model <span class="mono">${escapeHtml(r.model)}</span>` : ""}.`);
-    } catch (e) {
-      if (btn) btn.disabled = false;
-      anthropicMsg("text-rose-600", escapeHtml(e.message));
+  // Adaptive form: show only the selected provider's fields. (Absent entirely
+  // when the deployment is locked — the card renders read-only, no controls.)
+  document.getElementById("llm-provider")?.addEventListener("change", (e) => {
+    const v = e.target.value;
+    for (const p of ["platform", "anthropic", "bedrock"]) {
+      document.getElementById(`llm-form-${p}`)?.toggleAttribute("hidden", p !== v);
     }
+    anthropicMsg("", "");
   });
-  document.getElementById("anthropic-clear")?.addEventListener("click", async () => {
-    if (!confirm("Revert to the platform default Anthropic key? Your organisation's key will be removed.")) return;
-    anthropicMsg("text-stone-400", "Reverting…");
-    try {
-      const orgId = state.me?.organizationId;
-      await api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`, { method: "PUT", body: JSON.stringify({ clear: true }) });
-      await loadAdmin();
-      anthropicMsg("text-emerald-700", "Reverted to the platform default key.");
-    } catch (e) {
-      anthropicMsg("text-rose-600", escapeHtml(e.message));
+  document.getElementById("anthropic-save")?.addEventListener("click", async () => {
+    const orgId = state.me?.organizationId;
+    const provider = document.getElementById("llm-provider")?.value || "platform";
+    const btn = document.getElementById("anthropic-save");
+    const put = async (body, workingMsg, doneMsg) => {
+      anthropicMsg("text-stone-400", workingMsg);
+      if (btn) btn.disabled = true;
+      try {
+        const r = await api(`/v1/organizations/${encodeURIComponent(orgId)}/anthropic-config`, { method: "PUT", body: JSON.stringify(body) });
+        await loadAdmin(); // repaints the card with the new masked status
+        anthropicMsg("text-emerald-700", doneMsg(r));
+      } catch (e) {
+        if (btn) btn.disabled = false;
+        anthropicMsg("text-rose-600", escapeHtml(e.message));
+      }
+    };
+    if (provider === "platform") {
+      if (!confirm("Revert to the platform default AI provider? Any AI credentials stored for your organisation will be deleted.")) return;
+      await put({ clear: true }, "Reverting…", () => "Reverted to the platform default.");
+    } else if (provider === "bedrock") {
+      const region = (document.getElementById("bedrock-region")?.value || "").trim();
+      const model = (document.getElementById("bedrock-model")?.value || "").trim();
+      const accessKeyId = (document.getElementById("bedrock-access-key-id")?.value || "").trim();
+      const secretAccessKey = (document.getElementById("bedrock-secret")?.value || "").trim();
+      if (!region || !model || !accessKeyId || !secretAccessKey) {
+        anthropicMsg("text-rose-600", "All Bedrock fields are required: region, model, access key ID, and secret access key.");
+        return;
+      }
+      await put({ provider: "bedrock", region, model, accessKeyId, secretAccessKey }, "Validating with AWS Bedrock…",
+        (r) => `Saved — now using your AWS Bedrock account <span class="mono">${escapeHtml(r.hint || "")}</span> · region <span class="mono">${escapeHtml(r.region || "")}</span> · model <span class="mono">${escapeHtml(r.model || "")}</span>.`);
+    } else {
+      const apiKey = (document.getElementById("anthropic-key")?.value || "").trim();
+      const model = (document.getElementById("anthropic-model")?.value || "").trim();
+      if (!apiKey) { anthropicMsg("text-rose-600", "Enter an API key."); return; }
+      await put({ provider: "anthropic", apiKey, model: model || undefined }, "Validating key with Anthropic…",
+        (r) => `Saved — now using your key <span class="mono">${escapeHtml(r.hint || "")}</span>${r.model ? ` · model <span class="mono">${escapeHtml(r.model)}</span>` : ""}.`);
     }
   });
 

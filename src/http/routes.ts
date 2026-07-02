@@ -347,6 +347,9 @@ export function registerRoutes(app: FastifyInstance) {
       apiKeyConfigured: llm.configured,
       keySource: llm.source,
       keyHint: llm.hint,
+      provider: llm.provider,
+      locked: llm.locked,
+      region: llm.region,
       systemPrompt: systemPromptSize(),
       toolCount: TOOLS.length,
     };
@@ -367,7 +370,10 @@ export function registerRoutes(app: FastifyInstance) {
       // Turn an upstream LLM failure (bad key, rate limit, provider down) — or any
       // handled domain error — into a clean message instead of a raw 500 that leaks
       // the provider's JSON/request_id.
-      const handled = friendlyLlmError(e) ?? (isHandledError(e) ? e : null);
+      // Resolve which provider was active (org- and lock-aware) so a Bedrock
+      // failure gets AWS guidance, not "check your Anthropic key".
+      const provider = await resolveAnthropicStatus().then((s) => s.provider).catch(() => undefined);
+      const handled = friendlyLlmError(e, provider) ?? (isHandledError(e) ? e : null);
       if (handled) return reply.code(handled.status).send({ error: handled.code, message: handled.message });
       return reply.code(500).send({ error: "INTERNAL", message: e?.message ?? String(e) });
     }

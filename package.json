@@ -21,6 +21,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.32.0",
     "@anthropic-ai/sdk": "^0.97.1",
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.1.3",

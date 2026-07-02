@@ -32,6 +32,13 @@ const COLUMNS: ColumnUpgrade[] = [
   // Authentication-issuance increment — a member's admin-issued temp password must
   // be changed on first use. NOT NULL DEFAULT 0 backfills every existing row.
   { table: "plat_identities", column: "mustChangePassword", type: "BOOLEAN NOT NULL DEFAULT 0" },
+  // Per-org LLM provider choice + AWS Bedrock BYOK (org's own AWS credentials).
+  { table: "plat_organizations", column: "llmProvider", type: "TEXT" },
+  { table: "plat_organizations", column: "bedrockRegion", type: "TEXT" },
+  { table: "plat_organizations", column: "bedrockModel", type: "TEXT" },
+  { table: "plat_organizations", column: "bedrockAccessKeyId", type: "TEXT" },
+  { table: "plat_organizations", column: "bedrockSecretCiphertext", type: "TEXT" },
+  { table: "plat_organizations", column: "bedrockSecretHint", type: "TEXT" },
 ];
 
 // Indexes are already idempotent via IF NOT EXISTS — no existence check needed.

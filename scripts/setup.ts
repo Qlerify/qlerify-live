@@ -19,7 +19,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PLACEHOLDER_DATABASE_URL,
@@ -37,10 +37,14 @@ main();
 function main(): void {
   // Fast path for the predev/prestart hooks: a warm, fully provisioned tree is a
   // no-op (and crucially skips `db push`, which would drop the gen_ tables).
-  if (IF_NEEDED && isProvisioned()) return;
+  if (IF_NEEDED && isProvisioned()) {
+    hardenEnvPerms();
+    return;
+  }
 
   ensureEnvFile();
   fillEnv();
+  hardenEnvPerms();
 
   const url = readEnvKey("DATABASE_URL") ?? defaultSqliteUrl();
 
@@ -78,6 +82,16 @@ function ensureEnvFile(): void {
   if (existsSync(ENV_PATH)) return;
   if (existsSync(EXAMPLE_PATH)) copyFileSync(EXAMPLE_PATH, ENV_PATH);
   else writeFileSync(ENV_PATH, "");
+}
+
+/** .env holds secrets (the master encryption key, optional platform API keys) —
+ * keep it owner-only. Best-effort: chmod is effectively a no-op on Windows. */
+function hardenEnvPerms(): void {
+  try {
+    chmodSync(ENV_PATH, 0o600);
+  } catch {
+    /* non-POSIX filesystem — leave as-is */
+  }
 }
 
 function fillEnv(): void {

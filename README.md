@@ -227,7 +227,8 @@ All configuration is via environment variables (see `.env.example`). For **local
 | `CHAT_MODEL` | optional | Override the default Claude model (`claude-sonnet-4-6`) |
 | `CHAT_EFFORT` | optional | Reasoning effort: `low` / `medium` (default) / `high` |
 | `NODE_ENV` | prod | `production` **disables the forgeable dev auth shim** — required for real auth |
-| `PORT`, `HOST` | optional | Defaults `3001` / `0.0.0.0` |
+| `PORT`, `HOST` | optional | Defaults `3001` / `127.0.0.1` (loopback only). Bind `0.0.0.0` only behind a reverse proxy — the Docker entrypoint sets it for Fly. |
+| `CORS_ORIGIN` | optional | Comma-separated origins allowed to call the API cross-origin. Default none: the UI is same-origin, so browsers get no CORS headers. |
 | `QLERIFY_CONNECTORS_ENABLED` | optional | Global kill-switch for all connector / AI-codegen / ingest |
 | `QLERIFY_DATA_DIR`, `QLERIFY_CONNECTOR_JAIL` | optional | Connector sandbox workspace; `bwrap` enables the bubblewrap OS jail on Linux |
 

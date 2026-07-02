@@ -55,8 +55,11 @@ function currentOrgIdOrNull(): string | null {
 }
 
 /** Dev-only fallback: read MCP creds from ~/.claude.json (mcpServers.qlerify).
- * Returns null when the file or entry is absent — env is preferred in prod. */
+ * HARD-OFF in production — a deployed server must never read credentials from a
+ * file outside its own tree (there, the only sources are the per-org encrypted
+ * key and the QLERIFY_MCP_API_KEY env). Returns null when off or absent. */
 function readDevCreds(): { url: string; apiKey: string } | null {
+  if (process.env.NODE_ENV === "production") return null;
   const path = join(homedir(), ".claude.json");
   if (!existsSync(path)) return null;
   try {

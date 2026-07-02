@@ -57,7 +57,15 @@ const CSP = [
 
 export async function buildServer() {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
-  await app.register(cors, { origin: true });
+  // CORS: the UI is served from this same origin (CSP pins connect-src 'self'),
+  // so no cross-origin caller is allowed by default — browsers get no CORS
+  // headers. CORS_ORIGIN (comma-separated origins) opts specific frontends in
+  // per deployment.
+  const corsOrigins = (process.env.CORS_ORIGIN ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  await app.register(cors, { origin: corsOrigins.length > 0 ? corsOrigins : false });
 
   // Security headers on every response (static shell + API). CSP is the big one;
   // nosniff + a tight referrer policy round it out.
@@ -170,7 +178,9 @@ function reportStartupFailure(err: unknown): void {
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const port = Number(process.env.PORT ?? 3001);
-  const host = process.env.HOST ?? "0.0.0.0";
+  // Loopback-only by default. Bind all interfaces (HOST=0.0.0.0) only behind a
+  // reverse proxy — the Docker entrypoint does, for Fly's proxy.
+  const host = process.env.HOST ?? "127.0.0.1";
   buildServer()
     .then(async (app) => {
       try {

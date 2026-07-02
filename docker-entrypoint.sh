@@ -21,14 +21,11 @@ mkdir -p /data/qlerify
 rm -rf /app/.qlerify
 ln -s /data/qlerify /app/.qlerify
 
-# ~/.claude.json for the Qlerify MCP (no-op without a key). Only the KEY is
-# required — the endpoint URL defaults to the hosted Qlerify Modeller; set
-# QLERIFY_MCP_URL only to point at a white-labelled deployment.
-if [ -n "$QLERIFY_MCP_API_KEY" ]; then
-  export QLERIFY_MCP_URL="${QLERIFY_MCP_URL:-https://mcp.qlerify.com}"
-  echo "[entrypoint] writing ~/.claude.json with Qlerify MCP creds (url=$QLERIFY_MCP_URL)"
-  node -e 'const fs=require("fs"),os=require("os");fs.writeFileSync(os.homedir()+"/.claude.json",JSON.stringify({mcpServers:{qlerify:{url:process.env.QLERIFY_MCP_URL,headers:{"x-api-key":process.env.QLERIFY_MCP_API_KEY}}}}))'
-fi
+# The container sits behind the platform's reverse proxy (Fly), so bind all
+# interfaces here; the in-code default is loopback-only for bare local dev.
+# Qlerify MCP creds come straight from the QLERIFY_MCP_API_KEY env — the old
+# ~/.claude.json hand-off is dev-only and hard-off in production.
+export HOST="${HOST:-0.0.0.0}"
 
 echo "[entrypoint] DATABASE_URL=$DATABASE_URL"
 # Apply the base schema only when it actually changes (tracked by a hash on the

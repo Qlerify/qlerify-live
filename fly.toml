@@ -10,6 +10,8 @@ primary_region = "arn"  # Stockholm
 [env]
   NODE_ENV = "production"
   PORT = "3001"
+  # Bind all interfaces inside the machine — Fly's proxy fronts it (force_https).
+  HOST = "0.0.0.0"
   # SQLite file lives on the mounted volume so it survives restarts/redeploys.
   DATABASE_URL = "file:/data/dev.db"
 

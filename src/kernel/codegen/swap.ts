@@ -13,7 +13,7 @@
 
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getOntology, QLERIFY_DIR } from "../../ontology/model.js";
 import { generateSchema, entityTableNames } from "./schema.js";
 import { generateBoundedContext } from "./generate.js";
@@ -156,7 +156,7 @@ function printWarning(p: SwapPreview): void {
   console.log(`\n${line}`);
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const preview = swapPreview();
   printWarning(preview);

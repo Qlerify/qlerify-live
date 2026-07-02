@@ -9,7 +9,7 @@
 
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { descriptorsForBoundedContext, type CommandDescriptor } from "./introspect.js";
 import { getOntology } from "../../ontology/model.js";
@@ -66,7 +66,7 @@ async function regenerateLogic(commandName: string, bc: string): Promise<string>
   return path;
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const [commandName, bc = "SAP"] = process.argv.slice(2);
   if (!commandName) {

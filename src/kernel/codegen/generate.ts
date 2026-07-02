@@ -11,7 +11,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { QLERIFY_DIR } from "../../ontology/model.js";
 import { descriptorsForBoundedContext, sha256 } from "./introspect.js";
 import { genContent, barrelContent, registryContent, logicStubContent } from "./emit.js";
@@ -106,7 +106,7 @@ export function generateBoundedContext(bc: string): GenerateResult {
   return { written, unchanged, warnings };
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const bc = process.argv[2] ?? "SAP";
   const r = generateBoundedContext(bc);

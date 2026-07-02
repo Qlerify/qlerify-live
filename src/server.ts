@@ -2,7 +2,7 @@ import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { existsSync, readdirSync } from "node:fs";
@@ -175,7 +175,9 @@ function reportStartupFailure(err: unknown): void {
   if (process.env.LOG_LEVEL === "debug") console.error(err);
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+// pathToFileURL (not string-prefixing) so the entrypoint check also holds on
+// Windows, where argv[1] is C:\...-style and never string-matches a file: URL.
+const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const port = Number(process.env.PORT ?? 3001);
   // Loopback-only by default. Bind all interfaces (HOST=0.0.0.0) only behind a

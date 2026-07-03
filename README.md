@@ -137,7 +137,7 @@ The default model is **`claude-sonnet-4-6`** (override with `CHAT_MODEL`; effort
 | Layer        | Choice |
 |--------------|--------|
 | Language     | TypeScript (ES2022, ESM), run under **tsx** (no compiled `dist/` in production) |
-| Runtime      | Node.js **22** (OpenSSL required by Prisma) |
+| Runtime      | Node.js **24** (OpenSSL required by Prisma) |
 | HTTP         | **Fastify 5** (`@fastify/cors`, `@fastify/static`) |
 | Persistence  | **Prisma 5 + SQLite** for the control plane + `EventLog`; **raw SQL** `gen_` tables for model-derived projections |
 | AI           | **`@anthropic-ai/sdk`** (Claude) |

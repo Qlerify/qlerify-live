@@ -284,7 +284,7 @@ docker run -p 3001:3001 \
   qlerify-live
 ```
 
-`node:22-slim` base, installs OpenSSL + all deps (devDeps included — `tsx` and the Prisma CLI run at runtime), generates the Prisma client, and bakes in `NODE_ENV=production` (the security boundary that disables the dev auth shim). The entrypoint places the SQLite DB and `.qlerify` model cache on `/data`, applies the schema when its hash changes, then starts the server.
+`node:24-slim` base, installs OpenSSL + all deps (devDeps included — `tsx` and the Prisma CLI run at runtime), generates the Prisma client, and bakes in `NODE_ENV=production` (the security boundary that disables the dev auth shim). The entrypoint places the SQLite DB and `.qlerify` model cache on `/data`, applies the schema when its hash changes, then starts the server.
 
 > Unlike local dev, the container does **not** run `npm run setup`, so it does not auto-generate `PLATFORM_ENCRYPTION_KEY`. Provide a **stable** value (and keep it — rotating it invalidates every org's stored BYOK secret) to enable per-org AI/Qlerify credentials. `ANTHROPIC_API_KEY` is an optional platform default; orgs can instead configure their own provider in the UI.
 

@@ -4,7 +4,7 @@
 # .ts files — both of which break once compiled to dist/. tsx runs the TS
 # sources directly, so no `npm run build` step (and WIP type errors don't block
 # the deploy). Fly builds this remotely; no local Docker required.
-FROM node:22-slim
+FROM node:24-slim
 
 # OpenSSL is required by Prisma's query engine.
 RUN apt-get update \

@@ -180,7 +180,7 @@ qlerify-live/
 
 ### Prerequisites
 
-- **Node.js 22** and npm
+- **Node.js 24** and npm
 - **OpenSSL** (required by Prisma's query engine)
 - An **AI provider** for AI features — an Anthropic API key ([console.anthropic.com](https://console.anthropic.com)) **or** an AWS account with Claude enabled in Bedrock. Added per-org in the UI after sign-in; **not** required to install or boot
 

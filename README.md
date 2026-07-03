@@ -207,6 +207,8 @@ The server listens on **http://localhost:3001** by default (`PORT` / `HOST` to o
 
 > **`DATABASE_URL` is handled for you.** Setup writes an absolute path and the runtime self-heals a blank/relative value to `prisma/dev.db`, so the Prisma CLI and the generated client always agree. (A hand-written relative `file:./dev.db` would otherwise split reads/writes across two `.db` files — that footgun is now closed.)
 
+> **Dependency install scripts are allowlisted.** npm ≥ 11.16 gates dependency `postinstall`/`preinstall` scripts on the `allowScripts` field in `package.json` (a warning today; npm 12 will refuse to run unapproved scripts). The six script-running packages in this tree (`prisma`, `@prisma/client`, `@prisma/engines`, two copies of `esbuild`, and the macOS-only `fsevents`) are pre-approved at **pinned versions**, so `npm ci` stays clean and working on any npm version. After bumping one of these dependencies, re-approve the new version — `npm approve-scripts` on npm ≥ 11.16, or edit the pins by hand; the test suite fails if the allowlist drifts from `package-lock.json`.
+
 ---
 
 ## Configuration
@@ -377,6 +379,7 @@ The security model is genuinely load-bearing — derived-tenant isolation, a rel
 - **Tenant isolation is app-enforced** (SQLite has no row-level security). The single scoped-store seam is the load-bearing guarantee; Postgres + RLS is the planned drop-in.
 - **Connector code is an RCE surface.** Full-power connectors run in a sandboxed subprocess and the in-process AI-authored path is deny-scanned, but the connector/adapter subsystem is **not yet fully tenant-isolated** and connector credentials are stored in plaintext at rest (PoC). Gated by the `connector.build` capability and the `QLERIFY_CONNECTORS_ENABLED` kill-switch.
 - **The audit log is tamper-evident, not yet tamper-proof** (WORM + SIEM export are deferred).
+- **Dependency install scripts are version-pinned-allowlisted** (`allowScripts` in `package.json`, enforced by a test against the lockfile on every npm version) — a compromised future release of a dependency can't run an unreviewed postinstall.
 - Set `NODE_ENV=production` in any shared/deployed environment — it disables the forgeable dev auth shim.
 
 Review the security doc and the open items before exposing this to untrusted tenants or production data.

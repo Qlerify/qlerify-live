@@ -273,6 +273,48 @@ describe("per-org config (unlocked)", () => {
   });
 });
 
+describe("no first-party key on Bedrock wire requests", () => {
+  // The base SDK falls back to env ANTHROPIC_API_KEY when a client is built
+  // without an apiKey, which would attach it as an x-api-key header on every
+  // SigV4-signed Bedrock request — sending the platform's Anthropic key to AWS
+  // and echoing it back inside AWS SignatureDoesNotMatch error bodies (which
+  // quote all signed headers verbatim). buildRequest exposes the merged
+  // pre-flight headers without touching the network.
+  async function requestHeaders(client: unknown): Promise<Headers> {
+    const { req } = await (
+      client as { buildRequest: (o: object) => Promise<{ req: { headers: ConstructorParameters<typeof Headers>[0] } }> }
+    ).buildRequest({
+      method: "post",
+      path: "/v1/messages",
+      body: { model: ORG_BR_MODEL, max_tokens: 1, messages: [{ role: "user", content: "ping" }] },
+    });
+    return new Headers(req.headers);
+  }
+
+  it("org Bedrock client: env ANTHROPIC_API_KEY never leaks into the request", async () => {
+    process.env.ANTHROPIC_API_KEY = PLATFORM_KEY;
+    const r = await runWithTenant(ctxFor(orgBedrockId), () => getAnthropicClient());
+    expect(r.client).toBeInstanceOf(AnthropicBedrock);
+    expect((await requestHeaders(r.client)).get("x-api-key")).toBeNull();
+  });
+
+  it("platform Bedrock client: env ANTHROPIC_API_KEY never leaks into the request", async () => {
+    process.env.ANTHROPIC_API_KEY = PLATFORM_KEY;
+    process.env.LLM_PROVIDER = "bedrock";
+    process.env.BEDROCK_REGION = ENV_BR_REGION;
+    process.env.BEDROCK_MODEL = ENV_BR_MODEL;
+    const r = await getAnthropicClient();
+    expect(r.client).toBeInstanceOf(AnthropicBedrock);
+    expect((await requestHeaders(r.client)).get("x-api-key")).toBeNull();
+  });
+
+  it("first-party clients still send their key (the strip is Bedrock-only)", async () => {
+    process.env.ANTHROPIC_API_KEY = PLATFORM_KEY;
+    const r = await getAnthropicClient();
+    expect((await requestHeaders(r.client)).get("x-api-key")).toBe(PLATFORM_KEY);
+  });
+});
+
 describe("state 1: LOCKED (LLM_SETTINGS_LOCKED=true)", () => {
   it("parses the lock flag", () => {
     for (const v of ["true", "TRUE", "1", "yes"]) {

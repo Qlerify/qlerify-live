@@ -145,6 +145,15 @@ function buildPlatformAnthropicClient(): ResolvedAnthropic {
   return { client: new Anthropic(), model: DEFAULT_MODEL, source: "platform", provider: "anthropic" };
 }
 
+/** Passed to every AnthropicBedrock so the platform's first-party key can
+ * never ride along to AWS: when no `apiKey` option is passed, the base SDK
+ * falls back to env ANTHROPIC_API_KEY and attaches it as an `x-api-key` header
+ * on the SigV4-signed Bedrock request — and AWS SignatureDoesNotMatch bodies
+ * quote all signed headers verbatim, echoing the key back to whoever reads the
+ * error (e.g. an org admin validating their Bedrock config). The explicit null
+ * header is honored by the SDK's header merge as removal. */
+const BEDROCK_STRIP_FIRST_PARTY_KEY = { defaultHeaders: { "x-api-key": null } };
+
 function buildPlatformBedrockClient(): ResolvedAnthropic {
   const { region, model } = bedrockEnvConfig();
   // Credentials come from the standard AWS chain (IAM role / env / shared profile);
@@ -152,7 +161,7 @@ function buildPlatformBedrockClient(): ResolvedAnthropic {
   // AnthropicBedrock is a sibling BaseAnthropic subclass exposing the identical
   // `.messages.create` surface every caller uses — the cast keeps this seam typed as
   // Anthropic without threading a client union through the five call sites.
-  const client = new AnthropicBedrock({ awsRegion: region }) as unknown as Anthropic;
+  const client = new AnthropicBedrock({ awsRegion: region, ...BEDROCK_STRIP_FIRST_PARTY_KEY }) as unknown as Anthropic;
   return { client, model, source: "platform", provider: "bedrock" };
 }
 
@@ -225,6 +234,7 @@ function buildOrgBedrockClient(org: OrgLlmRow): ResolvedAnthropic {
     awsRegion: org.bedrockRegion!,
     awsAccessKey: org.bedrockAccessKeyId!,
     awsSecretKey: decryptSecret(org.bedrockSecretCiphertext!),
+    ...BEDROCK_STRIP_FIRST_PARTY_KEY,
   }) as unknown as Anthropic;
   return { client, model: org.bedrockModel!, source: "org", provider: "bedrock" };
 }
@@ -365,6 +375,7 @@ export async function validateBedrockConfig(
       awsRegion: region,
       awsAccessKey: accessKeyId,
       awsSecretKey: secretAccessKey,
+      ...BEDROCK_STRIP_FIRST_PARTY_KEY,
     }).messages.create({
       model,
       max_tokens: 1,

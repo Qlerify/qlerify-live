@@ -9,7 +9,11 @@ import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
-import { generateConnectorModule, describeConnector, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS } from "./codegen.js";
+import {
+  generateConnectorModule, describeConnector, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS,
+  type RelatedSchema,
+} from "./codegen.js";
+import type { EntitySchema } from "../../ontology/model.js";
 import {
   writeModule, readModule, writeCredentials, readCredentials, credentialKeys, moduleExists,
   installDeps, scanImports, deleteConnectorFiles, type InstallResult,
@@ -157,6 +161,24 @@ export async function copyConnectorCredentials(fromId: string, toId: string): Pr
   return keys;
 }
 
+/** Schemas of the kinds the target's fields point at via `relatedEntity`, deduped.
+ * Threaded into codegen so fabricated values for those fields come from the
+ * related item's example values (the model's allowed vocabulary), not lookalikes
+ * the code author invents. Exported for tests. */
+export function relatedSchemasFor(target: EntitySchema): RelatedSchema[] {
+  const o = getOntology();
+  const out: RelatedSchema[] = [];
+  const seen = new Set<string>();
+  for (const f of target.fields) {
+    if (!f.relatedEntity || seen.has(f.relatedEntity)) continue;
+    seen.add(f.relatedEntity);
+    const entity = o.entity(f.relatedEntity);
+    const schema = entity ?? o.valueObject(f.relatedEntity);
+    if (schema) out.push({ name: f.relatedEntity, kind: entity ? "entity" : "valueObject", schema });
+  }
+  return out;
+}
+
 interface BuildConnectorResult {
   deps: string[];
   install: InstallResult;
@@ -178,6 +200,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   const gen = await generateConnectorModule({
     target, targetKind, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
+    related: relatedSchemasFor(target),
   });
   // Install first so a missing-dep failure is reported here, not as a cryptic
   // "Cannot find package" at run time. The module is written regardless so the

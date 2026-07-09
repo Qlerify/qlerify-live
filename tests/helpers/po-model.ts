@@ -45,6 +45,58 @@ export const PURCHASE_ORDER_MODEL = JSON.stringify({
   },
 });
 
+/** A model whose root entity has fields holding a related ENTITY and a related
+ * VALUE OBJECT — the closed-vocabulary case: the related schema's example values
+ * are the only values the model allows for those fields (regulationType must be
+ * one of RegulationType's ids, never an invented lookalike). */
+export const REGULATED_DEMAND_MODEL = JSON.stringify({
+  version: 1,
+  boundedContext: "GAD",
+  roles: ["Analyst"],
+  domainEvents: {
+    MarketDemandCreated: {
+      event: "Market Demand Created",
+      role: "Analyst",
+      command: { $ref: "#/schemas/commands/CreateMarketDemand" },
+      aggregateRoot: { $ref: "#/schemas/entities/MarketDemand" },
+    },
+  },
+  schemas: {
+    entities: {
+      MarketDemand: {
+        required: ["id", "regulationTitle"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "regulationTitle", dataType: "string", exampleData: ["CBAM", "India BIS Safety Requirements"] },
+          {
+            name: "regulationType", dataType: "object", exampleData: ["Business Requirement"],
+            relatedEntity: { $ref: "#/schemas/entities/RegulationType" },
+          },
+          {
+            name: "regulationStatus", dataType: "object", exampleData: ["Inforce"],
+            relatedEntity: { $ref: "#/schemas/valueObjects/RegulationStatus" },
+          },
+          { name: "status", dataType: "string", exampleData: ["NEW", "ASSESSED", "NEW"] },
+        ],
+      },
+      RegulationType: {
+        required: ["id"],
+        fields: [
+          { name: "id", dataType: "string", exampleData: ["Generic Product Requirement", "Business Requirement", "Local"] },
+        ],
+      },
+    },
+    valueObjects: {
+      RegulationStatus: {
+        fields: [{ name: "status", dataType: "string", exampleData: ["Inforce", "Proposed"] }],
+      },
+    },
+    commands: {
+      CreateMarketDemand: { required: [], fields: [{ name: "regulationTitle" }] },
+    },
+  },
+});
+
 export interface ModelHarness {
   workflowId: string;
   orgId: string;

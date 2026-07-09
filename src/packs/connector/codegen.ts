@@ -6,9 +6,17 @@
 // only generateConnectorModule calls out.
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { EntitySchema } from "../../ontology/model.js";
+import type { EntitySchema, SchemaField } from "../../ontology/model.js";
 import { getAnthropicClient } from "../../llm/anthropic.js";
 import { scanImports } from "./runtime.js";
+
+/** A schema one of the target's fields points at via `relatedEntity`. Its example
+ * values are the model's allowed vocabulary for that field when data is fabricated. */
+export interface RelatedSchema {
+  name: string;
+  kind: "entity" | "valueObject";
+  schema: EntitySchema;
+}
 
 interface ConnectorGenInput {
   /** The model kind the connector must produce rows for. */
@@ -24,6 +32,9 @@ interface ConnectorGenInput {
   endpoint?: string;
   /** On a self-heal turn: the error + trace from the last failed test run. */
   errorReport?: string;
+  /** Schemas of the kinds the target's fields hold via `relatedEntity` (resolved
+   * by the caller — this module never reads the ontology). */
+  related?: RelatedSchema[];
 }
 
 interface ConnectorGenResult {
@@ -31,16 +42,51 @@ interface ConnectorGenResult {
   deps: string[];
 }
 
-function buildConnectorPrompt(input: ConnectorGenInput): string {
-  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport } = input;
+/** Deduped example values in model order, capped — the value vocabulary the model
+ * records for a field. */
+function exampleVocab(f: SchemaField, max = 10): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of f.exampleData ?? []) {
+    if (v === undefined || v === null || v === "") continue;
+    const s = JSON.stringify(v);
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** Exported for unit tests — pure (no I/O, no ontology reads). */
+export function buildConnectorPrompt(input: ConnectorGenInput): string {
+  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related } = input;
   const fields = target.fields
     .map((f) => {
       const req = (target.required ?? []).includes(f.name) ? " (required)" : "";
-      const ex = f.exampleData?.[0] !== undefined ? ` — e.g. ${JSON.stringify(f.exampleData[0])}` : "";
-      const rel = f.relatedEntity ? ` [holds a ${f.relatedEntity}${f.array ? "[]" : ""} value object]` : "";
+      const vocab = exampleVocab(f, 5);
+      const ex = vocab.length ? ` — e.g. ${vocab.join(", ")}` : "";
+      const rel = f.relatedEntity ? ` [holds a ${f.relatedEntity}${f.array ? "[]" : ""} value object — see Related schemas]` : "";
       return `  ${f.name}: ${f.dataType ?? "string"}${req}${ex}${rel}`;
     })
     .join("\n");
+
+  const relatedSection = (related ?? []).length
+    ? [
+        ``,
+        `## Related schemas — what the [holds a …] fields above contain`,
+        `Each related schema's example values are the model's ALLOWED VOCABULARY for the field that holds it. When you FABRICATE data (simulated/demo rows, no real source), pick those fields' values ONLY from the allowed values below — never invent variants or lookalikes. Return the value flat (the related schema's single meaningful field's value) unless asked to embed it as a nested object; either way the values must come from the allowed list. Rows read from a real source pass through as-is.`,
+        ...(related ?? []).map((r) => {
+          const sub = r.schema.fields
+            .map((f) => {
+              const vocab = exampleVocab(f);
+              return `    ${f.name}: ${f.dataType ?? "string"}${vocab.length ? ` — allowed values: ${vocab.join(" | ")}` : ""}`;
+            })
+            .join("\n");
+          return `  ${r.name} (${r.kind}):\n${sub}`;
+        }),
+      ]
+    : [];
 
   const creds = credentialKeys.length
     ? `The operator has configured these credential fields (available at ctx.credentials.<name>; values are secret and not shown here): ${credentialKeys.map((k) => `\`${k}\``).join(", ")}.`
@@ -57,6 +103,7 @@ function buildConnectorPrompt(input: ConnectorGenInput): string {
     targetKind === "entity"
       ? `\nEach row should have a stable unique "id" (use the source's natural key; if there is none, derive a deterministic one).`
       : `\nThis is a value object (no identity of its own). Return the field values; the platform assigns an id when landing it as its own table.`,
+    ...relatedSection,
     ``,
     `## How to reach the source — you have FULL power`,
     `You MAY import ANY npm package (e.g. @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, pg, mysql2, mongodb, googleapis, soap, ldapjs, snowflake-sdk) and use ANY protocol. Just \`import\` what you need with ESM syntax — the runtime detects your imports and installs them automatically before running. Plain HTTP/REST: use the global \`fetch\` (also available as ctx.fetch).`,
@@ -79,6 +126,9 @@ function buildConnectorPrompt(input: ConnectorGenInput): string {
     `## Rules`,
     `- Coerce values to the target dataTypes (numbers as numbers, dates as ISO strings, booleans as booleans).`,
     `- If the operator asked to EMBED a related value object, return it as a nested object/array on that field — it will be stored as JSON.`,
+    ...((related ?? []).length
+      ? [`- FABRICATED data for a field with a Related schema must use ONLY that schema's allowed values (see "Related schemas") — distribute them realistically across rows, but never invent a value outside the list.`]
+      : []),
     `- Authenticate ONLY from ctx.credentials. Never hardcode or ctx.log a secret.`,
     `- On any failure, throw an Error whose message explains what went wrong (it is shown to the operator and fed back to you to fix).`,
     `- Output ONLY the JavaScript module source. No markdown fences, no prose, no commentary.`,

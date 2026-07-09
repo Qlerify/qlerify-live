@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import { loadOntologyFromStrings } from "../../src/ontology/model.js";
-import { decideCaseId, foreignKeyFields } from "../../src/twin/correlate.js";
+import { decideCaseId, fkTargetEntity, foreignKeyFields } from "../../src/twin/correlate.js";
 
 const WORKFLOW = JSON.stringify({
   version: 1,
@@ -109,5 +109,74 @@ describe("case correlation — the FK linking heuristic", () => {
   it("honours an explicit caseId in the payload over any inference", () => {
     const c = decideCaseId(ont, "Order", "ord-9", { caseId: "case-forced", accountId: "acc-1" }, resolver({ "acc-1": "acc-1" }));
     expect(c).toBe("case-forced");
+  });
+});
+
+// Acronym-named entities: "gprId" naively capitalizes to "Gpr", which is NOT the
+// entity's name ("GPR") — the FK-by-name match must be case-insensitive or the
+// downstream aggregate fragments into its own case (the real-world break: SoA
+// rows carrying gprId derived into cases disconnected from their GPR's flow).
+const ACRONYM_WORKFLOW = JSON.stringify({
+  version: 1,
+  boundedContext: "Compliance",
+  roles: ["Analyst"],
+  domainEvents: {
+    GPRCreated: {
+      event: "GPR Created",
+      role: "Analyst",
+      command: { $ref: "#/schemas/commands/CreateGPR" },
+      aggregateRoot: { $ref: "#/schemas/entities/GPR" },
+    },
+    SoAIdentified: {
+      event: "GPR Applicability Identified (SoA)",
+      role: "Analyst",
+      follows: [{ $ref: "#/domainEvents/GPRCreated" }],
+      command: { $ref: "#/schemas/commands/IdentifySoA" },
+      aggregateRoot: { $ref: "#/schemas/entities/SoA" },
+    },
+  },
+  schemas: {
+    entities: {
+      GPR: {
+        required: ["id"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "title", dataType: "string" },
+        ],
+      },
+      SoA: {
+        required: ["id", "gprId"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "gprId", dataType: "string" }, // FK back to GPR — only findable case-insensitively
+        ],
+      },
+    },
+    commands: {
+      CreateGPR: { required: ["title"], fields: [{ name: "title" }] },
+      IdentifySoA: { required: ["gprId"], fields: [{ name: "gprId" }] },
+    },
+  },
+});
+
+const acronymOnt = loadOntologyFromStrings(ACRONYM_WORKFLOW, null);
+
+describe("case correlation — acronym entity names (GPR, SoA)", () => {
+  it("resolves *Id fields to acronym entities case-insensitively, returning the real name", () => {
+    expect(fkTargetEntity("gprId", acronymOnt)).toBe("GPR");
+    expect(fkTargetEntity("soaId", acronymOnt)).toBe("SoA"); // mixed-case acronym ("Soa" ≠ "SoA" naively)
+    expect(fkTargetEntity("title", acronymOnt)).toBeUndefined(); // not *Id-shaped
+    expect(fkTargetEntity("orderId", acronymOnt)).toBeUndefined(); // no such entity here
+  });
+
+  it("reads gprId on SoA as a foreign key to GPR", () => {
+    expect(foreignKeyFields("SoA", acronymOnt)).toEqual([{ name: "gprId", target: "GPR" }]);
+  });
+
+  it("links a SoA back to its GPR's case via gprId", () => {
+    // GPR-013 already correlated into case MCR-013 (its own upstream spine).
+    const caseOf = resolver({ "GPR-013": "MCR-013" });
+    const c = decideCaseId(acronymOnt, "SoA", "SOA-013", { gprId: "GPR-013", id: "SOA-013" }, caseOf);
+    expect(c).toBe("MCR-013"); // NOT "SOA-013" — that was the bug
   });
 });

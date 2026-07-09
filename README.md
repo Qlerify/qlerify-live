@@ -83,6 +83,8 @@ Every fact carries **provenance** (`simulated` / `recorded` / `live`) and **acto
 
 AI writes the integration code from a natural-language description of the source, **tests it on the fly**, and **self-heals**: a failed dry-run's error + redacted trace is fed back so the AI rewrites the code until it works. Operators can hand-edit any connector in an in-browser **Monaco** editor. The Given/When/Then acceptance criteria act as the test oracle.
 
+A connector can also **simulate content** (ask the builder chat, or click the suggestion): it fabricates ~20 realistic rows spread evenly across the aggregate's lifecycle states — fields filled cumulatively per workflow event, `status` walked along its ladder — so the derive step turns them into cases spread along the whole workflow. Fields that hold a **related entity or value object** are treated as closed sets: fabricated values are drawn only from the related schema's example values in the model (the codegen prompt carries them as the allowed vocabulary), never invented lookalikes. Downstream aggregates are only simulated against **real upstream ids** (the case-id path); if the upstream table is empty, the assistant offers to simulate it first.
+
 ### 5. Multi-tenant control plane
 
 `src/platform/` is the tenancy / identity / authorization / audit spine:

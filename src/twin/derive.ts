@@ -18,7 +18,11 @@
 //                     (Account Confirmed ⇐ status == CONFIRMED).
 //   • FIELD event   → an update event introducing its own entity-column field(s)
 //                     not seen on any earlier event for the aggregate; evidence
-//                     = those fields are set.
+//                     = those fields are set (a boolean field must be TRUE —
+//                     false records the step not happening). Sibling events
+//                     sharing one command (alternative outcomes of a decision)
+//                     partition its fields by name affinity, each keeping its
+//                     own flag (…GPR Approved ⇐ gprApproved).
 //   • else          → no row-state evidence (e.g. a login that leaves no trace);
 //                     skipped, with the reason recorded.
 //
@@ -42,6 +46,7 @@ import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } fro
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { withActorKind } from "../platform/tenancy/actor.js";
 import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
+import { foreignKeyFields } from "./correlate.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
@@ -55,6 +60,16 @@ const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 function present(v: unknown): boolean {
   return v !== null && v !== undefined && String(v).trim() !== "";
+}
+
+/** Presence counts as field evidence except for boolean columns, where only a
+ * TRUTHY value does: an approval flag at false/0 records that the step did NOT
+ * happen — the opposite of evidence. */
+function fieldEvidence(entity: EntitySchema, name: string, v: unknown): boolean {
+  if (!present(v)) return false;
+  if (entity.fields.find((f) => f.name === name)?.dataType !== "boolean") return true;
+  const s = String(v).trim().toLowerCase();
+  return s !== "false" && s !== "0" && s !== "no";
 }
 
 /** True when this event is the first to touch its own aggregate in the follows
@@ -127,26 +142,52 @@ function statusTargetIndex(event: OntologyEvent, entity: EntitySchema): number {
   return -1;
 }
 
+/** Same-aggregate events bound to the SAME command as this one — alternative
+ * OUTCOMES of one decision step ("Approval completed BR Approved" vs "… GPR
+ * Approved" both firing UpdateStatus), not sequential steps. */
+function commandSiblings(event: OntologyEvent, ont: Ontology): OntologyEvent[] {
+  return ont.events.filter(
+    (e) => e.key !== event.key && e.aggregateRoot === event.aggregateRoot && e.commandName === event.commandName,
+  );
+}
+
 /** Entity-column fields this event's command INTRODUCES — present on its command,
  * a real column, and not already carried by any earlier same-aggregate event
  * (so a field shared with the create, like `email`, is not evidence for a later
  * event). This is what makes a login event — whose fields all came from register
- * — yield no distinguishing evidence. */
+ * — yield no distinguishing evidence.
+ *
+ * When SIBLING events share the command (alternative outcomes of one decision),
+ * its fields are partitioned by name affinity — each outcome keeps the flag(s)
+ * its own name embeds (…GPR Approved ↔ gprApproved) — so the first sibling in
+ * linear order doesn't claim everything and leave the rest evidence-less. */
 function distinguishingFields(event: OntologyEvent, entity: EntitySchema, ont: Ontology): string[] {
   const cmd = ont.command(event.commandName);
   if (!cmd) return [];
   const entityCols = new Set(entity.fields.map((f) => f.name));
   const order = ont.linearOrder();
   const myIdx = order.indexOf(event.key);
+  const siblings = commandSiblings(event, ont);
+  const siblingKeys = new Set(siblings.map((s) => s.key));
   const earlier = new Set<string>();
   for (let i = 0; i < order.length && i < myIdx; i++) {
     const e = ont.eventByKey(order[i]!);
-    if (!e || e.aggregateRoot !== event.aggregateRoot) continue;
+    // A sibling is an alternative to this event, not a step before it — it must
+    // not swallow the shared command's fields via the `earlier` set.
+    if (!e || e.aggregateRoot !== event.aggregateRoot || siblingKeys.has(e.key)) continue;
     for (const f of ont.command(e.commandName)?.fields ?? []) earlier.add(f.name);
   }
+  const claims = (e: OntologyEvent, field: string): boolean => norm(e.name + " " + e.key).includes(norm(field));
   return cmd.fields
     .map((f) => f.name)
-    .filter((n) => n !== "id" && n !== "status" && entityCols.has(n) && !earlier.has(n));
+    .filter((n) => n !== "id" && n !== "status" && entityCols.has(n) && !earlier.has(n))
+    .filter((n) => {
+      if (siblings.length === 0) return true;
+      if (claims(event, n)) return true;
+      if (siblings.some((s) => claims(s, n))) return false;
+      // A field no outcome's name claims stays with the earliest sibling.
+      return !siblings.some((s) => order.indexOf(s.key) < myIdx);
+    });
 }
 
 /** Which evidence rule applies to this event — fixed by the model (event +
@@ -184,7 +225,7 @@ function evaluate(
     }
     case "fields": {
       const dist = distinguishingFields(event, entity, ont);
-      const missing = dist.filter((n) => !present(row[n]));
+      const missing = dist.filter((n) => !fieldEvidence(entity, n, row[n]));
       if (missing.length === 0) return { happened: true, reason: dist.map((n) => `${n}=${row[n]}`).join(", ") };
       return { happened: false, reason: `unset: ${missing.join(", ")}` };
     }
@@ -249,13 +290,57 @@ function rowProvenance(row: Record<string, unknown>): ProvMode | undefined {
   return typeof p === "string" && (PROV_MODES as readonly string[]).includes(p) ? (p as ProvMode) : undefined;
 }
 
-/** The derived event's payload: the row's business fields (drop platform cols),
- * id always included. */
-function buildPayload(row: Record<string, unknown>, entity: EntitySchema): Record<string, unknown> {
+/** Fields carried by any LATER same-aggregate event's command (linear order) —
+ * the counterpart of distinguishingFields' "earlier" set. */
+function fieldsCarriedLater(event: OntologyEvent, ont: Ontology): Set<string> {
+  const order = ont.linearOrder();
+  const myIdx = order.indexOf(event.key);
+  const later = new Set<string>();
+  for (let i = myIdx + 1; i < order.length; i++) {
+    const e = ont.eventByKey(order[i]!);
+    if (!e || e.aggregateRoot !== event.aggregateRoot) continue;
+    for (const f of ont.command(e.commandName)?.fields ?? []) later.add(f.name);
+  }
+  return later;
+}
+
+/** The derived event's payload — the fields ITS OWN command carries, mirroring
+ * the command path (commands/base emitFor: the command's args + id + resulting
+ * status), NOT the whole row. The detail view reconstructs "state as of step N"
+ * by folding payloads in order, so an event carrying the full final row would
+ * leak later steps' fields into earlier ones — and a later mutation of an
+ * existing row would never read as a change. On top of the command's fields:
+ *   • a create event also carries the FK columns no later command establishes
+ *     (emit() correlates a child aggregate into its parent's case from the FKs
+ *     in its first event's payload; an FK a later step sets rides on THAT
+ *     step's payload instead, as one of its command fields),
+ *   • status is the lifecycle value the event drives INTO (ladder target; the
+ *     ladder's first value for a create) — the row's FINAL status would
+ *     likewise leak the future into earlier steps. */
+function buildPayload(
+  kind: EvidenceKind,
+  event: OntologyEvent,
+  row: Record<string, unknown>,
+  entity: EntitySchema,
+  ont: Ontology,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const f of entity.fields) {
-    if (PLATFORM_COLS.has(f.name)) continue;
-    if (row[f.name] !== undefined && row[f.name] !== null) out[f.name] = row[f.name];
+  const entityCols = new Set(entity.fields.map((f) => f.name));
+  const put = (name: string): void => {
+    if (name === "id" || name === "status" || PLATFORM_COLS.has(name) || !entityCols.has(name)) return;
+    if (row[name] !== undefined && row[name] !== null) out[name] = row[name];
+  };
+  for (const f of ont.command(event.commandName)?.fields ?? []) put(f.name);
+  const ladder = statusLadder(entity);
+  if (kind === "create") {
+    const later = fieldsCarriedLater(event, ont);
+    for (const fk of foreignKeyFields(entity.name, ont)) {
+      if (!later.has(fk.name)) put(fk.name);
+    }
+    if (ladder.length > 0) out.status = ladder[0];
+  } else if (kind === "status") {
+    const tgt = statusTargetIndex(event, entity);
+    if (tgt >= 0) out.status = ladder[tgt];
   }
   out.id = String(row.id);
   return out;
@@ -340,7 +425,7 @@ export function planDerivation(
         ref: event.ref,
         aggregateId: id,
         role: event.role,
-        payload: buildPayload(row, entity),
+        payload: buildPayload(kind, event, row, entity, ont),
         businessAt: new Date(eventBaseDate(kind, row, entity, roles).getTime() + oi * 1000),
         provenance: rowProvenance(row),
         evidence: reason,
@@ -425,9 +510,9 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
           // No withScope here: emit() correlates the case itself, so an aggregate
           // the workflow moved into (an Order carrying its accountId, say) inherits
           // the case of the aggregate it references instead of starting a new one.
-          // The row's FK columns are in e.payload (buildPayload keeps them), and
-          // linearOrder guarantees the referenced parent's events are already
-          // logged by the time we reach the child.
+          // The row's FK columns ride on its create event's payload (buildPayload
+          // keeps them there), and linearOrder guarantees the referenced parent's
+          // events are already logged by the time we reach the child.
           // Derived facts come from ingested source data, not a person or the
           // assistant — attribute them to the adapter origin.
           await withActorKind("adapter", () => emit({

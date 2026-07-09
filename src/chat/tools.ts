@@ -25,6 +25,7 @@ import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import { ownsAdapterId } from "../packs/ownership.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { connectorsEnabled } from "../config/features.js";
+import * as store from "../twin/projection-store.js";
 
 // Chat WRITE tools → the PDP action they require. The chat loop runs each tool
 // under withActorKind("ai"), so a deny here is audited as an AI guardrail block
@@ -75,7 +76,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_cases",
     description:
-      "List every instance (run) currently in the simulator with its status, progress (steps fired of total), and dwellSeconds (real wall-clock idleness since the last event). Use this whenever the user asks 'how many are…', 'which ones…', 'show me everything', or needs an overview.",
+      "List every instance (run) currently in the simulator with its status, progress (steps fired, of the total steps on that run's own branch path), and dwellSeconds (real wall-clock idleness since the last event). Use this whenever the user asks 'how many are…', 'which ones…', 'show me everything', or needs an overview.",
     input_schema: {
       type: "object",
       properties: {
@@ -270,6 +271,19 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "list_table_rows",
+    description:
+      "Read the CURRENT rows of a model table (entity or value object) in this workflow — read-only, the same data the explorer's Items pane shows. Returns the total row count plus up to `limit` rows. Use it to check whether a table is already populated (e.g. before simulating a downstream aggregate), to fetch real ids that another table's rows must reference, or to inspect the shape of existing data.",
+    input_schema: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "The entity or value-object name (the table name in the explorer)." },
+        limit: { type: "number", description: "Max rows to return (default 20, cap 100). The count is always the full total." },
+      },
+      required: ["table"],
+    },
+  },
+  {
     name: "create_connector",
     description:
       "WRITE — Create a new full-power connector for a system, targeting one kind (an entity OR a value object). It starts empty; you then set credentials (if needed), build its code, test, and ingest. The connector can integrate with anything (databases, cloud SDKs, REST/SOAP, files). Requires confirmation: state the system + target, ask 'Shall I create it?', wait for yes, then call with confirmed:true.",
@@ -458,6 +472,8 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return handleResetAdapter(args);
       case "list_model_kinds":
         return ok(handleListModelKinds(typeof args.boundedContext === "string" ? args.boundedContext : undefined));
+      case "list_table_rows":
+        return ok(await handleListTableRows(String(args.table ?? ""), Number(args.limit ?? 20)));
       case "create_connector":
         return handleCreateConnector(args);
       case "set_connector_credentials":
@@ -727,6 +743,24 @@ function handleListModelKinds(bcFilter?: string) {
     };
   });
   return { systems };
+}
+
+// Read-only look at a model table's current rows. Org- and workflow-scoped via
+// the projection store, so it discloses exactly what the explorer's Items pane
+// already shows the caller. The simulate-content doctrine leans on it: check
+// whether an upstream table is populated before fabricating downstream rows, and
+// fetch REAL ids for reference fields.
+async function handleListTableRows(tableArg: string, limitArg: number) {
+  const name = tableArg.trim();
+  if (!name) return { error: "table required" };
+  const o = getOntology();
+  const kind = o.entity(name) ?? o.valueObject(name);
+  if (!kind) return { error: `no entity or value object "${name}" in the model` };
+  const limit = Number.isFinite(limitArg) && limitArg > 0 ? Math.min(Math.floor(limitArg), 100) : 20;
+  const count = await store.countRows(kind.name);
+  const rows = count === 0 ? [] : await store.findMany(kind.name, limit);
+  // organization_id is a tenancy internal — never part of the business row.
+  return { table: kind.name, count, rows: rows.map(({ organization_id: _org, ...r }) => r) };
 }
 
 function handleCreateConnector(args: Record<string, any>) {

@@ -148,14 +148,18 @@ const state = {
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
   detailPanelMode: "chat",   // detail-view sidebar tab: "chat" (advisor) | "log" (event log)
-  // The connector builder keeps one thread per (system, table) so switching
-  // tables doesn't bleed history. state.chatMessages above is shared with the
-  // dashboard/detail "Process advisor", so we stash the advisor thread while a
-  // connector thread is active and restore it on leaving the explorer.
-  connectorChats: {},        // key `${system}::${entity}` -> Anthropic.MessageParam[] (working copy)
+  // The connector builder keeps one thread per (workflow, system, table) so
+  // switching tables doesn't bleed history. state.chatMessages above is shared
+  // with the dashboard/detail "Process advisor", so we stash the advisor thread
+  // while a connector thread is active and restore it on leaving the explorer.
+  // Every stash key is prefixed with chatScope() (org + workflow) because a
+  // workflow switch is SPA-style — no reload — and two workflows built from the
+  // same model share their system/table names.
+  connectorChats: {},        // connectorChatKey(system, entity) -> Anthropic.MessageParam[] (working copy)
   connectorChatKey: null,    // active connector key, or null when the advisor thread is active
   inConnectorMode: false,    // true when state.chatMessages holds a connector thread
-  advisorChat: [],           // stashed advisor thread while a connector thread is active
+  advisorChats: {},          // chatScope() -> that org+workflow's stashed advisor thread
+  chatScope: null,           // scope the LIVE thread belongs to; syncChatScope() detects switches
   connectorChatsHydrated: new Set(), // keys whose server-persisted thread has been loaded this session
   // registry health — non-null message means the active workflow's model couldn't
   // be built into the event registry; surfaced as a top banner.
@@ -198,10 +202,15 @@ const AUTH = {
   setSession: (token) => localStorage.setItem("ql.token", token || ""),
   // Switching org invalidates the selected workflow — clear it so the new org
   // resolves its own default workflow (or the empty-org state) until one is picked.
-  setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); },
-  setWorkflow: (id) => { if (id) localStorage.setItem("ql.workflow", id); else localStorage.removeItem("ql.workflow"); },
-  clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); },
+  // Org/workflow switches also swap the chat threads (syncChatScope) — every
+  // switch path funnels through these two setters, so hooking here covers them all.
+  setOrg: (orgId) => { if (orgId) localStorage.setItem("ql.org", orgId); else localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); syncChatScope(); },
+  setWorkflow: (id) => { if (id) localStorage.setItem("ql.workflow", id); else localStorage.removeItem("ql.workflow"); syncChatScope(); },
+  clear: () => { localStorage.removeItem("ql.token"); localStorage.removeItem("ql.org"); localStorage.removeItem("ql.workflow"); resetChatState(); },
 };
+// Attribute the boot-time (empty) threads to the boot scope, so the first real
+// switch has an old scope to stash under. chatScope is hoisted.
+state.chatScope = chatScope();
 
 async function api(path, opts = {}) {
   const headers = { "x-role": role, ...(opts.headers || {}) };
@@ -288,11 +297,29 @@ async function sendChat() {
   render();
   scrollChatToBottom();
 
+  // Identity of the thread this turn belongs to. If the user switches workflow
+  // or table while the turn is in flight, the live thread is swapped out — the
+  // response must go to THIS thread's stash, not clobber (or persist under) the
+  // newly active one.
+  const scopeAtSend = state.chatScope;
+  const wasConnector = state.inConnectorMode;
+  const keyAtSend = state.connectorChatKey;
+
   try {
     const resp = await api("/chat", {
       method: "POST",
       body: JSON.stringify({ messages: state.chatMessages }),
     });
+    const swapped = state.chatScope !== scopeAtSend
+      || state.inConnectorMode !== wasConnector
+      || state.connectorChatKey !== keyAtSend;
+    if (swapped) {
+      // File the completed turn where it belongs (in-memory only — the request
+      // headers for a server persist would now name the wrong workflow).
+      if (wasConnector) state.connectorChats[keyAtSend] = resp.messages;
+      else state.advisorChats[scopeAtSend] = resp.messages;
+      return; // finally still clears busy + renders
+    }
     state.chatMessages = resp.messages;
     // After an assistant turn the dashboard / current view may be stale (write tools).
     if (state.view === "dashboard") await loadDashboard();
@@ -322,20 +349,69 @@ function clearChat() {
   render();
 }
 
-// --- Connector-builder threads: one per (system, table) ---------------------
+// --- Connector-builder threads: one per (workflow, system, table) -----------
 // state.chatMessages is shared with the dashboard/detail advisor, so we model
-// two stashes: per-(system,table) connector threads and a single advisor thread.
-// activate/deactivate swap the live thread in/out; stashActiveChat always saves
-// the LIVE state.chatMessages first (sendChat reassigns that array each turn, so
-// the map ref can be stale between turns — re-stashing on every swap keeps it
-// correct).
+// two stashes: per-(system,table) connector threads and per-scope advisor
+// threads. activate/deactivate swap the live thread in/out; stashActiveChat
+// always saves the LIVE state.chatMessages first (sendChat reassigns that array
+// each turn, so the map ref can be stale between turns — re-stashing on every
+// swap keeps it correct).
+//
+// Every key is prefixed with chatScope() — the active org + workflow — because
+// switching workflow (or org) is SPA-style with no reload. The server persists
+// connector threads per workflow (journal.ts connectorChatKey), but an unscoped
+// client cache would show workflow A's thread inside workflow B whenever both
+// share a model's system/table names (e.g. two workflows connected to the same
+// Qlerify source), and the next turn would persist A's thread under B's server
+// key — the cross-workflow history bleed. AUTH.setOrg/setWorkflow call
+// syncChatScope() so every switch path swaps the threads.
+function chatScope() {
+  return `${AUTH.org()}::${AUTH.workflow()}`;
+}
+
 function connectorChatKey(system, entity) {
-  return `${system || ""}::${entity || ""}`;
+  return `${chatScope()}::${system || ""}::${entity || ""}`;
+}
+
+// The org/workflow changed: stash the live thread under the scope it belongs to
+// (its keys were captured when it went live), then swap in the new scope's
+// thread. Render-free — every switch path re-renders afterwards anyway.
+function syncChatScope() {
+  const scope = chatScope();
+  if (state.chatScope === scope) return;
+  stashActiveChat();
+  state.chatScope = scope;
+  state.chatError = null;
+  if (state.inConnectorMode && state.exp?.system && state.exp?.entity) {
+    // Still in the explorer: re-point the live thread at the SAME table in the
+    // NEW workflow (empty until its server-persisted copy hydrates).
+    const nk = connectorChatKey(state.exp.system, state.exp.entity);
+    state.connectorChatKey = nk;
+    state.chatMessages = state.connectorChats[nk] || [];
+    hydrateConnectorChat(state.exp.system, state.exp.entity, nk);
+  } else {
+    state.inConnectorMode = false;
+    state.connectorChatKey = null;
+    state.chatMessages = state.advisorChats[scope] || [];
+  }
+}
+
+// Logout: a different identity may sign in next on this page — drop every thread.
+function resetChatState() {
+  state.chatMessages = [];
+  state.chatInput = "";
+  state.chatError = null;
+  state.advisorChats = {};
+  state.connectorChats = {};
+  state.connectorChatsHydrated = new Set();
+  state.inConnectorMode = false;
+  state.connectorChatKey = null;
+  state.chatScope = null;
 }
 
 function stashActiveChat() {
   if (state.inConnectorMode) state.connectorChats[state.connectorChatKey] = state.chatMessages;
-  else state.advisorChat = state.chatMessages;
+  else state.advisorChats[state.chatScope ?? chatScope()] = state.chatMessages;
 }
 
 // Make the connector thread for (system, entity) the active chat. No-op if it is
@@ -347,6 +423,7 @@ function activateConnectorChat(system, entity) {
   stashActiveChat();
   state.inConnectorMode = true;
   state.connectorChatKey = nk;
+  state.chatScope = chatScope();
   state.chatMessages = state.connectorChats[nk] || [];
   state.chatError = null;
   hydrateConnectorChat(system, entity, nk);
@@ -394,7 +471,8 @@ function deactivateConnectorChat() {
   stashActiveChat();
   state.inConnectorMode = false;
   state.connectorChatKey = null;
-  state.chatMessages = state.advisorChat || [];
+  state.chatScope = chatScope();
+  state.chatMessages = state.advisorChats[chatScope()] || [];
   state.chatError = null;
 }
 
@@ -656,10 +734,10 @@ function chatPanel() {
     "Why hasn't this case moved forward yet?",
     "Move this case forward one step.",
   ] : builder ? [
+    "Simulate content",
     "Fill this table from our DynamoDB users table",
     "Connect this to a REST API and pull the records",
     "Populate this from a Postgres query",
-    "Show me the connector code",
   ] : [
     "How many cases haven't moved in 24h?",
     "Which case is closest to being delivered?",
@@ -4546,11 +4624,28 @@ function render() {
   }
 }
 
+// Put the freshly rebuilt timeline back where the user had scrolled it (both
+// axes — the by-case view scrolls vertically too). Returns the scroller so
+// callers can run follow-up positioning on it.
+function restoreTimelineScroll(left, top) {
+  const scroller = document.getElementById("timeline-scroll");
+  if (scroller) {
+    scroller.scrollLeft = left;
+    scroller.scrollTop = top;
+  }
+  return scroller;
+}
+
 function renderView() {
   // Tear down the connector code editor when leaving its view, so its DOM/listeners
   // don't leak (it's rebuilt on demand when the Code tab is next opened).
   if (state.view !== "connectors") disposeConnMonaco();
-  const prevScroll = document.getElementById("timeline-scroll")?.scrollLeft ?? 0;
+  // The detail/flow/rows timelines all live in #timeline-scroll and are rebuilt
+  // wholesale via innerHTML (including on the 5s live polls) — snapshot the
+  // scroll position so those branches can put the user back where they were.
+  const prevScroller = document.getElementById("timeline-scroll");
+  const prevScroll = prevScroller?.scrollLeft ?? 0;
+  const prevScrollTop = prevScroller?.scrollTop ?? 0;
   const mainShiftCls = state.chatOpen ? "mr-[420px]" : "";
   // Every main view is wrapped with the tenant shell (scope bar + workflow
   // section tabs) so the whole app reads as a multi-tenant console.
@@ -4580,8 +4675,7 @@ function renderView() {
     bindTenantBar();
     bindDetail();
     bindChat();
-    const scroller = document.getElementById("timeline-scroll");
-    if (scroller) scroller.scrollLeft = prevScroll;
+    const scroller = restoreTimelineScroll(prevScroll, prevScrollTop);
     // Keep the focused card in view: the selected one while scrubbing (so arrow
     // navigation follows it), otherwise the latest fired step.
     const focusIdx = state.selectedStep != null ? state.selectedStep : state.currentIndex - 1;
@@ -4610,11 +4704,13 @@ function renderView() {
     root.innerHTML = wrap(mergedFlowView());
     bindTenantBar();
     bindChat();
+    restoreTimelineScroll(prevScroll, prevScrollTop);
   } else if (state.view === "rows") {
     root.innerHTML = wrap(flowRowsView());
     bindTenantBar();
     bindChat();
     bindFlowRows();
+    restoreTimelineScroll(prevScroll, prevScrollTop);
   } else if (state.view === "model") {
     root.innerHTML = wrap(modelView());
     bindTenantBar();

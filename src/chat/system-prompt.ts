@@ -5,11 +5,17 @@
 //   Block 2 — full Qlerify workflow dump (large, stable, cache_control here)
 //
 // Caching is a prefix match (see shared/prompt-caching.md). Both blocks are
-// deterministic — no timestamps, no per-session content — so the entire
-// prefix hits cache from request #2 onward.
+// deterministic per model — no timestamps, no per-session content — so a
+// workflow's entire prefix hits cache from its request #2 onward.
+//
+// The blocks are resolved PER REQUEST from the active workflow's model
+// (systemBlocks(), memoized on the same content-hash key the event registry
+// uses). Reading the module-load-time model instead would bake the EMPTY
+// system-context model into every chat — the assistant would be told "the
+// 0-event workflow" for all tenants and reason that no lifecycle exists.
 
-import { EVENTS } from "../events/registry.js";
-import { getOntology } from "../ontology/model.js";
+import { events } from "../events/registry.js";
+import { getOntology, ontologyCacheKey } from "../ontology/model.js";
 
 // ---------------------------------------------------------------------------
 // Build the workflow dump section — derived from the merged ontology, so it
@@ -18,9 +24,10 @@ import { getOntology } from "../ontology/model.js";
 
 function eventsSection(): string {
   const o = getOntology();
-  const lines: string[] = [`## The ${EVENTS.length}-event workflow (chronological)`];
-  for (let i = 0; i < EVENTS.length; i++) {
-    const e = EVENTS[i]!;
+  const evs = events();
+  const lines: string[] = [`## The ${evs.length}-event workflow (chronological)`];
+  for (let i = 0; i < evs.length; i++) {
+    const e = evs[i]!;
     const spec = o.requireEventByRef(e.ref);
     const gwts = (spec.acceptanceCriteria ?? []).map((g) => `      - ${g}`).join("\n");
     lines.push(
@@ -33,6 +40,22 @@ function eventsSection(): string {
   return lines.join("\n");
 }
 
+/** Deduped example values in model order, capped — the value vocabulary the
+ * model records for a field. */
+function exampleVocab(exampleData: unknown[] | undefined, max = 10): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of exampleData ?? []) {
+    if (v === undefined || v === null || v === "") continue;
+    const s = JSON.stringify(v);
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function entitiesSection(): string {
   const o = getOntology();
   const lines: string[] = [`## Entities (${o.entities.length})`];
@@ -43,6 +66,23 @@ function entitiesSection(): string {
     lines.push(`- **${e.name}** (${bc}) — ${e.description ?? ""}`);
     if (fields) lines.push(`    fields: ${fields}`);
     if (required) lines.push(`    required: ${required}`);
+    for (const f of e.fields) {
+      // A field that holds a related entity/value object is a CLOSED SET: the
+      // related schema's example values are the only values the model allows.
+      if (f.relatedEntity) {
+        const rel = o.entity(f.relatedEntity) ?? o.valueObject(f.relatedEntity);
+        if (!rel) continue;
+        const sub = rel.fields
+          .map((rf) => ({ name: rf.name, vals: exampleVocab(rf.exampleData) }))
+          .filter((r) => r.vals.length > 0)
+          .map((r) => `${r.name}: ${r.vals.join(" | ")}`);
+        lines.push(`    ${f.name} → ${f.relatedEntity}${f.array ? "[]" : ""}${sub.length ? ` { ${sub.join("; ")} } (closed set — ONLY these values)` : ""}`);
+      } else if (/status/i.test(f.name)) {
+        // Status ladders drive the simulate-content lifecycle spread.
+        const vals = exampleVocab(f.exampleData);
+        if (vals.length) lines.push(`    ${f.name} values (lifecycle order): ${vals.join(" | ")}`);
+      }
+    }
   }
   return lines.join("\n");
 }
@@ -83,7 +123,7 @@ function behaviorSection(): string {
   const o = getOntology();
   const root = o.rootAggregate;
   const contexts = o.boundedContexts.join(", ");
-  return `You are the **process assistant** for a model-driven workflow simulator. The loaded model is **${o.title}** — a ${EVENTS.length}-step workflow across ${o.boundedContexts.length} bounded context(s) (${contexts}). Each run carries one ${root} instance from creation through completion.
+  return `You are the **process assistant** for a model-driven workflow simulator. The loaded model is **${o.title}** — a ${events().length}-step workflow across ${o.boundedContexts.length} bounded context(s) (${contexts}). Each run carries one ${root} instance from creation through completion.
 
 Your job: help the user understand and act on the state of the instances currently in flight. You can:
 - Answer status questions ("how many are stalled", "what's the next step for instance X")
@@ -135,11 +175,17 @@ The user picks a **system** (bounded context) and a **table** (an entity or a va
 6. **If it errors, FIX IT YOURSELF**: take the error + trace from the dry-run and call \`build_connector\` again with that text as \`errorReport\`. Repeat test→repair until rows come back clean. This is the self-heal loop — don't hand the error back to the user; resolve it.
 7. **Populate** the table: \`ingest_connector\` lands the rows so they appear in the explorer's Items pane. Confirm the row count first.
 
+**Simulate content (fabricated example data — no real source).** When the user asks to "simulate content" — or to fill a table with example / demo / fake / sample data — run the SAME loop with two differences: skip credentials entirely, and the code you request from \`build_connector\` fabricates realistic rows in-memory (plain data generation; no network, no external source). The goal is NOT ~20 look-alike rows: it is a table that, once ingested, reads as ~20 cases spread evenly along the workflow, because ingestion derives domain events from each row's own state. Plan it in three steps:
+
+1. **Derive the lifecycle.** From the workflow definition above, list IN ORDER the events whose aggregate root is the target table. That ordered list is the aggregate's lifecycle: the first event creates the row; each later one enriches it (fills the fields its command introduces) and/or advances \`status\` along its ladder (the status field's example values, in listed order).
+2. **Spread the rows across states.** For the workflow's FIRST aggregate, default ~20 rows split evenly across the lifecycle states (4 states → 5 rows each; put any remainder on the earliest states; honor a row count the user gives — and pass \`ingest_connector\` a \`limit\` that covers it); a downstream aggregate does NOT get its own ~20 — its count comes from its parents (step 3). A row "at" state N must look like it stopped right after event N: fields introduced by events 1..N filled with realistic, VARIED values; fields introduced by later events left null/absent; \`status\` set to the value event N drives the aggregate into. **Closed-set fields:** a field the entity dump shows as \`field → Kind { … }\` holds a related entity/value object, and the values listed there are the ONLY values the model allows — draw from that list, never invent variants ("Compliance Requirement" when the model says "Business Requirement" is a bug). Spell all of this out in the \`build_connector\` \`instructions\` — batch sizes, the exact fields per batch, the exact status value per batch, and each closed-set field's allowed values verbatim — because the code author sees only your instructions plus the target schema (which includes the related-schema vocabularies as a backstop), never the workflow.
+3. **Downstream aggregates need real parents.** If the target is NOT the aggregate root of the FIRST event, its rows must reference id(s) that already exist upstream — the case id (usually the first aggregate's id), reachable directly or through a parent entity. Check the upstream table(s) with \`list_table_rows\` FIRST. Empty → do NOT invent orphan ids; explain the dependency and offer to simulate the upstream table(s) first, then this one (each is its own confirmed build + ingest). Populated → fetch real ids with \`list_table_rows\`, embed them in the instructions, and stay state-consistent: attach rows only to parents whose own state has already passed the event where this aggregate first appears (a freshly created parent cannot have a child from three steps later). **The parents also set the row count.** The case spread was fixed when the upstream table was simulated; a downstream table just materializes the downstream slice of those SAME cases. So plan one row per eligible parent, and derive each child's state from how far its parent's case has advanced (parent just past the creating event → child freshly created; parent at the end of the workflow → child in its final state). Fewer eligible parents ⇒ fewer rows — that is correct, not a shortfall. Never pad the count by attaching several same-stage children to one parent unless the model or the user says the relationship is genuinely one-to-many.
+
 **Value objects — offer the shape.** A value object can be filled two ways, and the user chooses: (a) as its OWN table (\`create_connector\` targeting the value object directly), or (b) EMBEDDED as a JSON value on a parent entity's field (the connector returns it as a nested object on that field; it's stored as JSON automatically). If the user references a value object, ask which they want unless it's obvious from context.
 
 **Credential collection etiquette.** Never invent credentials. If the user pasted a secret in chat, store it via \`set_connector_credentials\` and gently note that for real use they'd set it through a secure form (this PoC stores it in plaintext). Tell them which fields you still need.
 
-**Tools:** \`list_model_kinds\`, \`get_connector_history\`, \`list_connector_credentials\`, \`create_connector\` (W), \`set_connector_credentials\`, \`copy_connector_credentials\` (W-dest), \`build_connector\` (W), \`adapter_dry_run\`, \`ingest_connector\` (W), \`view_connector_code\`, \`remove_connector\` (W). Tools marked (W) mutate state — follow the confirmation ritual, but keep momentum: a single "yes, build the DynamoDB connector" is enough to create → set creds the user already gave → build, without re-asking at every micro-step.
+**Tools:** \`list_model_kinds\`, \`list_table_rows\`, \`get_connector_history\`, \`list_connector_credentials\`, \`create_connector\` (W), \`set_connector_credentials\`, \`copy_connector_credentials\` (W-dest), \`build_connector\` (W), \`adapter_dry_run\`, \`ingest_connector\` (W), \`view_connector_code\`, \`remove_connector\` (W). Tools marked (W) mutate state — follow the confirmation ritual, but keep momentum: a single "yes, build the DynamoDB connector" is enough to create → set creds the user already gave → build, without re-asking at every micro-step.
 
 ## UI context
 
@@ -180,13 +226,27 @@ function buildBlocks() {
   ];
 }
 
-// Built once from the (empty) system model. The chat assistant resolves a
-// workflow's own model per request; this system-context dump carries no events.
-export let SYSTEM_BLOCKS = buildBlocks();
+// Memoized per model content (same key as the event registry's events() cache):
+// the same workflow+model version always yields the identical block array, so
+// the Anthropic prompt cache keeps hitting; a model swap yields a new key.
+const blocksByKey = new Map<string, ReturnType<typeof buildBlocks>>();
 
-// Exported for diagnostics — `npm run dev` can print this at boot to verify size.
+/** The system blocks for the ACTIVE workflow's model — call inside the request's
+ * tenant context (like getOntology()/events()). */
+export function systemBlocks() {
+  const key = ontologyCacheKey();
+  const cached = blocksByKey.get(key);
+  if (cached) return cached;
+  const blocks = buildBlocks();
+  blocksByKey.set(key, blocks);
+  return blocks;
+}
+
+// Exported for diagnostics (the /api/chat/info route) — sizes for the ACTIVE
+// workflow's prompt, so it must also run inside a request context.
 export function systemPromptSize() {
-  const behaviorChars = SYSTEM_BLOCKS[0]?.text.length ?? 0;
-  const workflowChars = SYSTEM_BLOCKS[1]?.text.length ?? 0;
+  const blocks = systemBlocks();
+  const behaviorChars = blocks[0]?.text.length ?? 0;
+  const workflowChars = blocks[1]?.text.length ?? 0;
   return { behaviorChars, workflowChars, totalChars: behaviorChars + workflowChars };
 }

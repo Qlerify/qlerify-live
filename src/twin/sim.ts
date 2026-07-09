@@ -18,6 +18,7 @@ import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { genericApply } from "../commands/base.js";
+import { fkTargetEntity } from "./correlate.js";
 import * as store from "./projection-store.js";
 
 /** A stable signature of the loaded model — used as the "which model does the
@@ -81,13 +82,10 @@ function rootCreateEvent(ont: Ontology): OntologyEvent {
   );
 }
 
-/** "userId" → "User" when an entity of that name exists (FK-by-name heuristic). */
+/** "userId" → "User" when an entity of that name exists (FK-by-name heuristic,
+ * case-insensitive so "gprId" → "GPR"; shared with case correlation). */
 function fkAggregateFor(field: string, ont: Ontology): string | undefined {
-  const m = /^(.*)Id$/.exec(field);
-  if (!m) return undefined;
-  const base = m[1]!;
-  const cap = base.charAt(0).toUpperCase() + base.slice(1);
-  return ont.entity(cap) ? cap : undefined;
+  return fkTargetEntity(field, ont);
 }
 
 function placeholder(field: string): string {
@@ -347,10 +345,36 @@ export async function genericDeleteAll(): Promise<void> {
   await store.clearAll(); // listProjectionTables is workflow-scoped → clears only this workflow's tables
 }
 
+/** Steps on ONE run's own path through the model: the length of the
+ * source→sink chain in the `follows` DAG that best matches the run's fired
+ * events — most fired events on the chain first, longest chain as the
+ * tiebreaker (a run that hasn't committed to a branch yet reads as the longest
+ * alternative still open). A branch-less model degrades to the full event
+ * count, i.e. the old fixed total. */
+export function branchTotal(ont: Ontology, firedRefs: Set<string>): number {
+  type Score = { fired: number; len: number };
+  const beats = (a: Score, b: Score | undefined) => !b || a.fired > b.fired || (a.fired === b.fired && a.len > b.len);
+  // (fired, length) is additive along a chain, so a topological sweep finds the
+  // lexicographic-max chain ending at every event in one pass.
+  const best = new Map<string, Score>();
+  let end: Score | undefined;
+  for (const key of ont.topologicalOrder()) {
+    const e = ont.eventByKey(key)!;
+    let pred: Score = { fired: 0, len: 0 };
+    for (const p of e.predecessors) {
+      const b = best.get(p);
+      if (b && beats(b, pred)) pred = b;
+    }
+    const score = { fired: pred.fired + (firedRefs.has(e.ref) ? 1 : 0), len: pred.len + 1 };
+    best.set(key, score);
+    if (ont.successorsOf(key).length === 0 && beats(score, end)) end = score;
+  }
+  return end?.len ?? ont.linearOrder().length;
+}
+
 /** List runs: one row per root-aggregate instance, with progress. */
 export async function genericListInstances(): Promise<any[]> {
   const ont = getOntology();
-  const total = ont.linearOrder().length;
   const table = ont.rootAggregate;
   if (!(await store.tableExists(table))) return [];
   const rows = await store.findMany(table, 200);
@@ -359,6 +383,10 @@ export async function genericListInstances(): Promise<any[]> {
     const id = String(row.id);
     const progressRows = await prisma.eventLog.findMany({ where: { caseId: id, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } });
     const last = await prisma.eventLog.findFirst({ where: { caseId: id, ...eventLogOrgWhere() }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
+    // Per-run total: steps on THIS run's branch, not the whole model — a case on
+    // a 10-step branch reads 7/10, not 7/18. Fired events off the chosen chain
+    // (e.g. dangling satellites) could exceed it, so clamp to the fired count.
+    const total = Math.max(branchTotal(ont, new Set(progressRows.map((r) => r.eventRef))), progressRows.length);
     out.push({ ...row, progress: progressRows.length, total, lastEvent: last });
   }
   return out;

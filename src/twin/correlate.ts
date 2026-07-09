@@ -27,6 +27,18 @@ import { prisma } from "../db.js";
 import { getOntology, type Ontology } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 
+/** The entity an `<name>Id` field points at (the FK-by-name heuristic, shared
+ * with the simulator's arg-linking). Matched case-insensitively so acronym
+ * entities resolve too — "gprId" → "GPR", "soaId" → "SoA" — and the entity's
+ * REAL name is returned. Undefined when the field isn't `*Id`-shaped or no
+ * entity matches. */
+export function fkTargetEntity(fieldName: string, ont: Ontology): string | undefined {
+  const m = /^(.+)Id$/.exec(fieldName);
+  if (!m) return undefined;
+  const want = m[1]!.toLowerCase();
+  return ont.entities.find((e) => e.name.toLowerCase() === want)?.name;
+}
+
 /** Foreign-key fields on `aggregateRoot` that point at ANOTHER aggregate entity,
  * resolved from the model: a field whose declared `relatedEntity` is an entity,
  * or an `<name>Id` field whose `<Name>` is an entity (the FK-by-name heuristic,
@@ -45,11 +57,7 @@ export function foreignKeyFields(aggregateRoot: string, ont: Ontology): Array<{ 
     if (f.relatedEntity && ont.entity(f.relatedEntity)) {
       target = f.relatedEntity;
     } else {
-      const m = /^(.*)Id$/.exec(f.name);
-      if (m && m[1]) {
-        const cap = m[1].charAt(0).toUpperCase() + m[1].slice(1);
-        if (ont.entity(cap)) target = cap;
-      }
+      target = fkTargetEntity(f.name, ont);
     }
     if (target && target !== aggregateRoot) out.push({ name: f.name, target });
   }

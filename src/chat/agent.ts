@@ -4,7 +4,7 @@
 //   - enforce the write-tool confirmation invariant via the tool handlers
 
 import Anthropic from "@anthropic-ai/sdk";
-import { SYSTEM_BLOCKS } from "./system-prompt.js";
+import { systemBlocks } from "./system-prompt.js";
 import { TOOLS, runTool } from "./tools.js";
 import { getAnthropicClient } from "../llm/anthropic.js";
 import { withActorKind } from "../platform/tenancy/actor.js";
@@ -33,6 +33,9 @@ export async function runAgentTurn(messages: Anthropic.MessageParam[]): Promise<
   // Resolve once per turn — the org's own key (or the platform default) — and
   // reuse the same client + model across every iteration of the agentic loop.
   const { client, model } = await getAnthropicClient();
+  // The ACTIVE workflow's model, resolved inside this request's tenant context —
+  // the module-load-time blocks would be the empty system model for everyone.
+  const system = systemBlocks();
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     usage.iterations++;
@@ -41,7 +44,7 @@ export async function runAgentTurn(messages: Anthropic.MessageParam[]): Promise<
       max_tokens: 4096,
       thinking: { type: "adaptive" },
       output_config: { effort: EFFORT },
-      system: SYSTEM_BLOCKS,
+      system,
       tools: TOOLS,
       messages: updated,
     });

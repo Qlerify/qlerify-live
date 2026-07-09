@@ -236,3 +236,183 @@ describe("planDerivation — connector date roles", () => {
     expect(reg.toISOString().startsWith("2025-09-09")).toBe(true); // rowBaseDate → row.createdAt
   });
 });
+
+// The detail view reconstructs "state as of step N" by folding payloads in
+// order, so each derived event must carry ONLY what its own command establishes
+// (mirroring the command path's emitFor) — a full-row payload on the create
+// would leak later steps' fields into earlier ones, and a later mutation of an
+// existing row would never read as a change.
+describe("planDerivation — payloads scoped to each event's own command", () => {
+  it("create carries its command's fields + the ladder's FIRST status, not the row's final state", () => {
+    const p = plan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A" }]);
+    expect(p.AccountRegistered.fired[0].payload).toEqual({
+      email: "a@x.com", firstname: "A", lastname: "A", status: "UNCONFIRMED", id: "a1",
+    });
+  });
+
+  it("a status event carries the status it drives INTO plus id — none of the create's fields", () => {
+    const p = plan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A" }]);
+    expect(p.AccountConfirmed.fired[0].payload).toEqual({ status: "CONFIRMED", id: "a1" });
+  });
+});
+
+// Sales mini-model for FK ride-along: Order carries two FK-shaped columns —
+// accountId, which NO command declares (pure lineage, set at birth), and
+// categoryId, which the later CategorizeOrder command establishes.
+const FK_WORKFLOW = JSON.stringify({
+  version: 1,
+  boundedContext: "Sales",
+  roles: ["User"],
+  domainEvents: {
+    AccountRegistered: {
+      event: "Account Registered",
+      role: "User",
+      command: { $ref: "#/schemas/commands/RegisterAccount" },
+      aggregateRoot: { $ref: "#/schemas/entities/Account" },
+    },
+    OrderPlaced: {
+      event: "Order Placed",
+      role: "User",
+      follows: [{ $ref: "#/domainEvents/AccountRegistered" }],
+      command: { $ref: "#/schemas/commands/PlaceOrder" },
+      aggregateRoot: { $ref: "#/schemas/entities/Order" },
+    },
+    OrderCategorized: {
+      event: "Order Categorized",
+      role: "User",
+      follows: [{ $ref: "#/domainEvents/OrderPlaced" }],
+      command: { $ref: "#/schemas/commands/CategorizeOrder" },
+      aggregateRoot: { $ref: "#/schemas/entities/Order" },
+    },
+  },
+  schemas: {
+    entities: {
+      Account: { required: ["id", "email"], fields: [{ name: "id", dataType: "string" }, { name: "email", dataType: "string" }] },
+      Order: {
+        required: ["id"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "accountId", dataType: "string" },
+          { name: "categoryId", dataType: "string" },
+          { name: "total", dataType: "number" },
+        ],
+      },
+      Category: { required: ["id"], fields: [{ name: "id", dataType: "string" }, { name: "name", dataType: "string" }] },
+    },
+    commands: {
+      RegisterAccount: { fields: [{ name: "email" }] },
+      PlaceOrder: { fields: [{ name: "total" }] }, // deliberately does NOT declare accountId
+      CategorizeOrder: { fields: [{ name: "categoryId" }] },
+    },
+  },
+});
+
+describe("planDerivation — FK ride-along on the create (case correlation)", () => {
+  const fkOnt = loadOntologyFromStrings(FK_WORKFLOW, null);
+  const fkPlan = (orders: Array<Record<string, unknown>>) =>
+    Object.fromEntries(
+      planDerivation(
+        fkOnt,
+        new Map([
+          ["Account", [{ id: "a1", email: "a@x.com" }]],
+          ["Order", orders],
+        ]),
+      ).map((p) => [p.key, p]),
+    );
+
+  it("the create rides an undeclared FK column (emit() correlates the case from it) but NOT one a later command sets", () => {
+    const p = fkPlan([{ id: "o1", accountId: "a1", categoryId: "c1", total: 100 }]);
+    expect(p.OrderPlaced.fired[0].payload).toEqual({ total: 100, accountId: "a1", id: "o1" });
+  });
+
+  it("the FK a later command establishes rides on THAT event's payload as its command field", () => {
+    const p = fkPlan([{ id: "o1", accountId: "a1", categoryId: "c1", total: 100 }]);
+    expect(p.OrderCategorized.kind).toBe("fields");
+    expect(p.OrderCategorized.fired[0].payload).toEqual({ categoryId: "c1", id: "o1" });
+  });
+});
+
+// Two events binding the SAME command — alternative OUTCOMES of one approval
+// decision, not sequential steps (the events-can-share-a-command shape). The
+// command carries one boolean flag per outcome; each event must claim ITS OWN
+// flag by name affinity and fire only when that flag is truthy — the first
+// sibling in linear order must not claim both flags and leave the second
+// classified "none".
+const SIBLING_WORKFLOW = JSON.stringify({
+  version: 1,
+  boundedContext: "Compliance",
+  roles: ["Owner"],
+  domainEvents: {
+    DemandRegistered: {
+      event: "Demand Registered",
+      role: "Owner",
+      command: { $ref: "#/schemas/commands/RegisterDemand" },
+      aggregateRoot: { $ref: "#/schemas/entities/Demand" },
+    },
+    BrApproved: {
+      event: "Approval process completed BR Approved",
+      role: "Owner",
+      follows: [{ $ref: "#/domainEvents/DemandRegistered" }],
+      command: { $ref: "#/schemas/commands/UpdateStatus" },
+      aggregateRoot: { $ref: "#/schemas/entities/Demand" },
+    },
+    GprApproved: {
+      event: "Approval process completed GPR Approved",
+      role: "Owner",
+      follows: [{ $ref: "#/domainEvents/DemandRegistered" }],
+      command: { $ref: "#/schemas/commands/UpdateStatus" },
+      aggregateRoot: { $ref: "#/schemas/entities/Demand" },
+    },
+  },
+  schemas: {
+    entities: {
+      Demand: {
+        required: ["id", "title"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "title", dataType: "string" },
+          { name: "brApproved", dataType: "boolean" },
+          { name: "gprApproved", dataType: "boolean" },
+        ],
+      },
+    },
+    commands: {
+      RegisterDemand: { required: ["title"], fields: [{ name: "title" }] },
+      UpdateStatus: { required: ["id"], fields: [{ name: "id" }, { name: "brApproved" }, { name: "gprApproved" }] },
+    },
+  },
+});
+
+describe("planDerivation — sibling events sharing one command (decision outcomes)", () => {
+  const sibOnt = loadOntologyFromStrings(SIBLING_WORKFLOW, null);
+  const sibPlan = (rows: Array<Record<string, unknown>>) =>
+    Object.fromEntries(planDerivation(sibOnt, new Map([["Demand", rows]])).map((p) => [p.key, p]));
+
+  it("BOTH siblings classify as field events — each claims its own flag by name affinity", () => {
+    const p = sibPlan([{ id: "d1", title: "T" }]);
+    expect(p.BrApproved.kind).toBe("fields");
+    expect(p.GprApproved.kind).toBe("fields");
+  });
+
+  it("fires exactly the branch whose flag is set (NULL-style data)", () => {
+    const p = sibPlan([
+      { id: "d1", title: "T", brApproved: 1, gprApproved: null },
+      { id: "d2", title: "T", brApproved: null, gprApproved: true },
+      { id: "d3", title: "T", brApproved: null, gprApproved: null },
+    ]);
+    expect(p.BrApproved.fired.map((f) => f.aggregateId)).toEqual(["d1"]);
+    expect(p.GprApproved.fired.map((f) => f.aggregateId)).toEqual(["d2"]);
+    expect(p.BrApproved.noEvidence).toBe(2);
+    expect(p.GprApproved.noEvidence).toBe(2);
+  });
+
+  it("a FALSE boolean flag is not evidence (0/1-style data)", () => {
+    const p = sibPlan([
+      { id: "d1", title: "T", brApproved: 0, gprApproved: 1 },
+      { id: "d2", title: "T", brApproved: false, gprApproved: false },
+      { id: "d3", title: "T", brApproved: "true", gprApproved: "false" },
+    ]);
+    expect(p.BrApproved.fired.map((f) => f.aggregateId)).toEqual(["d3"]);
+    expect(p.GprApproved.fired.map((f) => f.aggregateId)).toEqual(["d1"]);
+  });
+});

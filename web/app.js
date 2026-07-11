@@ -1543,7 +1543,7 @@ async function deleteCase(caseId, ev) {
 function dashboardRow(d, cols) {
   const pct = Math.round((d.progress / d.total) * 100) || 0;
   // Columns derived from the root-aggregate row's own fields (model-generic).
-  const cells = (cols || []).map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${escapeHtml(String(d[c] ?? "—"))}</td>`).join("");
+  const cells = (cols || []).map((c) => `<td class="px-4 py-3 text-sm text-stone-700">${attrCellHtml(d[c])}</td>`).join("");
   return `
     <tr class="cursor-pointer hover:bg-amber-50 transition-colors" data-go="#case/${d.id}">
       <td class="px-4 py-3"><span class="inline-block w-2 h-2 rounded-full bg-stone-300"></span></td>
@@ -1601,6 +1601,29 @@ function attrScalar(v) {
     if (typeof x === "string" || typeof x === "number" || typeof x === "boolean") return String(x);
   }
   return "";
+}
+
+// Render a List-view cell: scalars as-is, but a structured value (object/array,
+// or a JSON string holding one) as one line per contained value instead of raw
+// JSON — smaller type, capped at 4 lines with a "+N more" hint so one rich field
+// can't blow up the row height. Nested structures collapse to a readable scalar.
+function attrCellHtml(raw) {
+  if (raw === undefined || raw === null || raw === "") return "—";
+  let v = raw;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t[0] !== "{" && t[0] !== "[") return escapeHtml(v);
+    try { v = JSON.parse(t); } catch { return escapeHtml(v); }
+  }
+  if (typeof v !== "object") return escapeHtml(String(v));
+  const lines = (Array.isArray(v) ? v : Object.values(v))
+    .map((x) => attrText(x))
+    .filter((s) => s !== "—");
+  if (!lines.length) return "—";
+  if (lines.length === 1) return escapeHtml(lines[0]);
+  const shown = lines.slice(0, 4).map((s) => `<div class="text-xs leading-snug">${escapeHtml(s)}</div>`).join("");
+  const more = lines.length > 4 ? `<div class="text-[10px] text-stone-400">+${lines.length - 4} more</div>` : "";
+  return shown + more;
 }
 
 function dashboardView() {

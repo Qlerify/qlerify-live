@@ -12,6 +12,19 @@ import { writeSidecar } from "../packs/sidecar.js";
 import { adapterCfg, resetAdapter, removeAdapter } from "../packs/author.js";
 import { guardData } from "../platform/authz.js";
 import { ownsAdapterId } from "../packs/ownership.js";
+import type { AdapterConfig } from "../packs/types.js";
+
+// Derive the credential's env-var KEY entirely SERVER-SIDE from the adapter's own
+// stamped tenant context — never from the request body. The key is namespaced by
+// (org, workflow, adapter) so two tenants can never collide on the same
+// process.env slot, and the client can never choose the slot (which would be an
+// arbitrary `process.env[<any>] = <any>` write — e.g. NODE_ENV, HTTPS_PROXY).
+// Every component is sanitised to the portable env-name charset so no id can
+// inject an unrelated variable name.
+export function credentialEnvKey(cfg: AdapterConfig): string {
+  const clean = (s: string | null | undefined) => String(s ?? "none").replace(/[^A-Za-z0-9]/g, "_");
+  return `CRED_${clean(cfg.organizationId)}_${clean(cfg.workflowId)}_${clean(cfg.id)}`;
+}
 
 export function registerAdapterCodeRoutes(app: FastifyInstance): void {
   // Reset an adapter to a clean simulated draft (build from scratch). Deletes its
@@ -50,9 +63,11 @@ export function registerAdapterCodeRoutes(app: FastifyInstance): void {
     const cfg = adapterCfg(id);
     if (!cfg) return reply.code(404).send({ error: "NOT_FOUND" });
     const body = (req.body ?? {}) as any;
-    const ref = (typeof body.credentialsRef === "string" && body.credentialsRef) ? body.credentialsRef : cfg.credentialsRef;
-    if (!ref) return reply.code(400).send({ error: "NO_REF", message: "credentialsRef required" });
     if (typeof body.secret !== "string" || !body.secret) return reply.code(400).send({ error: "NO_SECRET", message: "secret required" });
+    // The KEY is derived server-side from THIS adapter's tenant stamp — the client's
+    // `body.credentialsRef` is deliberately ignored. Accepting it would let any
+    // authenticated caller write an arbitrary process.env slot on shared globals.
+    const ref = credentialEnvKey(cfg);
     process.env[ref] = body.secret;                // dev only; encrypted store is the next increment
     writeSidecar({ ...cfg, credentialsRef: ref }); // KEY only — never the secret
     return { credentialPresent: true, credentialsRef: ref };

@@ -38,6 +38,25 @@ export type FlowRows = {
   cap?: number
 }
 
+export type LogEntry = {
+  eventRef: string
+  eventName: string
+  boundedContext: string
+  role: string
+  occurredAt: string
+  businessAt?: string | null
+  provenance?: ProvMode
+  aggregateId?: string
+  payload?: string
+}
+
+export type Instance = {
+  instanceId: string
+  root?: Record<string, unknown>
+  events?: LogEntry[]
+  [k: string]: unknown
+}
+
 export type Meta = {
   title: string
   rootAggregate: string
@@ -46,7 +65,10 @@ export type Meta = {
   aggregateCount: number
   eventCount: number
   rootMandatoryAttributes?: string[]
-  provenance?: { byContext?: Record<string, { mode?: ProvMode }> }
+  provenance?: {
+    steps?: { real: number; total: number }
+    byContext?: Record<string, { mode?: ProvMode }>
+  }
 }
 
 export const DEFAULT_META: Meta = {

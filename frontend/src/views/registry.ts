@@ -3,6 +3,7 @@ import { Dashboard } from "./Dashboard.tsx"
 import { Overview } from "./Overview.tsx"
 import { Flow } from "./Flow/Flow.tsx"
 import { Rows } from "./Rows.tsx"
+import { Detail } from "./Detail/Detail.tsx"
 
 // route.view → the component rendered inside the shell. Adding a ported view is
 // one line here; anything missing falls back to NotPorted.
@@ -12,4 +13,5 @@ export const VIEWS: Record<string, ComponentType> = {
   overview: Overview,
   flow: Flow,
   rows: Rows,
+  detail: Detail,
 }

@@ -4,6 +4,8 @@ import { navigate, useRoute, WORKFLOW_SCOPED_VIEWS } from "./lib/router.ts"
 import { useStore } from "./lib/store.ts"
 import { TenantBar } from "./shell/TenantBar.tsx"
 import { SectionBar } from "./shell/SectionBar.tsx"
+import { RegistryBanner } from "./shell/RegistryBanner.tsx"
+import { VIEWS } from "./views/registry.ts"
 import { NewOrgDialog } from "./shell/NewOrgDialog.tsx"
 import { NewWorkflowDialog } from "./shell/NewWorkflowDialog.tsx"
 import { Toast } from "./shell/Toast.tsx"
@@ -94,13 +96,19 @@ export const App = () => {
   }
 
   const emptyOrg = (me.workflows || []).length === 0
-  const body = emptyOrg && route.view !== "admin" ? <EmptyOrg /> : <NotPorted view={route.view} />
+  const View = VIEWS[route.view]
+
+  let body = View ? <View /> : <NotPorted view={route.view} />
+  if (emptyOrg && route.view !== "admin") {
+    body = <EmptyOrg />
+  }
 
   return (
     <>
       <div className="flex flex-col min-h-screen">
         <TenantBar />
         <SectionBar view={route.view} />
+        <RegistryBanner />
         {body}
       </div>
       <NewOrgDialog />

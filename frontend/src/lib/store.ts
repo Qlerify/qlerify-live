@@ -1,5 +1,7 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
+import type { CaseRow, Meta } from "./types.ts"
+import { DEFAULT_META } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
 
@@ -7,6 +9,12 @@ type State = {
   me: Me | null
   orgs: NonNullable<Me["organizations"]>
   booting: boolean
+
+  cases: CaseRow[]
+  events: unknown[]
+  meta: Meta
+  busy: boolean
+  registryError: string | null
 
   orgMenuOpen: boolean
   wfMenuOpen: boolean
@@ -32,6 +40,12 @@ export const useStore = create<State>((set) => ({
   me: null,
   orgs: [],
   booting: true,
+
+  cases: [],
+  events: [],
+  meta: DEFAULT_META,
+  busy: false,
+  registryError: null,
 
   orgMenuOpen: false,
   wfMenuOpen: false,

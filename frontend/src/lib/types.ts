@@ -9,6 +9,21 @@ export type CaseRow = {
   [key: string]: unknown
 }
 
+export type EventDef = {
+  ref: string
+  name: string
+  boundedContext: string
+  role: string
+  phase?: number
+  predecessors?: string[]
+}
+
+export type FlowAggregate = {
+  counts: Record<string, number>
+  totalFirings: number
+  totalCases: number
+}
+
 export type Meta = {
   title: string
   rootAggregate: string

@@ -5,6 +5,7 @@ import { useStore } from "./lib/store.ts"
 import { TenantBar } from "./shell/TenantBar.tsx"
 import { SectionBar } from "./shell/SectionBar.tsx"
 import { RegistryBanner } from "./shell/RegistryBanner.tsx"
+import { Loading } from "./components/Loading.tsx"
 import { VIEWS } from "./views/registry.ts"
 import { NewOrgDialog } from "./shell/NewOrgDialog.tsx"
 import { NewWorkflowDialog } from "./shell/NewWorkflowDialog.tsx"
@@ -14,15 +15,6 @@ import { ChangePassword } from "./views/ChangePassword.tsx"
 import { EmptyOrg } from "./views/EmptyOrg.tsx"
 import { NoOrg } from "./views/NoOrg.tsx"
 import { NotPorted } from "./views/NotPorted.tsx"
-
-const Loading = () => (
-  <main className="flex-1 flex items-center justify-center p-8">
-    <div className="flex items-center gap-3 text-stone-500">
-      <div className="w-5 h-5 border-2 border-stone-300 border-t-stone-700 rounded-full animate-spin" />
-      <span className="text-sm">Loading…</span>
-    </div>
-  </main>
-)
 
 export const App = () => {
   const route = useRoute()

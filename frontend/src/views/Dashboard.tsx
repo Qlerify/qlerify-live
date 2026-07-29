@@ -3,7 +3,8 @@ import { api } from "../lib/api.ts"
 import { navigate } from "../lib/router.ts"
 import { useStore } from "../lib/store.ts"
 import { genericColumns, prettyEntity } from "../lib/format.ts"
-import type { CaseRow, Meta } from "../lib/types.ts"
+import { loadMeta, loadRegistryStatus } from "../lib/workflowData.ts"
+import type { CaseRow, EventDef } from "../lib/types.ts"
 import { Pill } from "../components/Pill.tsx"
 import { ProvChip } from "../components/ProvChip.tsx"
 import { AttrCell } from "../components/AttrCell.tsx"
@@ -15,30 +16,11 @@ const loadDashboard = async () => {
   const set = useStore.getState().set
   const [cases, events] = await Promise.all([
     api<CaseRow[]>("/sim/cases"),
-    api<unknown[]>("/sim/events"),
+    api<EventDef[]>("/sim/events"),
     loadRegistryStatus(),
     loadMeta(),
   ])
   set({ cases, events })
-}
-
-const loadRegistryStatus = async () => {
-  try {
-    const s = await api<{ ok: boolean; error?: string }>("/sim/registry-status")
-    useStore.getState().set({ registryError: s.ok ? null : s.error || null })
-  } catch {
-    // Leave the banner state as-is — a failure here shouldn't blank it.
-  }
-}
-
-const loadMeta = async () => {
-  try {
-    const meta = await api<Meta>("/sim/meta")
-    useStore.getState().set({ meta })
-    document.title = `${meta.title} — Live`
-  } catch {
-    // Keep the defaults.
-  }
 }
 
 const createCase = async () => {

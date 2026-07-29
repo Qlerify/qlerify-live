@@ -20,7 +20,14 @@ import { ensureSchemaUpgrades } from "./platform/db/schema-upgrade.js";
 import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const webRoot = join(here, "..", "web");
+
+// QLERIFY_WEB_UI=react serves the built React bundle; anything else keeps the
+// legacy app. Falls back to legacy if the bundle was never built.
+const legacyWebRoot = join(here, "..", "web");
+const reactWebRoot = join(here, "..", "frontend", "dist");
+const reactUiRequested = (process.env.QLERIFY_WEB_UI ?? "").toLowerCase() === "react";
+const serveReactUi = reactUiRequested && existsSync(join(reactWebRoot, "index.html"));
+const webRoot = serveReactUi ? reactWebRoot : legacyWebRoot;
 
 // Self-hosted Monaco editor (the connector "Code" tab). CSP forbids foreign script
 // origins, so we serve Monaco's prebuilt AMD bundle from node_modules over the same
@@ -38,15 +45,15 @@ function monacoMinDir(): string | null {
 }
 
 // Content-Security-Policy — defense-in-depth behind output escaping. script-src
-// has NO 'unsafe-inline', so injected <script> and inline event handlers
-// (onerror=, onclick=) cannot run even if an escaping sink is ever missed; foreign
-// script origins are blocked. 'unsafe-eval' + the Tailwind Play CDN are required
-// by its in-browser JIT; Google Fonts + the page's inline <style> need the style
-// allowances. All data fetches are same-origin (connect-src 'self').
+// has NO 'unsafe-inline', so injected <script> and inline event handlers cannot
+// run even if an escaping sink is ever missed. The legacy variant additionally
+// needs 'unsafe-eval' + the CDN origin for the Tailwind Play CDN's in-browser
+// JIT; the React build compiles Tailwind ahead of time and needs neither.
+const styleSrcCdn = serveReactUi ? "" : " https://cdn.tailwindcss.com";
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com",
+  serveReactUi ? "script-src 'self'" : "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com",
+  `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com${styleSrcCdn}`,
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
   "connect-src 'self'",
@@ -78,6 +85,12 @@ export async function buildServer() {
 
   if (existsSync(webRoot)) {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
+    app.log.info(`serving the ${serveReactUi ? "react" : "legacy"} frontend from ${webRoot}`);
+  }
+  if (reactUiRequested && !serveReactUi) {
+    app.log.warn(
+      "QLERIFY_WEB_UI=react but frontend/dist/index.html is missing — run `npm run build:web`. Falling back to the legacy UI.",
+    );
   }
 
   // Monaco editor assets (loader, language modes, workers) on the same origin.

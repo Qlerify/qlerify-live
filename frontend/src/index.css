@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Carried over from the legacy shell (web/index.html). */
+:root {
+  --row-changed: rgba(250, 204, 21, 0.45);
+  --row-changed-border: rgb(202, 138, 4);
+}
+
+html,
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  background: linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
+  height: 100%;
+}
+
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.row-changed {
+  background: var(--row-changed) !important;
+  border-left: 3px solid var(--row-changed-border);
+  animation: flash 1.3s ease-out;
+}
+
+@keyframes flash {
+  0% {
+    background: rgba(250, 204, 21, 0.85);
+  }
+  100% {
+    background: var(--row-changed);
+  }
+}
+
+.field-changed {
+  background: var(--row-changed) !important;
+  box-shadow: inset 0 0 0 1px var(--row-changed-border);
+  border-radius: 4px;
+  animation: flash 1.3s ease-out;
+}
+
+.entity-nest {
+  border-left: 2px solid #e7e5e4;
+}
+
+.panel {
+  transition: box-shadow 0.2s ease;
+}
+
+.panel.active {
+  box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.5);
+}

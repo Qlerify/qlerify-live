@@ -1,8 +1,8 @@
-import { fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url"
 
 // Absolute, because the build runs from the repo root — cwd-relative globs would
 // match nothing here and emit CSS with no utility classes.
-const dir = fileURLToPath(new URL(".", import.meta.url));
+const dir = fileURLToPath(new URL(".", import.meta.url))
 
 /** v3 on purpose: matches what the Play CDN served, so the ported UI looks identical.
  * @type {import('tailwindcss').Config} */
@@ -17,4 +17,4 @@ export default {
     },
   },
   plugins: [],
-};
+}

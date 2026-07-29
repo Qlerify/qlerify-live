@@ -7,6 +7,8 @@ import { Pill } from "../../components/Pill.tsx"
 import { Loading } from "../../components/Loading.tsx"
 import { ViewSwitcher } from "../../shell/ViewSwitcher.tsx"
 import { Timeline } from "./Timeline.tsx"
+import { AsOfBanner } from "./AsOfBanner.tsx"
+import { DataPanel } from "./DataPanel.tsx"
 
 export const Detail = () => {
   const route = useRoute()
@@ -78,15 +80,8 @@ export const Detail = () => {
       </header>
 
       <Timeline />
-
-      <main className="flex-1 overflow-auto p-6">
-        <div className="rounded-lg border border-dashed border-stone-300 bg-white p-6 text-center">
-          <div className="text-sm font-medium text-stone-700">Data panel not ported yet</div>
-          <div className="text-xs text-stone-500 mt-1">
-            The reconstructed entity view arrives in the next slice. The timeline above is live.
-          </div>
-        </div>
-      </main>
+      <AsOfBanner />
+      <DataPanel />
     </>
   )
 }

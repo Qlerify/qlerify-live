@@ -50,11 +50,14 @@ export type LogEntry = {
   payload?: string
 }
 
+export type Row = Record<string, unknown>
+
 export type Instance = {
   instanceId: string
-  root?: Record<string, unknown>
+  rootAggregate?: string
+  root?: Row | null
+  entities?: Record<string, Row[]>
   events?: LogEntry[]
-  [k: string]: unknown
 }
 
 export type Meta = {

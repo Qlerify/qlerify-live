@@ -24,6 +24,20 @@ export type FlowAggregate = {
   totalCases: number
 }
 
+export type FlowCaseRow = {
+  caseId: string
+  counts: Record<string, number>
+  firings?: number
+  startAt?: string | null
+  lastAt?: string | null
+}
+
+export type FlowRows = {
+  cases: FlowCaseRow[]
+  totalCases: number
+  cap?: number
+}
+
 export type Meta = {
   title: string
   rootAggregate: string
@@ -31,6 +45,7 @@ export type Meta = {
   boundedContextCount: number
   aggregateCount: number
   eventCount: number
+  rootMandatoryAttributes?: string[]
   provenance?: { byContext?: Record<string, { mode?: ProvMode }> }
 }
 

@@ -1,8 +1,7 @@
-import { computeFlowLayout, flowEdgePath, laneMetrics, FLOW } from "../../lib/flowLayout.ts"
-import { provHatch, provModeForBC } from "../../lib/prov.ts"
-import { PHASE_TONE } from "../../lib/tone.ts"
+import { computeFlowLayout, laneMetrics, FLOW } from "../../lib/flowLayout.ts"
 import type { EventDef, FlowAggregate, Meta } from "../../lib/types.ts"
-import { ProvChip } from "../../components/ProvChip.tsx"
+import { EventCard } from "../../components/EventCard.tsx"
+import { FlowEdges } from "../../components/FlowEdges.tsx"
 import { FlowCountBadge } from "../../components/FlowCountBadge.tsx"
 
 type Props = {
@@ -20,7 +19,6 @@ export const FlowDiagram = ({ events, flow, meta }: Props) => {
 
   const layout = computeFlowLayout(events)
   const { laneTop, laneHeight, width, height } = laneMetrics(layout, FLOW)
-  const { cardW, cardH, colPitch } = FLOW
 
   const cases = flow?.totalCases ?? 0
   const pct = total ? (firedSteps / total) * 100 : 0
@@ -43,75 +41,33 @@ export const FlowDiagram = ({ events, flow, meta }: Props) => {
       <div id="timeline-scroll" className="px-6 py-3 overflow-x-auto">
         <div style={{ width: `${width}px` }}>
           <div className="relative" style={{ width: `${width}px`, height: `${height}px` }}>
-            {layout.edges.length > 0 && (
-              <svg width={width} height={height} className="absolute top-0 left-0" style={{ pointerEvents: "none" }}>
-                <defs>
-                  <marker
-                    id="flow-arrow"
-                    viewBox="0 0 8 8"
-                    refX="6.5"
-                    refY="4"
-                    markerWidth="6"
-                    markerHeight="6"
-                    orient="auto"
-                  >
-                    <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e" />
-                  </marker>
-                </defs>
-                {layout.edges.map(({ from, to }) => {
-                  const a = layout.place.get(from)
-                  const b = layout.place.get(to)
-                  if (!a || !b) {
-                    return null
-                  }
-                  const d = flowEdgePath(a, b, layout.waypoints.get(`${from}->${to}`), laneTop, laneHeight, FLOW)
-                  return (
-                    <path
-                      key={`${from}->${to}`}
-                      d={d}
-                      fill="none"
-                      stroke={firedRefs.has(to) ? "#78716c" : "#e7e5e4"}
-                      strokeWidth="2"
-                      markerEnd="url(#flow-arrow)"
-                    />
-                  )
-                })}
-              </svg>
-            )}
-
+            <FlowEdges
+              layout={layout}
+              laneTop={laneTop}
+              laneHeight={laneHeight}
+              geom={FLOW}
+              width={width}
+              height={height}
+              firedRefs={firedRefs}
+              markerId="flow-arrow"
+            />
             {events.map((e, i) => {
               const pos = layout.place.get(e.ref) || { col: i, lane: 0, idx: i }
-              const n = counts[e.ref] || 0
-              const fired = n > 0
-              const provMode = provModeForBC(meta, e.boundedContext)
-              // Heat: relative volume → emerald tint. The floor keeps low-volume
-              // fired cards visibly "on".
-              const heat = fired ? (0.1 + 0.45 * (n / maxCount)).toFixed(3) : "0"
               return (
-                <div
+                <EventCard
                   key={e.ref}
-                  className={`absolute rounded-md border ${fired ? "border-emerald-300" : PHASE_TONE[e.phase ?? 0] || "border-stone-300"} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden`}
-                  style={{
-                    left: `${pos.col * colPitch}px`,
-                    top: `${laneTop[pos.lane]}px`,
-                    width: `${cardW}px`,
-                    height: `${cardH}px`,
-                    backgroundColor: fired ? `rgba(16,185,129,${heat})` : undefined,
-                    backgroundImage: provHatch(provMode) || undefined,
-                  }}
-                >
-                  <div className="flex items-center justify-between gap-1 text-[10px] text-stone-500 mb-0.5">
-                    <span className="truncate">
-                      {i + 1}. {e.boundedContext}
-                    </span>
-                    <ProvChip mode={provMode} />
-                  </div>
-                  <div className="text-[12px] font-medium leading-tight text-stone-800">{e.name}</div>
-                  <div className="text-[10px] text-stone-500 mt-1">{e.role}</div>
-                </div>
+                  event={e}
+                  index={i}
+                  count={counts[e.ref] || 0}
+                  maxCount={maxCount}
+                  meta={meta}
+                  left={pos.col * FLOW.colPitch}
+                  top={laneTop[pos.lane]!}
+                  width={FLOW.cardW}
+                  height={FLOW.cardH}
+                />
               )
             })}
-
             {events.map((e, i) => {
               const pos = layout.place.get(e.ref) || { col: i, lane: 0, idx: i }
               const n = counts[e.ref] || 0
@@ -119,7 +75,7 @@ export const FlowDiagram = ({ events, flow, meta }: Props) => {
                 <FlowCountBadge
                   key={e.ref}
                   n={n}
-                  cx={pos.col * colPitch + cardW}
+                  cx={pos.col * FLOW.colPitch + FLOW.cardW}
                   cy={laneTop[pos.lane]!}
                   title={`${e.name} triggered ${n}× across all cases`}
                 />

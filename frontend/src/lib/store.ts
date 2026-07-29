@@ -1,6 +1,6 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
-import type { CaseRow, EventDef, FlowAggregate, Meta } from "./types.ts"
+import type { CaseRow, EventDef, FlowAggregate, FlowRows, Meta } from "./types.ts"
 import { DEFAULT_META } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
@@ -14,6 +14,8 @@ type State = {
   events: EventDef[]
   meta: Meta
   flow: FlowAggregate | null
+  flowRows: FlowRows | null
+  flowRowsShowAll: boolean
   busy: boolean
   registryError: string | null
 
@@ -46,6 +48,8 @@ export const useStore = create<State>((set) => ({
   events: [],
   meta: DEFAULT_META,
   flow: null,
+  flowRows: null,
+  flowRowsShowAll: false,
   busy: false,
   registryError: null,
 

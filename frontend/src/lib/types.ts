@@ -272,3 +272,38 @@ export const EMPTY_EXP: ExpState = {
   rowEvents: {},
   rowEventsBusy: false,
 }
+
+export type ConnectorNote = { kind: string; text: string; at: string }
+
+export type Connector = {
+  id: string
+  status: string
+  boundedContext: string
+  targetEntity: string
+  targetKind: string
+  mode: string
+  rowCount: number
+  hasCode: boolean
+  credentialKeys: string[]
+  deps: string[]
+  endpoint?: string | null
+  lastPullAt?: string | null
+  owned?: boolean
+  summary?: string | null
+  notes?: ConnectorNote[]
+  dateFields?: string[]
+  dateRoles?: { created?: string; updated?: string }
+}
+
+export type ConnectorTable = { name: string; kind: string; occupiedBy?: string | null }
+
+export type ConnectorsData = { connectors: Connector[]; tables: ConnectorTable[] }
+
+export type VerifyResult = { id: string; ok: boolean; detail?: string }
+
+export type TestResult = {
+  id: string
+  error?: string
+  count?: number
+  diff?: { ok?: boolean; requiredStatus?: { field: string; ok: boolean }[]; extraFields?: string[] }
+}

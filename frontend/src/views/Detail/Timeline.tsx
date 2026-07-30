@@ -1,17 +1,27 @@
+import { useEffect } from "react"
 import { useStore } from "../../lib/store.ts"
 import { computeFlowLayout, flowEdgePath, FLOW, ROUTE_ROW } from "../../lib/flowLayout.ts"
 import { businessByStep, expandedCardHeight, firedCountMap, firedRefSet, firingsByRefMap } from "../../lib/detailData.ts"
 import { fmtBizDate, fmtGap, minutesBetween } from "../../lib/time.ts"
 import { provHatch, provModeForBC } from "../../lib/prov.ts"
 import { PHASE_TONE } from "../../lib/tone.ts"
+import { navSelect } from "../../lib/navSelect.ts"
+import type { Direction } from "../../lib/navSelect.ts"
 import { ProvChip } from "../../components/ProvChip.tsx"
 import { FiredCountBadge } from "../../components/FiredCountBadge.tsx"
 import { TimelineLegend } from "./TimelineLegend.tsx"
+import { SplitTimeline } from "./SplitTimeline.tsx"
 
 const LONG_GAP_MIN = 10 * 1440
+const ARROW_DIRS: Record<string, Direction> = {
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  ArrowUp: "up",
+  ArrowDown: "down",
+}
 
 export const Timeline = () => {
-  const { events, log, meta, expandedFirings, selectedStep, set } = useStore()
+  const { events, log, meta, expandedFirings, selectedStep, splitRef, set } = useStore()
 
   const total = events.length
   const firedRefs = firedRefSet(log)
@@ -22,6 +32,47 @@ export const Timeline = () => {
 
   const layout = computeFlowLayout(events)
   const { cardW, cardH, colPitch, rowPitch } = FLOW
+
+  // Arrow keys move the selection around the flow — only while one is selected,
+  // so unselected arrows keep normal page scrolling. Skipped while typing.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      const s = useStore.getState()
+      if (s.selectedStep == null) {
+        return
+      }
+      const dir = ARROW_DIRS[ev.key]
+      if (!dir) {
+        return
+      }
+      const a = document.activeElement
+      if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT" || (a as HTMLElement).isContentEditable)) {
+        return
+      }
+      ev.preventDefault()
+      const next = navSelect(s.events, s.selectedStep, dir)
+      if (next != null) {
+        s.set({ selectedStep: next })
+      }
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [])
+
+  // Branch split takes over the whole flow area, while the split event still
+  // fired more than once for this case.
+  if (splitRef && (firedCounts.get(splitRef) || 0) > 1) {
+    return (
+      <SplitTimeline
+        events={events}
+        log={log}
+        layout={layout}
+        splitRef={splitRef}
+        firedCounts={firedCounts}
+        onMerge={() => set({ splitRef: null })}
+      />
+    )
+  }
 
   const isExpanded = (ref: string) => expandedFirings.has(ref) && (firedCounts.get(ref) || 0) > 1
   const cardHeightFor = (ref: string) => (isExpanded(ref) ? expandedCardHeight(firedCounts.get(ref)!) : cardH)
@@ -182,6 +233,19 @@ export const Timeline = () => {
                         )
                       })}
                     </div>
+                  )}
+
+                  {open && (
+                    <button
+                      onClick={(ev) => {
+                        ev.stopPropagation()
+                        set({ splitRef: e.ref })
+                      }}
+                      title="Give each execution its own full box and branch downstream"
+                      className="mt-1 shrink-0 w-full text-[9px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded px-1 py-0.5 leading-none"
+                    >
+                      ⑂ Split into {firedCounts.get(e.ref)} branches
+                    </button>
                   )}
 
                   {!open && fired && (

@@ -82,3 +82,27 @@ export const DEFAULT_META: Meta = {
   aggregateCount: 0,
   eventCount: 0,
 }
+
+export type ModelVersion = {
+  id: string
+  source: string
+  savedAt: string
+  summary?: { events?: number }
+  sourceUrl?: string | null
+  sourceName?: string | null
+}
+
+export type ModelStatus = {
+  versions: ModelVersion[]
+  current: number
+  total: number
+  currentVersion: ModelVersion | null
+  sourceUrl: string | null
+}
+
+export type RebuildInfo = {
+  connectors?: number
+  inserted?: number
+  derived?: { events?: number }
+  failures?: unknown[]
+}

@@ -10,6 +10,7 @@ import { VIEWS } from "./views/registry.ts"
 import { NewOrgDialog } from "./shell/NewOrgDialog.tsx"
 import { NewWorkflowDialog } from "./shell/NewWorkflowDialog.tsx"
 import { Toast } from "./shell/Toast.tsx"
+import { Overlay } from "./components/Overlay.tsx"
 import { Login } from "./views/Login.tsx"
 import { ChangePassword } from "./views/ChangePassword.tsx"
 import { EmptyOrg } from "./views/EmptyOrg.tsx"
@@ -106,6 +107,7 @@ export const App = () => {
       <NewOrgDialog />
       <NewWorkflowDialog />
       <Toast />
+      <Overlay />
     </>
   )
 }

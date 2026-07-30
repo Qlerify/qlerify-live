@@ -1,7 +1,7 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
-import type { CaseRow, EventDef, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus } from "./types.ts"
-import { DEFAULT_META } from "./types.ts"
+import type { CaseRow, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus } from "./types.ts"
+import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
 
@@ -50,6 +50,8 @@ type State = {
   projModelOpen: boolean
   projModelBusy: boolean
   projModelErr: string | null
+
+  exp: ExpState
 
   set: (patch: Partial<State>) => void
   closeMenus: () => void
@@ -101,6 +103,8 @@ export const useStore = create<State>((set) => ({
   projModelOpen: false,
   projModelBusy: false,
   projModelErr: null,
+
+  exp: EMPTY_EXP,
 
   set: (patch) => set(patch),
 

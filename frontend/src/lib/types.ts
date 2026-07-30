@@ -209,3 +209,66 @@ export type OrgMapping = {
     fields?: { name: string; dataType?: string; dateish?: boolean }[]
   }[]
 }
+
+export type ExpField = { name: string; dataType?: string }
+export type ExpTable = { name: string; kind: string; status: string; fields?: ExpField[] }
+export type ExpSystem = { name: string; tables: ExpTable[] }
+export type ExpHealth = { gaps: number; systems: ExpSystem[] }
+
+export type ExpAdapter = {
+  id: string
+  kind: string
+  mode: string
+  targetEntity: string
+  boundedContext?: string
+  doc?: { summary?: string; notes?: { kind: string; text: string; at: string }[] }
+}
+
+export type ExpRowEvent = {
+  eventName: string
+  provenance?: string
+  role?: string
+  evidence?: string
+  businessAt?: string
+  occurredAt?: string
+}
+
+export type ExpFilter = { attr: string; cond: string; type: string; value: string }
+
+export type ExpState = {
+  systems: { name: string }[]
+  system: string | null
+  entities: ExpTable[]
+  valueObjects: ExpTable[]
+  entity: string | null
+  items: Row[]
+  adapters: ExpAdapter[]
+  health: ExpHealth | null
+  filters: ExpFilter[]
+  page: number
+  sysCollapsed: boolean
+  tablesCollapsed: boolean
+  busy: boolean
+  tableMissing: boolean
+  rowEvents: Record<string, ExpRowEvent[]>
+  rowEventsBusy: boolean
+}
+
+export const EMPTY_EXP: ExpState = {
+  systems: [],
+  system: null,
+  entities: [],
+  valueObjects: [],
+  entity: null,
+  items: [],
+  adapters: [],
+  health: null,
+  filters: [],
+  page: 0,
+  sysCollapsed: false,
+  tablesCollapsed: false,
+  busy: false,
+  tableMissing: false,
+  rowEvents: {},
+  rowEventsBusy: false,
+}

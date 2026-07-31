@@ -148,7 +148,7 @@ export const fetchRows = async () => {
   try {
     const r = await api<{ inserted: number; skipped: number; derived?: { events: number; instances: number } }>(
       `/api/adapters/${encodeURIComponent(adapter.id)}/pull`,
-      { method: "POST", body: JSON.stringify({ limit: 1000 }) },
+      { method: "POST", body: JSON.stringify({ limit: null }) }, // null = uncapped: pull ALL rows from the source
     )
     await refreshExplorer()
     hideOverlay()
@@ -213,7 +213,8 @@ export const reimportAll = async () => {
       inserted: number
       derived?: { events: number; instances: number }
       failures?: { id: string }[]
-    }>("/api/data/reimport-all", { method: "POST", body: JSON.stringify({ limit: 1000 }) })
+      // no limit = uncapped: a full restore re-pulls everything
+    }>("/api/data/reimport-all", { method: "POST", body: "{}" })
     await refreshExplorer()
     hideOverlay()
     const ev = r.derived ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : ""

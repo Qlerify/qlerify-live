@@ -246,7 +246,7 @@ export const Explorer = () => {
                 disabled={e.busy || !tableAdapters.length}
                 title={
                   tableAdapters.length
-                    ? `Pull up to 1000 rows from ${tableAdapters[0]!.id}`
+                    ? `Pull all rows from ${tableAdapters[0]!.id}`
                     : "No connector configured for this table"
                 }
                 className="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium"

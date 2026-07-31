@@ -46,9 +46,25 @@ export type LogEntry = {
   occurredAt: string
   businessAt?: string | null
   provenance?: ProvMode
+  aggregateRoot?: string
   aggregateId?: string
   payload?: string
+  evidenceKind?: string
+  evidence?: string
 }
+
+export type ChatBlock = {
+  type: string
+  text?: string
+  name?: string
+  input?: unknown
+  content?: string | { text?: string }[]
+  is_error?: boolean
+}
+
+export type ChatMessage = { role: string; content: string | ChatBlock[] }
+
+export type ChatInfo = { apiKeyConfigured?: boolean; model?: string; effort?: string; error?: string }
 
 export type Row = Record<string, unknown>
 

@@ -1,6 +1,6 @@
 import { api } from "./api.ts"
 import { useStore } from "./store.ts"
-import type { Meta } from "./types.ts"
+import type { CaseRow, EventDef, Meta } from "./types.ts"
 
 export const loadRegistryStatus = async () => {
   try {
@@ -19,4 +19,14 @@ export const loadMeta = async () => {
   } catch {
     // Keep the defaults.
   }
+}
+
+export const loadDashboard = async () => {
+  const [cases, events] = await Promise.all([
+    api<CaseRow[]>("/sim/cases"),
+    api<EventDef[]>("/sim/events"),
+    loadRegistryStatus(),
+    loadMeta(),
+  ])
+  useStore.getState().set({ cases, events })
 }

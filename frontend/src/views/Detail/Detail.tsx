@@ -6,6 +6,7 @@ import { doNext, doReset, doRunAll, firedRefSet, loadDetail } from "../../lib/de
 import { Pill } from "../../components/Pill.tsx"
 import { Loading } from "../../components/Loading.tsx"
 import { ViewSwitcher } from "../../shell/ViewSwitcher.tsx"
+import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { Timeline } from "./Timeline.tsx"
 import { AsOfBanner } from "./AsOfBanner.tsx"
 import { DataPanel } from "./DataPanel.tsx"
@@ -76,6 +77,7 @@ export const Detail = () => {
             Run all
           </button>
           <ViewSwitcher active="" />
+          <AssistantButton />
         </div>
       </header>
 

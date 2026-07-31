@@ -10,6 +10,7 @@ import { TimelinessPanel } from "./TimelinessPanel.tsx"
 import { ValueAtRiskPanel } from "./ValueAtRiskPanel.tsx"
 import { AiActivityPanel } from "./AiActivityPanel.tsx"
 import { FreshnessPanel } from "./FreshnessPanel.tsx"
+import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { AttributeMapDialog } from "./AttributeMapDialog.tsx"
 
 const POLL_MS = 5000
@@ -97,7 +98,7 @@ export const Org = () => {
   if (!org || org.error) {
     return (
       <>
-        {header(null)}
+        {header(<AssistantButton />)}
         <main className="flex-1 p-6">
           <div className={`text-sm ${org?.error ? "text-rose-600" : "text-stone-400"}`}>
             {org?.error || "Loading portfolio…"}
@@ -131,6 +132,7 @@ export const Org = () => {
       >
         ⚙ Map attributes
       </button>
+      <AssistantButton />
     </>
   )
 

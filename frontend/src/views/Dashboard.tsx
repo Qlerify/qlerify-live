@@ -3,25 +3,15 @@ import { api } from "../lib/api.ts"
 import { navigate } from "../lib/router.ts"
 import { useStore } from "../lib/store.ts"
 import { genericColumns, prettyEntity } from "../lib/format.ts"
-import { loadMeta, loadRegistryStatus } from "../lib/workflowData.ts"
-import type { CaseRow, EventDef } from "../lib/types.ts"
+import { loadDashboard } from "../lib/workflowData.ts"
+import type { CaseRow } from "../lib/types.ts"
 import { Pill } from "../components/Pill.tsx"
 import { ProvChip } from "../components/ProvChip.tsx"
 import { AttrCell } from "../components/AttrCell.tsx"
 import { ViewSwitcher } from "../shell/ViewSwitcher.tsx"
+import { AssistantButton } from "../shell/AssistantButton.tsx"
 
 const POLL_MS = 5000
-
-const loadDashboard = async () => {
-  const set = useStore.getState().set
-  const [cases, events] = await Promise.all([
-    api<CaseRow[]>("/sim/cases"),
-    api<EventDef[]>("/sim/events"),
-    loadRegistryStatus(),
-    loadMeta(),
-  ])
-  set({ cases, events })
-}
 
 const createCase = async () => {
   const { busy, set } = useStore.getState()
@@ -140,6 +130,7 @@ export const Dashboard = () => {
             + New {singular.toLowerCase()}
           </button>
           <ViewSwitcher active="list" />
+          <AssistantButton />
         </div>
       </header>
 

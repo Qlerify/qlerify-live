@@ -11,6 +11,7 @@ import { FlowEdges } from "../components/FlowEdges.tsx"
 import { FlowCountBadge } from "../components/FlowCountBadge.tsx"
 import { CopyCaseId } from "../components/CopyCaseId.tsx"
 import { ViewSwitcher } from "../shell/ViewSwitcher.tsx"
+import { AssistantButton } from "../shell/AssistantButton.tsx"
 
 const POLL_MS = 5000
 const LABEL_W = 210
@@ -129,6 +130,7 @@ export const Rows = () => {
             </div>
           </div>
           <ViewSwitcher active="rows" />
+          <AssistantButton />
         </div>
       </header>
 

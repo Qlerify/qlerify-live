@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { AUTH, setUnauthorizedHandler, whoami } from "./lib/api.ts"
+import { AUTH, setTenantHandlers, setUnauthorizedHandler, whoami } from "./lib/api.ts"
+import { deactivateConnectorChat, resetChatState, syncChatScope } from "./lib/chatData.ts"
 import { navigate, useRoute, WORKFLOW_SCOPED_VIEWS } from "./lib/router.ts"
 import { useStore } from "./lib/store.ts"
 import { TenantBar } from "./shell/TenantBar.tsx"
@@ -10,6 +11,7 @@ import { VIEWS } from "./views/registry.ts"
 import { NewOrgDialog } from "./shell/NewOrgDialog.tsx"
 import { NewWorkflowDialog } from "./shell/NewWorkflowDialog.tsx"
 import { Toast } from "./shell/Toast.tsx"
+import { ChatPanel } from "./shell/ChatPanel.tsx"
 import { Overlay } from "./components/Overlay.tsx"
 import { Login } from "./views/Login.tsx"
 import { ChangePassword } from "./views/ChangePassword.tsx"
@@ -19,7 +21,7 @@ import { NotPorted } from "./views/NotPorted.tsx"
 
 export const App = () => {
   const route = useRoute()
-  const { me, booting, set } = useStore()
+  const { me, booting, chatOpen, set } = useStore()
   const [cpReturn, setCpReturn] = useState("#org")
 
   useEffect(() => {
@@ -29,7 +31,15 @@ export const App = () => {
         navigate("#login")
       }
     })
+    setTenantHandlers({ scopeChange: syncChatScope, signOut: resetChatState })
   }, [set])
+
+  // The connector-builder thread is only live inside the explorer.
+  useEffect(() => {
+    if (route.view !== "bcs") {
+      deactivateConnectorChat()
+    }
+  }, [route.view])
 
   // Load the tenant context whenever it's missing (boot, login, org/workflow switch).
   useEffect(() => {
@@ -98,12 +108,15 @@ export const App = () => {
 
   return (
     <>
-      <div className="flex flex-col min-h-screen">
+      <div
+        className={`${chatOpen ? "mr-[420px]" : ""} flex flex-col min-h-screen transition-[margin-right] duration-200`}
+      >
         <TenantBar />
         <SectionBar view={route.view} />
         <RegistryBanner />
         {body}
       </div>
+      <ChatPanel view={route.view} />
       <NewOrgDialog />
       <NewWorkflowDialog />
       <Toast />

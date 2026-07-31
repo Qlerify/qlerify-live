@@ -2,6 +2,7 @@ import { useEffect } from "react"
 import { AUTH } from "../../lib/api.ts"
 import { useStore } from "../../lib/store.ts"
 import { loadModel, reloadWorkflowModel, shortWorkflowUrl } from "../../lib/modelData.ts"
+import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { VersionSidebar } from "./VersionSidebar.tsx"
 import { ReplaceModelForm } from "./ReplaceModelForm.tsx"
 
@@ -54,6 +55,7 @@ export const Model = () => {
             >
               {projModelOpen ? "✕ Close replace" : "✎ Replace"}
             </button>
+            <AssistantButton />
           </div>
 
           <div className="mt-3 flex items-center gap-2 flex-wrap text-sm">

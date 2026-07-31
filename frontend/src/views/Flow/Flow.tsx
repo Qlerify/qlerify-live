@@ -5,6 +5,7 @@ import { prettyEntity } from "../../lib/format.ts"
 import { loadMeta, loadRegistryStatus } from "../../lib/workflowData.ts"
 import type { EventDef, FlowAggregate } from "../../lib/types.ts"
 import { ViewSwitcher } from "../../shell/ViewSwitcher.tsx"
+import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { FlowDiagram } from "./FlowDiagram.tsx"
 
 const POLL_MS = 5000
@@ -46,6 +47,7 @@ export const Flow = () => {
             </div>
           </div>
           <ViewSwitcher active="flow" />
+          <AssistantButton />
         </div>
       </header>
 

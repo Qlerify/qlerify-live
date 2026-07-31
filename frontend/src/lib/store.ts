@@ -1,6 +1,6 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
-import type { CaseRow, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, TestResult, VerifyResult } from "./types.ts"
+import type { CaseRow, ChatInfo, ChatMessage, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, TestResult, VerifyResult } from "./types.ts"
 import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
@@ -60,6 +60,15 @@ type State = {
   connError: string | null
   connVerify: VerifyResult | null
   connTest: TestResult | null
+
+  chatOpen: boolean
+  chatInfo: ChatInfo | null
+  chatMessages: ChatMessage[]
+  chatInput: string
+  chatBusy: boolean
+  chatError: string | null
+  detailPanelMode: string
+  expPanelMode: string
 
   set: (patch: Partial<State>) => void
   closeMenus: () => void
@@ -121,6 +130,15 @@ export const useStore = create<State>((set) => ({
   connError: null,
   connVerify: null,
   connTest: null,
+
+  chatOpen: false,
+  chatInfo: null,
+  chatMessages: [],
+  chatInput: "",
+  chatBusy: false,
+  chatError: null,
+  detailPanelMode: "chat",
+  expPanelMode: "history",
 
   set: (patch) => set(patch),
 

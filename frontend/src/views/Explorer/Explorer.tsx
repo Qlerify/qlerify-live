@@ -13,6 +13,7 @@ import {
   selectSystem,
 } from "../../lib/explorerData.ts"
 import type { ColState } from "../../lib/explorerData.ts"
+import { activateConnectorChat, openChat } from "../../lib/chatData.ts"
 import type { ExpState, ExpSystem, ExpTable } from "../../lib/types.ts"
 import { TableGlyph } from "./TableGlyph.tsx"
 import { RowEventsCell } from "./RowEvents.tsx"
@@ -60,7 +61,7 @@ const rowEntries = (e: ExpState): Entry[] => {
 
 export const Explorer = () => {
   const route = useRoute()
-  const { exp: e, set } = useStore()
+  const { exp: e, chatOpen, expPanelMode, set } = useStore()
   const sysBody = useRef<HTMLDivElement>(null)
   const tblBody = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
@@ -68,6 +69,11 @@ export const Explorer = () => {
   useEffect(() => {
     loadExplorer(route.expSys, route.expEntity).catch(() => {})
   }, [route.expSys, route.expEntity])
+
+  // The builder conversation is per (system, table) — follow the selection.
+  useEffect(() => {
+    activateConnectorChat(e.system, e.entity)
+  }, [e.system, e.entity])
 
   // Keep the Systems and Tables columns vertically aligned while scrolling.
   const linkScroll = (from: HTMLDivElement | null, to: HTMLDivElement | null) => () => {
@@ -98,6 +104,15 @@ export const Explorer = () => {
     } else {
       selectEntity(tableName)
     }
+  }
+
+  const toggleConnectorPanel = () => {
+    if (chatOpen && expPanelMode === "history") {
+      set({ chatOpen: false })
+      return
+    }
+    set({ expPanelMode: "history" })
+    openChat()
   }
 
   return (
@@ -253,6 +268,12 @@ export const Explorer = () => {
                 className="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium"
               >
                 Reset &amp; reimport base data
+              </button>
+              <button
+                onClick={toggleConnectorPanel}
+                className={`px-4 py-1.5 text-sm rounded-full border font-medium ${chatOpen && expPanelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"}`}
+              >
+                Configure connector
               </button>
             </div>
           </div>

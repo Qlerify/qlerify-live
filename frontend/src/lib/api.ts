@@ -5,6 +5,16 @@ export class ApiError extends Error {
   path?: string
 }
 
+// Registered by the chat layer: every tenant switch swaps the chat threads, and
+// signing out drops them. Kept as hooks so api.ts stays dependency-free.
+let onScopeChange: () => void = () => {}
+let onSignOut: () => void = () => {}
+
+export const setTenantHandlers = (h: { scopeChange: () => void; signOut: () => void }) => {
+  onScopeChange = h.scopeChange
+  onSignOut = h.signOut
+}
+
 export const AUTH = {
   token: () => localStorage.getItem("ql.token") || "",
   org: () => localStorage.getItem("ql.org") || "",
@@ -22,6 +32,7 @@ export const AUTH = {
       localStorage.removeItem("ql.org")
     }
     localStorage.removeItem("ql.workflow")
+    onScopeChange()
   },
 
   setWorkflow: (id: string | null) => {
@@ -30,12 +41,14 @@ export const AUTH = {
     } else {
       localStorage.removeItem("ql.workflow")
     }
+    onScopeChange()
   },
 
   clear: () => {
     localStorage.removeItem("ql.token")
     localStorage.removeItem("ql.org")
     localStorage.removeItem("ql.workflow")
+    onSignOut()
   },
 }
 

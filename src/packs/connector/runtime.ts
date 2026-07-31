@@ -178,7 +178,8 @@ async function main() {
   if (typeof mod.fetchRows !== "function") throw new Error("connector must export 'async fetchRows(ctx)'");
   const rows = await mod.fetchRows(ctx);
   const arr = Array.isArray(rows) ? rows : (rows == null ? [] : [rows]);
-  return { ok: true, rows: arr.slice(0, input.limit ?? 100), count: arr.length, trace };
+  // limit null = uncapped (a full ingest); only cap when the host set a number.
+  return { ok: true, rows: input.limit == null ? arr : arr.slice(0, input.limit), count: arr.length, trace };
 }
 main()
   .then((out) => { writeFileSync(outFile, JSON.stringify(out)); process.exit(0); })
@@ -325,7 +326,8 @@ export async function installDeps(deps: string[]): Promise<InstallResult> {
 
 interface RunRequest {
   entity: EntitySchema;
-  limit: number;
+  /** Max rows the runner returns; null = uncapped (a full ingest). */
+  limit: number | null;
   endpoint?: string;
   op?: "fetchRows" | "probe";
 }

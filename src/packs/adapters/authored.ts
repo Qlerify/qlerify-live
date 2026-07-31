@@ -64,11 +64,12 @@ export function createAuthoredAdapter(cfg: AdapterConfig): SourceAdapter {
     },
     async pull(opts = {}) {
       const e = resolveEntity();
-      const limit = opts.limit ?? cfg.limits?.limit ?? 10;
+      // null = uncapped (pull everything); only an OMITTED limit falls back.
+      const limit = opts.limit === null ? null : opts.limit ?? cfg.limits?.limit ?? 10;
       const body = await loadBody();
-      const ctx = await createRunContext(cfg, e, limit);
+      const ctx = await createRunContext(cfg, e, limit ?? Number.MAX_SAFE_INTEGER);
       const rows = await runWithBudget(() => body.fetchRows(ctx), RUN_BUDGET_MS);
-      const arr = Array.isArray(rows) ? rows.slice(0, limit) : [];
+      const arr = Array.isArray(rows) ? (limit == null ? rows : rows.slice(0, limit)) : [];
       return { rows: { [e.name]: arr }, count: arr.length };
     },
     async push() {

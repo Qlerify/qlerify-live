@@ -37,13 +37,14 @@ export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
     },
     async pull(opts = {}) {
       const e = target();
-      const limit = opts.limit ?? cfg.limits?.limit ?? 25;
+      // null = uncapped (pull everything); only an OMITTED limit falls back.
+      const limit = opts.limit === null ? null : opts.limit ?? cfg.limits?.limit ?? 25;
       const r = await runConnector(cfg.id, { entity: e, limit, endpoint: cfg.endpoint });
       if (!r.ok) {
         const trace = r.trace?.length ? `\nTrace:\n${r.trace.slice(-12).join("\n")}` : "";
         throw new Error(`${r.error ?? "connector run failed"}${trace}`);
       }
-      const arr = (r.rows ?? []).slice(0, limit);
+      const arr = limit == null ? r.rows ?? [] : (r.rows ?? []).slice(0, limit);
       return { rows: { [e.name]: arr }, count: arr.length };
     },
     async push() {

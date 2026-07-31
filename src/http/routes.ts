@@ -303,7 +303,10 @@ export function registerRoutes(app: FastifyInstance) {
       // arm makes a foreign-owned id and an unknown id return the IDENTICAL 404, so
       // the response is not a cross-tenant existence oracle.
       if (!ownsAdapterId(id) || !getAdapter(id)) return reply.code(404).send({ error: "NOT_FOUND", message: `no adapter "${id}" in this workflow` });
-      const limit = Number((req.body as any)?.limit ?? 10);
+      // limit: null = uncapped (pull everything — the explorer's "Fetch rows");
+      // omitted keeps the conservative API default of 10.
+      const raw = (req.body as any)?.limit;
+      const limit = raw === null ? null : Number(raw ?? 10);
       return await ingestPull(id, { limit });
     } catch (err: any) {
       return reply.code(400).send({ error: "PULL_FAILED", message: err?.message ?? String(err) });
@@ -316,7 +319,10 @@ export function registerRoutes(app: FastifyInstance) {
   // connector so the tables repopulate from source (one final derive over the
   // restored data). Workflow/org-scoped; connectors and the model are kept.
   app.post("/api/data/reimport-all", async (req, reply) => {
-    const limit = Number((req.body as any)?.limit ?? 1000);
+    // Default UNCAPPED: a reimport restores the full data plane. Pass a number
+    // to window the per-connector pulls.
+    const raw = (req.body as any)?.limit;
+    const limit = raw == null ? null : Number(raw);
     try {
       await guardData("workflow.sim.administer");   // empties every table + the event log
       await genericDeleteAll();                     // empty all gen_ tables + the event log
@@ -447,6 +453,8 @@ export function registerRoutes(app: FastifyInstance) {
   // DERIVE — replay the domain events the ingested data's evidence implies into
   // the event log (one place the simulator reads real data instead of synthesizing
   // it). `preview: true` reports what would fire without writing. Idempotent.
+  // Covers ALL ingested rows unless `limit` windows it (batched — see
+  // twin/derive.ts).
   app.post("/sim/derive", async (req, reply) => {
     const body = (req.body ?? {}) as { preview?: boolean; limit?: number };
     try {

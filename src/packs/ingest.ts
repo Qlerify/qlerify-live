@@ -46,7 +46,7 @@ function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-export async function ingestPull(adapterId: string, opts: { limit?: number; derive?: boolean } = {}): Promise<IngestSummary> {
+export async function ingestPull(adapterId: string, opts: { limit?: number | null; derive?: boolean } = {}): Promise<IngestSummary> {
   const adapter = getAdapter(adapterId);
   if (!adapter) throw new Error(`unknown adapter: ${adapterId}`);
   // The target may be an entity OR a value object (a value object populated
@@ -140,8 +140,10 @@ export interface ReingestSummary {
  * runs ONCE here over the full restored data set (callers pass derive:false to the
  * per-pull step), so events are rebuilt correctly even if the last pull errored.
  */
-export async function reingestAll(opts: { limit?: number } = {}): Promise<ReingestSummary> {
-  const limit = opts.limit ?? 1000;
+export async function reingestAll(opts: { limit?: number | null } = {}): Promise<ReingestSummary> {
+  // Default UNCAPPED: a reimport's whole point is a full restore, so every
+  // connector pulls everything unless the caller windows it explicitly.
+  const limit = opts.limit ?? null;
   const connectors = connectorsInWorkflow(currentWorkflowId());
   const pulls: IngestSummary[] = [];
   const failures: ReingestSummary["failures"] = [];

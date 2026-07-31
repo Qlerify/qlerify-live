@@ -44,6 +44,8 @@ export function createSimulatedAdapter(cfg: SimulatedAdapterConfig): SourceAdapt
       return cfg.fieldMap ?? {};
     },
     async pull(opts = {}) {
+      // A synthetic source has no "everything" — an uncapped pull (limit: null)
+      // falls back to the default batch instead of synthesizing forever.
       const limit = opts.limit ?? 10;
       const e = resolveEntity(cfg.targetEntity);
       const rows = Array.from({ length: limit }, (_, i) => synthesizeRow(e, { seed: baseSeed * 1009 + i }));

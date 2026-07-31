@@ -65,6 +65,11 @@ model EventLog {
   @@index([organizationId, occurredAt])
   @@index([workflowId, occurredAt])
   @@index([workflowId, actorKind])
+  // Correlation + idempotency lookups (twin/correlate.ts, twin/derive.ts): both
+  // resolve by aggregate instance within the active workflow, and degrade to a
+  // per-workflow scan without these once the log grows.
+  @@index([workflowId, aggregateId])
+  @@index([workflowId, eventRef, aggregateId])
 }
 
 // ===========================================================================

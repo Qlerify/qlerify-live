@@ -234,14 +234,25 @@ export async function findById(table: string, id: string): Promise<Record<string
   return normalizeRow(rows[0]);
 }
 
-export async function findMany(table: string, limit = 200): Promise<Array<Record<string, unknown>>> {
+/** Read rows in a deterministic order (insertion order: createdAt, then id as
+ * the tiebreaker) so a window, when one applies, is stable across calls instead
+ * of whatever SQLite happens to return. `limit: null` reads ALL rows — the bulk
+ * derivation path uses it so every ingested row produces its events. */
+export async function findMany(table: string, limit: number | null = 200): Promise<Array<Record<string, unknown>>> {
   const f = await orgFilterSql(table);
   const where = f.clause ? `WHERE ${f.clause} ` : "";
-  const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-    `SELECT * FROM ${phys(table)} ${where}LIMIT ?`,
-    ...f.params,
-    limit,
-  );
+  const order = `ORDER BY ${ident("createdAt")}, ${ident("id")}`;
+  const rows =
+    limit == null
+      ? await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+          `SELECT * FROM ${phys(table)} ${where}${order}`,
+          ...f.params,
+        )
+      : await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+          `SELECT * FROM ${phys(table)} ${where}${order} LIMIT ?`,
+          ...f.params,
+          limit,
+        );
   return rows.map((r) => normalizeRow(r)!) as Array<Record<string, unknown>>;
 }
 

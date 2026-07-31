@@ -40,13 +40,12 @@
 // run the planner, skip events already in the log, and emit the rest.
 
 import { prisma } from "../db.js";
-import { emit } from "../events/bus.js";
-import { setBusinessClock } from "../events/clock.js";
+import { emitMany, type BatchEvent } from "../events/bus.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { withActorKind } from "../platform/tenancy/actor.js";
 import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
-import { foreignKeyFields } from "./correlate.js";
+import { decideCaseId, foreignKeyFields } from "./correlate.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
@@ -465,13 +464,24 @@ interface DeriveResult {
   cleared?: number;
 }
 
+/** The idempotency key: this event already fired for this aggregate instance. */
+const pairKey = (eventRef: string, aggregateId: string): string => `${eventRef}\u0000${aggregateId}`;
+
 /** I/O wrapper: read the ingested rows from the store, plan the derivation, skip
  * events already in the log, and emit the rest. `preview: true` runs the plan and
  * the already-present check without emitting — the UI uses it to show what would
- * fire. Idempotent. */
-export async function deriveFromData(opts: { preview?: boolean; limit?: number } = {}): Promise<DeriveResult> {
+ * fire. Idempotent.
+ *
+ * Batched for scale: `limit` defaults to ALL rows (pass a number to window), and
+ * the whole pass costs a fixed handful of queries instead of three per event —
+ * ONE read of the workflow's log seeds both the idempotency set and the
+ * instance→case map, correlation then runs in memory through the same pure
+ * decideCaseId the emit() path uses, and the new events land via emitMany()'s
+ * chunked INSERTs. planDerivation's linear order still guarantees a referenced
+ * parent's create is decided before the child that inherits its case. */
+export async function deriveFromData(opts: { preview?: boolean; limit?: number | null } = {}): Promise<DeriveResult> {
   const preview = !!opts.preview;
-  const limit = opts.limit ?? 1000;
+  const limit = opts.limit ?? null;
   const ont = getOntology();
 
   // Load the rows for every aggregate root that some event targets, plus that
@@ -487,46 +497,58 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
   }
 
   const plans = planDerivation(ont, rowsByEntity, dateRolesByEntity);
+
+  // ONE tenant-scoped pass over the log replaces the per-event queries: every
+  // (eventRef, aggregateId) pair already present (idempotency), and the case each
+  // instance is already attached to (correlation seed — earliest event wins, the
+  // same rule correlateCaseId's orderBy encodes).
+  const seen = new Set<string>();
+  const caseByInstance = new Map<string, string>();
+  for (const r of await prisma.eventLog.findMany({
+    where: eventLogOrgWhere(),
+    orderBy: { occurredAt: "asc" },
+    select: { eventRef: true, aggregateId: true, caseId: true },
+  })) {
+    seen.add(pairKey(r.eventRef, r.aggregateId));
+    if (r.aggregateId && r.caseId && !caseByInstance.has(r.aggregateId)) caseByInstance.set(r.aggregateId, r.caseId);
+  }
+
   const summaries: DerivedEventSummary[] = [];
   const touched = new Set<string>();
+  const batch: BatchEvent[] = [];
   let totalEmitted = 0;
 
   for (const plan of plans) {
     let emitted = 0;
     let already = 0;
-    let sample: string | undefined = plan.fired[0]?.evidence;
+    const sample: string | undefined = plan.fired[0]?.evidence;
 
     for (const e of plan.fired) {
-      const existing = await prisma.eventLog.count({
-        where: { eventRef: e.ref, aggregateId: e.aggregateId, ...eventLogOrgWhere() },
-      });
-      if (existing > 0) {
+      if (seen.has(pairKey(e.ref, e.aggregateId))) {
         already++;
         continue;
       }
+      seen.add(pairKey(e.ref, e.aggregateId));
+      // No withScope here: the case is correlated per event, so an aggregate the
+      // workflow moved into (an Order carrying its accountId, say) inherits the
+      // case of the aggregate it references instead of starting a new one. The
+      // row's FK columns ride on its create event's payload (buildPayload keeps
+      // them there), and the plans' linear order guarantees the referenced
+      // parent's case is in the map by the time we reach the child.
+      const caseId = decideCaseId(ont, plan.aggregateRoot, e.aggregateId, e.payload, (id) => caseByInstance.get(id) ?? null);
+      if (caseId && !caseByInstance.has(e.aggregateId)) caseByInstance.set(e.aggregateId, caseId);
       if (!preview) {
-        setBusinessClock(e.businessAt);
-        try {
-          // No withScope here: emit() correlates the case itself, so an aggregate
-          // the workflow moved into (an Order carrying its accountId, say) inherits
-          // the case of the aggregate it references instead of starting a new one.
-          // The row's FK columns ride on its create event's payload (buildPayload
-          // keeps them there), and linearOrder guarantees the referenced parent's
-          // events are already logged by the time we reach the child.
-          // Derived facts come from ingested source data, not a person or the
-          // assistant — attribute them to the adapter origin.
-          await withActorKind("adapter", () => emit({
-            ref: e.ref,
-            aggregateId: e.aggregateId,
-            role: e.role,
-            payload: e.payload,
-            ...(e.provenance ? { provenance: e.provenance } : {}),
-            evidenceKind: plan.kind,
-            evidence: e.evidence,
-          }));
-        } finally {
-          setBusinessClock(null);
-        }
+        batch.push({
+          ref: e.ref,
+          aggregateId: e.aggregateId,
+          role: e.role,
+          payload: e.payload,
+          ...(e.provenance ? { provenance: e.provenance } : {}),
+          evidenceKind: plan.kind,
+          evidence: e.evidence,
+          businessAt: e.businessAt,
+          caseId,
+        });
       }
       emitted++;
       totalEmitted++;
@@ -545,6 +567,10 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
     });
   }
 
+  // Derived facts come from ingested source data, not a person or the assistant —
+  // attribute them to the adapter origin.
+  if (batch.length > 0) await withActorKind("adapter", () => emitMany(batch));
+
   return { preview, totalEmitted, instances: touched.size, events: summaries };
 }
 
@@ -555,7 +581,7 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number }
  * skipped as already-present. Unlike genericDeleteAll() it does NOT clear the
  * gen_ projection rows — those ARE the source. Lossy by design: events that leave
  * no row trace (a login; see classify()'s "none") cannot be reconstructed. */
-export async function rebuildFromData(opts: { limit?: number } = {}): Promise<DeriveResult> {
+export async function rebuildFromData(opts: { limit?: number | null } = {}): Promise<DeriveResult> {
   const { count } = await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() });
   const result = await deriveFromData({ preview: false, limit: opts.limit });
   return { ...result, cleared: count };

@@ -107,6 +107,45 @@ function businessDateFromPayload(def: EventDef, payload: Record<string, unknown>
   return null;
 }
 
+/** The EventLog row for one event — the single stamping chokepoint shared by
+ * emit() and emitMany(), so batched writes carry exactly the same columns:
+ *   • Multi-tenant spine: the resolved org + workflow (system org/workflow for
+ *     the demo + non-request contexts). workflowId scopes the simulator's
+ *     per-workflow data plane.
+ *   • Governance attribution (src/platform/tenancy/actor.ts): WHO (the bound
+ *     principal, if any) + HOW (human/ai/system/adapter). Off-request emits have
+ *     no principal → null.
+ * `occurredAt` is omitted on the single-emit path (DB default: now); the batch
+ * path stamps it explicitly to keep intra-batch order deterministic. */
+function eventRow(
+  ev: EmittedEvent,
+  def: EventDef,
+  caseId: string | null,
+  provenance: ProvMode,
+  businessAt: Date,
+  occurredAt?: Date,
+) {
+  return {
+    eventName: def.name,
+    eventRef: def.ref,
+    boundedContext: def.boundedContext,
+    aggregateRoot: def.aggregateRoot,
+    aggregateId: ev.aggregateId,
+    caseId,
+    role: ev.role,
+    payload: JSON.stringify(ev.payload),
+    ...(occurredAt ? { occurredAt } : {}),
+    businessAt,
+    provenance,
+    evidenceKind: ev.evidenceKind ?? null,
+    evidence: ev.evidence ?? null,
+    organizationId: currentOrgId(),
+    workflowId: currentWorkflowId(),
+    actorPrincipalId: tenantContext()?.principal.id ?? null,
+    actorKind: currentActorKind(),
+  };
+}
+
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
   // The case this event belongs to: the simulator's explicit run scope when set,
@@ -114,31 +153,45 @@ export async function emit(ev: EmittedEvent): Promise<void> {
   // into back to the case its FK references (instead of starting a new case).
   const caseId = scopeOverride ?? (await correlateCaseId(def.aggregateRoot, ev.aggregateId, ev.payload));
   const provenance = ev.provenance ?? (await provenanceFor(def.boundedContext));
+  const businessAt = getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date();
+  await prisma.eventLog.create({ data: eventRow(ev, def, caseId, provenance, businessAt) });
+}
 
-  await prisma.eventLog.create({
-    data: {
-      eventName: def.name,
-      eventRef: def.ref,
-      boundedContext: def.boundedContext,
-      aggregateRoot: def.aggregateRoot,
-      aggregateId: ev.aggregateId,
-      caseId,
-      role: ev.role,
-      payload: JSON.stringify(ev.payload),
-      businessAt: getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date(),
-      provenance,
-      evidenceKind: ev.evidenceKind ?? null,
-      evidence: ev.evidence ?? null,
-      // Multi-tenant spine: stamp the resolved org + workflow at the single
-      // EventLog write chokepoint (system org/workflow for the demo + non-request
-      // contexts). workflowId scopes the simulator's per-workflow data plane.
-      organizationId: currentOrgId(),
-      workflowId: currentWorkflowId(),
-      // Governance attribution (src/platform/tenancy/actor.ts): WHO (the bound
-      // principal, if any) + HOW (human/ai/system/adapter). Off-request emits have
-      // no principal → null.
-      actorPrincipalId: tenantContext()?.principal.id ?? null,
-      actorKind: currentActorKind(),
-    },
-  });
+/** An event for the batch path, with the two per-event decisions emit() makes
+ * from context/DB already resolved by the caller: the business time (the
+ * derivation planned it) and the case (correlated in memory — see
+ * twin/derive.ts). */
+export interface BatchEvent extends EmittedEvent {
+  businessAt: Date;
+  caseId: string | null;
+}
+
+// SQLite bind-variable budget: ~18 columns per EventLog row must stay under the
+// engine's variable cap (999 on conservative builds), so 50 rows per INSERT.
+const EMIT_CHUNK = 50;
+
+/** Batch counterpart of emit() for bulk derivation: identical stamping (same
+ * eventRow chokepoint, same tenant/actor context), but ONE chunked multi-row
+ * INSERT per EMIT_CHUNK events instead of a round trip per event — this is what
+ * lets a derive over tens of thousands of rows finish in seconds. occurredAt is
+ * stamped explicitly, strictly increasing and ending at "now", so recorded order
+ * (every reader sorts by occurredAt) stays deterministic within a batch. */
+export async function emitMany(evs: BatchEvent[]): Promise<void> {
+  if (evs.length === 0) return;
+  const provByBc = new Map<string, ProvMode>();
+  const base = Date.now() - evs.length;
+  const rows = [];
+  for (let i = 0; i < evs.length; i++) {
+    const ev = evs[i]!;
+    const def = findEvent(ev.ref);
+    let provenance = ev.provenance ?? provByBc.get(def.boundedContext);
+    if (!provenance) {
+      provenance = await provenanceFor(def.boundedContext);
+      provByBc.set(def.boundedContext, provenance);
+    }
+    rows.push(eventRow(ev, def, ev.caseId, provenance, ev.businessAt, new Date(base + i)));
+  }
+  for (let i = 0; i < rows.length; i += EMIT_CHUNK) {
+    await prisma.eventLog.createMany({ data: rows.slice(i, i + EMIT_CHUNK) });
+  }
 }

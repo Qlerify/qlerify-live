@@ -47,8 +47,11 @@ export interface SourceAdapter {
   introspect(): Promise<IntrospectResult>;
   /** The source→model field map this adapter applies on pull. */
   mapping(): Promise<FieldMap>;
-  /** Fetch a bounded batch, keyed by model entity, already field-mapped. */
-  pull(opts?: { limit?: number }): Promise<PullResult>;
+  /** Fetch a batch, keyed by model entity, already field-mapped. `limit: null`
+   * means NO cap — pull everything the source returns (large ingests are a
+   * supported path; the caller decides the ceiling, not the adapter). Omitted →
+   * the adapter's own conservative default. */
+  pull(opts?: { limit?: number | null }): Promise<PullResult>;
   /** Push model rows back to the source (envelope; no-op for simulated). */
   push(rows: RowsByEntity): Promise<{ pushed: number }>;
   healthcheck(): Promise<{ ok: boolean; detail?: string }>;

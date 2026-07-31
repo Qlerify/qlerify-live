@@ -117,7 +117,7 @@ export async function expFetchRows() {
   e.busy = true; render();
   showOverlay("Refreshing data…");
   try {
-    const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: 1000 }) });
+    const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: null }) }); // null = uncapped: pull ALL rows from the source
     await refreshExplorerAfterChat(); // re-pulls rows, adapters AND (if shown) the per-row events so the auto-derived events land in the ⚡ Events column
     hideOverlay(); // drop the scrim before the blocking result alert
     const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
@@ -161,7 +161,7 @@ export async function expReimportAll() {
   e.busy = true; render();
   showOverlay("Resetting & reimporting…");
   try {
-    const r = await api("/api/data/reimport-all", { method: "POST", body: JSON.stringify({ limit: 1000 }) });
+    const r = await api("/api/data/reimport-all", { method: "POST", body: JSON.stringify({}) }); // no limit = uncapped: a full restore re-pulls everything
     await refreshExplorerAfterChat();
     try { e.health = await api("/api/bc/health"); } catch (_e) { /* keep prior */ } // refresh status dots even if no table is selected
     hideOverlay(); // drop the scrim before the blocking result alert
@@ -491,7 +491,7 @@ export function expMain(e) {
       <div class="px-6 py-4 flex items-center justify-between border-b border-stone-200">
         <div class="text-xl font-semibold text-stone-900">${escapeHtml(e.entity)}</div>
         <div class="flex items-center gap-2">
-          <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull up to 1000 rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
+          <button id="exp-fetch-rows" ${e.busy || !tableAdapters.length ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium" title="${tableAdapters.length ? `Pull all rows from ${escapeHtml(tableAdapters[0].id)}` : "No connector configured for this table"}">Fetch rows</button>
           <button id="exp-clear-rows" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Delete every row in this table and the simulated events derived from it (connectors are kept)">Delete all rows</button>
           <button id="exp-reimport-all" ${e.busy ? "disabled" : ""} class="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium" title="Empty EVERY base-data table and the entire event log (all systems), then re-pull every connector to reimport the base data from source">Reset &amp; reimport base data</button>
           <button id="exp-config-adapter" class="px-4 py-1.5 text-sm rounded-full border ${state.chatOpen && e.panelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"} font-medium">Configure connector</button>

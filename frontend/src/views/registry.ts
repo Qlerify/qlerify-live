@@ -8,6 +8,7 @@ import { Model } from "./Model/Model.tsx"
 import { Org } from "./Org/Org.tsx"
 import { Explorer } from "./Explorer/Explorer.tsx"
 import { Connectors } from "./Connectors/Connectors.tsx"
+import { Admin } from "./Admin/Admin.tsx"
 
 // route.view → the component rendered inside the shell. Adding a ported view is
 // one line here; anything missing falls back to NotPorted.
@@ -22,4 +23,5 @@ export const VIEWS: Record<string, ComponentType> = {
   org: Org,
   bcs: Explorer,
   connectors: Connectors,
+  admin: Admin,
 }

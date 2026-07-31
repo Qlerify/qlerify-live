@@ -307,3 +307,58 @@ export type TestResult = {
   count?: number
   diff?: { ok?: boolean; requiredStatus?: { field: string; ok: boolean }[]; extraFields?: string[] }
 }
+
+export type Member = {
+  identityId: string
+  subject: string
+  primaryEmail?: string | null
+  roles?: string[]
+  status?: string
+}
+
+export type RoleAssignment = {
+  principalId: string
+  principalType: string
+  roleKey: string
+  scopeType: string
+  scopeId: string
+}
+
+export type Marking = { name: string; description?: string | null }
+export type Environment = { id: string; name: string; region?: string; lifecycleState?: string }
+export type Workspace = { id: string; name: string; environmentId: string; lifecycleState?: string }
+export type AdminWorkflow = { id: string; name: string; workspaceId: string; lifecycleState?: string }
+
+export type AuditEvent = {
+  seq: number
+  action: string
+  decision?: string | null
+  targetRef?: string | null
+  reason?: string | null
+  occurredAt?: string
+}
+
+export type LlmConfig = {
+  locked?: boolean
+  configured?: boolean
+  source?: string
+  provider?: string
+  model?: string | null
+  region?: string | null
+  hint?: string | null
+}
+
+export type QlerifyConfig = { source?: string; configured?: boolean; hint?: string | null }
+
+export type AdminData = {
+  tab: string
+  members: Member[]
+  roles: RoleAssignment[]
+  markings: Marking[]
+  environments: Environment[]
+  workspaces: Workspace[]
+  workflows: AdminWorkflow[]
+  audit: AuditEvent[]
+  anthropic: LlmConfig | null
+  qlerify: QlerifyConfig | null
+}

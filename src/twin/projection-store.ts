@@ -234,6 +234,28 @@ export async function findById(table: string, id: string): Promise<Record<string
   return normalizeRow(rows[0]);
 }
 
+/** Batch lookup: the rows for `ids`, in one chunked IN query per ~400 ids
+ * instead of a round trip per id (the N+1 that made big-case reads crawl).
+ * Order follows the input ids; missing ids are simply absent. */
+export async function findByIds(table: string, ids: string[]): Promise<Array<Record<string, unknown>>> {
+  if (ids.length === 0) return [];
+  const f = await orgFilterSql(table);
+  const CHUNK = 400; // stay under SQLite's bind-variable cap
+  const byId = new Map<string, Record<string, unknown>>();
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const marks = chunk.map(() => "?").join(", ");
+    const where = f.clause ? `WHERE ${ident("id")} IN (${marks}) AND ${f.clause}` : `WHERE ${ident("id")} IN (${marks})`;
+    const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+      `SELECT * FROM ${phys(table)} ${where}`,
+      ...chunk,
+      ...f.params,
+    );
+    for (const r of rows) byId.set(String(r.id), normalizeRow(r)!);
+  }
+  return ids.map((id) => byId.get(id)).filter((r): r is Record<string, unknown> => !!r);
+}
+
 /** Read rows in a deterministic order (insertion order: createdAt, then id as
  * the tiebreaker) so a window, when one applies, is stable across calls instead
  * of whatever SQLite happens to return. `limit: null` reads ALL rows — the bulk

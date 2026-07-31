@@ -8,6 +8,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { prisma } from "../../src/db.js";
 import { getOntology } from "../../src/ontology/model.js";
 import { deriveFromData } from "../../src/twin/derive.js";
+import { genericInstanceDetail } from "../../src/twin/sim.js";
 import * as store from "../../src/twin/projection-store.js";
 import { modelHarness } from "../helpers/po-model.js";
 
@@ -100,5 +101,29 @@ describe("deriveFromData at scale (batched, uncapped)", () => {
       const again = await deriveFromData();
       expect(again.totalEmitted).toBe(0);
       expect(again.events.reduce((n, s) => n + s.alreadyPresent, 0)).toBe(2 * N);
+    }));
+
+  it("opens a hub-shaped case (one parent, N children) fast — batched row lookups, not one query per instance", () =>
+    model.run(async () => {
+      // One account every order references: the whole set correlates into a
+      // SINGLE case spanning N+1 aggregate instances — the shape that made the
+      // per-instance-query detail view take seconds.
+      await store.insert("Account", { id: "hub", email: "hub@example.test" });
+      for (let i = 0; i < N; i++) await store.insert("Order", { id: `hub-ord-${i}`, accountId: "hub" });
+      const r = await deriveFromData();
+      expect(r.totalEmitted).toBe(N + 1);
+
+      const t0 = performance.now();
+      const detail = await genericInstanceDetail("hub");
+      const ms = performance.now() - t0;
+
+      expect(detail.events).toHaveLength(N + 1);
+      expect(detail.entities.Account).toHaveLength(1);
+      expect(detail.entities.Order).toHaveLength(N);
+      expect(detail.entities.Order.every((row: any) => row.accountId === "hub")).toBe(true);
+      // Regression tripwire: the pre-batching shape issued one query per Order
+      // (seconds); batched IN lookups keep this comfortably in the low hundreds
+      // of ms even on a slow machine.
+      expect(ms).toBeLessThan(3000);
     }));
 });

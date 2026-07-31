@@ -372,42 +372,79 @@ export function branchTotal(ont: Ontology, firedRefs: Set<string>): number {
   return end?.len ?? ont.linearOrder().length;
 }
 
-/** List runs: one row per root-aggregate instance, with progress. */
+/** List runs: one row per root-aggregate instance, with progress. Batched: the
+ * old shape issued TWO EventLog queries per case (400+ round trips per page
+ * load); this resolves every case's fired refs and last event in three queries
+ * total, so the list stays fast however many events the cases hold. */
 export async function genericListInstances(): Promise<any[]> {
   const ont = getOntology();
   const table = ont.rootAggregate;
   if (!(await store.tableExists(table))) return [];
   const rows = await store.findMany(table, 200);
-  const out: any[] = [];
-  for (const row of rows) {
+  const ids = rows.map((r) => String(r.id));
+  if (ids.length === 0) return [];
+
+  // Distinct (case, eventRef) pairs → each case's fired-ref set.
+  const refPairs = await prisma.eventLog.findMany({
+    where: { caseId: { in: ids }, ...eventLogOrgWhere() },
+    distinct: ["caseId", "eventRef"],
+    select: { caseId: true, eventRef: true },
+  });
+  const refsByCase = new Map<string, Set<string>>();
+  for (const p of refPairs) {
+    if (!p.caseId) continue;
+    (refsByCase.get(p.caseId) ?? refsByCase.set(p.caseId, new Set()).get(p.caseId)!).add(p.eventRef);
+  }
+
+  // Last event per case: the max occurredAt, then one fetch for those rows.
+  const lastAt = await prisma.eventLog.groupBy({
+    by: ["caseId"],
+    where: { caseId: { in: ids }, ...eventLogOrgWhere() },
+    _max: { occurredAt: true },
+  });
+  const lastByCase = new Map<string, { eventName: string; occurredAt: Date; provenance: string | null }>();
+  const pairs = lastAt.filter((g) => g.caseId && g._max.occurredAt);
+  if (pairs.length > 0) {
+    const lastRows = await prisma.eventLog.findMany({
+      where: { OR: pairs.map((g) => ({ caseId: g.caseId, occurredAt: g._max.occurredAt! })), ...eventLogOrgWhere() },
+      select: { caseId: true, eventName: true, occurredAt: true, provenance: true },
+    });
+    for (const r of lastRows) {
+      if (r.caseId && !lastByCase.has(r.caseId)) lastByCase.set(r.caseId, { eventName: r.eventName, occurredAt: r.occurredAt, provenance: r.provenance });
+    }
+  }
+
+  return rows.map((row) => {
     const id = String(row.id);
-    const progressRows = await prisma.eventLog.findMany({ where: { caseId: id, ...eventLogOrgWhere() }, distinct: ["eventRef"], select: { eventRef: true } });
-    const last = await prisma.eventLog.findFirst({ where: { caseId: id, ...eventLogOrgWhere() }, orderBy: { occurredAt: "desc" }, select: { eventName: true, occurredAt: true, provenance: true } });
+    const fired = refsByCase.get(id) ?? new Set<string>();
     // Per-run total: steps on THIS run's branch, not the whole model — a case on
     // a 10-step branch reads 7/10, not 7/18. Fired events off the chosen chain
     // (e.g. dangling satellites) could exceed it, so clamp to the fired count.
-    const total = Math.max(branchTotal(ont, new Set(progressRows.map((r) => r.eventRef))), progressRows.length);
-    out.push({ ...row, progress: progressRows.length, total, lastEvent: last });
-  }
-  return out;
+    const total = Math.max(branchTotal(ont, fired), fired.size);
+    return { ...row, progress: fired.size, total, lastEvent: lastByCase.get(id) ?? null };
+  });
 }
 
-/** Detail of one run: the root row, its events, and rows created across the run. */
+/** Detail of one run: the root row, its events, and rows created across the run.
+ * Row lookups are batched per aggregate (one IN query per root, not one query
+ * per instance) — a correlated case can span thousands of aggregate instances,
+ * and the per-id shape made opening such a case take seconds. */
 export async function genericInstanceDetail(instanceId: string): Promise<any> {
   const ont = getOntology();
   const rootRow = (await store.tableExists(ont.rootAggregate)) ? await store.findById(ont.rootAggregate, instanceId) : null;
   const events = await prisma.eventLog.findMany({ where: { caseId: instanceId, ...eventLogOrgWhere() }, orderBy: { occurredAt: "asc" } });
-  // Rows created in this run, grouped by aggregate (from the log's aggregateIds).
-  const byAgg: Record<string, any[]> = {};
-  const seen = new Map<string, Set<string>>();
+  // Rows created in this run, grouped by aggregate (from the log's aggregateIds),
+  // in first-seen order within each aggregate.
+  const idsByAgg = new Map<string, Set<string>>();
   for (const e of events) {
     if (!e.aggregateRoot || !e.aggregateId) continue;
-    const ids = seen.get(e.aggregateRoot) ?? seen.set(e.aggregateRoot, new Set()).get(e.aggregateRoot)!;
-    if (ids.has(e.aggregateId)) continue;
-    ids.add(e.aggregateId);
-    if (!(await store.tableExists(e.aggregateRoot))) continue;
-    const row = await store.findById(e.aggregateRoot, e.aggregateId);
-    if (row) (byAgg[e.aggregateRoot] ??= []).push(row);
+    (idsByAgg.get(e.aggregateRoot) ?? idsByAgg.set(e.aggregateRoot, new Set()).get(e.aggregateRoot)!).add(e.aggregateId);
+  }
+  const byAgg: Record<string, any[]> = {};
+  for (const [agg, ids] of idsByAgg) {
+    if (!(await store.tableExists(agg))) continue;
+    const rows = await store.findByIds(agg, [...ids]);
+    if (rows.length > 0) byAgg[agg] = rows;
   }
   return { instanceId, rootAggregate: ont.rootAggregate, root: rootRow, events, entities: byAgg };
 }

@@ -172,20 +172,6 @@ function isoWeekKey(d: Date): string {
 // Portfolio computation
 // ---------------------------------------------------------------------------
 
-type EvtRow = {
-  workflowId: string | null;
-  caseId: string | null;
-  eventRef: string;
-  eventName: string;
-  role: string;
-  boundedContext: string;
-  businessAt: Date | null;
-  occurredAt: Date;
-  provenance: string | null;
-  aggregateId: string;
-  actorKind: string | null;
-};
-
 interface InstanceState {
   caseId: string;
   firstAt: Date; // occurredAt of earliest event
@@ -423,45 +409,74 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     }
   }
 
-  const events = (await prisma.eventLog.findMany({
-    where: { organizationId: orgId },
-    select: {
-      workflowId: true, caseId: true, eventRef: true, eventName: true, role: true,
-      boundedContext: true, businessAt: true, occurredAt: true, provenance: true, aggregateId: true,
-      actorKind: true,
-    },
-    orderBy: { occurredAt: "asc" },
-  })) as EvtRow[];
+  // Per-case aggregates in SQL instead of folding every event row in JS. The old
+  // shape loaded the org's ENTIRE event log into memory on every request —
+  // O(events) rows marshalled through the driver — which took tens of seconds on
+  // a real deployment and pinned the event loop (stalling every other request,
+  // auth checks included). These grouped queries return O(cases + case·step
+  // pairs) rows; SQLite does the scan in C.
+  const caseWhere = { organizationId: orgId, workflowId: { not: null }, caseId: { not: null } };
+  const caseAgg = await prisma.eventLog.groupBy({
+    by: ["workflowId", "caseId"],
+    where: caseWhere,
+    _min: { occurredAt: true, businessAt: true },
+    _max: { occurredAt: true, businessAt: true },
+    _count: { _all: true },
+  });
+  const caseReal = await prisma.eventLog.groupBy({
+    by: ["workflowId", "caseId"],
+    where: { ...caseWhere, provenance: { in: ["recorded", "live"] } },
+    _count: { _all: true },
+  });
+  // Soft-fail marker: twin couldn't synthesize the step (aggregateId "").
+  const caseSoft = await prisma.eventLog.groupBy({
+    by: ["workflowId", "caseId"],
+    where: { ...caseWhere, aggregateId: "" },
+    _count: { _all: true },
+  });
+  // Per (case, step): firing count + the step's business date. _max(businessAt)
+  // stands in for the old fold's "last write per step wins"; they differ only
+  // when a LATER firing carries an EARLIER business date (a backdated re-fire).
+  const pairAgg = await prisma.eventLog.groupBy({
+    by: ["workflowId", "caseId", "eventRef"],
+    where: caseWhere,
+    _count: { _all: true },
+    _max: { businessAt: true },
+  });
 
-  // Group events → per-workflow → per-instance state.
+  // Assemble → per-workflow → per-instance state.
   const byWf = new Map<string, Map<string, InstanceState>>();
-  for (const e of events) {
-    if (!e.workflowId || !e.caseId) continue;
-    const order = loaded.get(e.workflowId)?.order;
-    let insts = byWf.get(e.workflowId);
-    if (!insts) byWf.set(e.workflowId, (insts = new Map()));
-    let st = insts.get(e.caseId);
-    if (!st) {
-      st = {
-        caseId: e.caseId, firstAt: e.occurredAt, lastAt: e.occurredAt, firstBiz: null, lastBiz: null,
-        termBiz: null, bizByRef: new Map(), firedRefs: new Set(), refCounts: new Map(), realEvents: 0,
-        totalEvents: 0, softFails: 0, done: false, currentRef: null,
-      };
-      insts.set(e.caseId, st);
-    }
-    if (e.occurredAt < st.firstAt) st.firstAt = e.occurredAt;
-    if (e.occurredAt > st.lastAt) st.lastAt = e.occurredAt;
-    if (e.businessAt) {
-      st.bizByRef.set(e.eventRef, e.businessAt); // last write per step wins (matches latest state)
-      if (!st.firstBiz || e.businessAt < st.firstBiz) st.firstBiz = e.businessAt;
-      if (!st.lastBiz || e.businessAt > st.lastBiz) st.lastBiz = e.businessAt;
-    }
-    st.totalEvents++;
-    if (e.provenance === "recorded" || e.provenance === "live") st.realEvents++;
-    if (e.aggregateId === "") st.softFails++; // soft-fail marker: twin couldn't synthesize the step
-    st.firedRefs.add(e.eventRef);
-    st.refCounts.set(e.eventRef, (st.refCounts.get(e.eventRef) ?? 0) + 1);
-    if (order && e.eventRef === order.terminal) st.termBiz = e.businessAt;
+  for (const c of caseAgg) {
+    if (!c.workflowId || !c.caseId || !c._min.occurredAt || !c._max.occurredAt) continue;
+    let insts = byWf.get(c.workflowId);
+    if (!insts) byWf.set(c.workflowId, (insts = new Map()));
+    insts.set(c.caseId, {
+      caseId: c.caseId, firstAt: c._min.occurredAt, lastAt: c._max.occurredAt,
+      firstBiz: c._min.businessAt ?? null, lastBiz: c._max.businessAt ?? null,
+      termBiz: null, bizByRef: new Map(), firedRefs: new Set(), refCounts: new Map(), realEvents: 0,
+      totalEvents: c._count._all, softFails: 0, done: false, currentRef: null,
+    });
+  }
+  for (const c of caseReal) {
+    const st = c.workflowId && c.caseId ? byWf.get(c.workflowId)?.get(c.caseId) : undefined;
+    if (st) st.realEvents = c._count._all;
+  }
+  for (const c of caseSoft) {
+    const st = c.workflowId && c.caseId ? byWf.get(c.workflowId)?.get(c.caseId) : undefined;
+    if (st) st.softFails = c._count._all;
+  }
+  for (const p of pairAgg) {
+    const st = p.workflowId && p.caseId ? byWf.get(p.workflowId)?.get(p.caseId) : undefined;
+    if (!st) continue;
+    st.firedRefs.add(p.eventRef);
+    st.refCounts.set(p.eventRef, p._count._all);
+    if (p._max.businessAt) st.bizByRef.set(p.eventRef, p._max.businessAt);
+  }
+  // Terminal business date (case completion), from the per-step dates.
+  for (const [wfId, insts] of byWf) {
+    const terminal = loaded.get(wfId)?.order.terminal;
+    if (!terminal) continue;
+    for (const st of insts.values()) st.termBiz = st.bizByRef.get(terminal) ?? null;
   }
 
   // Finalize per-instance derived fields using each workflow's order.
@@ -657,7 +672,7 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
   const connectorFreshness = buildConnectorFreshness(loaded);
 
   // ---- AI Activity & Trust (live, fed by actorKind + the PDP audit log) ----
-  const aiActivity = await computeAiActivity(orgId, events);
+  const aiActivity = await computeAiActivity(orgId);
 
   return {
     generatedAt: now.toISOString(),
@@ -692,27 +707,37 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
  * log. Honest heuristics, labelled as such: override is a same-aggregate
  * ai→human correction; guardrail is cumulative denied-AI-writes from the audit
  * log (not windowed). Legacy rows with no actorKind are bucketed as `system`. */
-async function computeAiActivity(orgId: string, events: EvtRow[]): Promise<AiActivity> {
+async function computeAiActivity(orgId: string): Promise<AiActivity> {
+  // Actor mix as one grouped query (unknown kinds bucket as system, like the old
+  // per-event fold did for null).
   const byKind = { human: 0, ai: 0, adapter: 0, system: 0 };
-  for (const e of events) {
-    const k = (e.actorKind ?? "system") as keyof typeof byKind;
-    if (k in byKind) byKind[k]++;
-    else byKind.system++;
+  const kinds = await prisma.eventLog.groupBy({
+    by: ["actorKind"],
+    where: { organizationId: orgId },
+    _count: { _all: true },
+  });
+  for (const k of kinds) {
+    const key = (k.actorKind ?? "system") as keyof typeof byKind;
+    byKind[key in byKind ? key : "system"] += k._count._all;
   }
 
-  // Override: an ai-origin event on an aggregate that a human later acts on (same
-  // aggregateId, later in time). events is already ordered by occurredAt asc.
-  const humanAfter = new Map<string, boolean>(); // aggregateId → a human event seen (scanning newest→oldest)
-  let aiEvents = 0, overridden = 0;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (!e.aggregateId) continue;
-    if (e.actorKind === "human") humanAfter.set(e.aggregateId, true);
-    else if (e.actorKind === "ai") {
-      aiEvents++;
-      if (humanAfter.get(e.aggregateId)) overridden++;
-    }
-  }
+  // Override: an ai-origin event on an aggregate that a human later acts on
+  // (same aggregateId, strictly later occurredAt). Counted in SQL so no event
+  // rows are marshalled; ai events are few, so the EXISTS probe stays cheap.
+  const [aiRow] = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>(
+    `SELECT COUNT(*) AS n FROM "EventLog" WHERE "organizationId" = ? AND "actorKind" = 'ai' AND "aggregateId" <> ''`,
+    orgId,
+  );
+  const [ovRow] = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>(
+    `SELECT COUNT(*) AS n FROM "EventLog" a
+     WHERE a."organizationId" = ? AND a."actorKind" = 'ai' AND a."aggregateId" <> ''
+       AND EXISTS (SELECT 1 FROM "EventLog" h
+                   WHERE h."organizationId" = a."organizationId" AND h."actorKind" = 'human'
+                     AND h."aggregateId" = a."aggregateId" AND h."occurredAt" > a."occurredAt")`,
+    orgId,
+  );
+  const aiEvents = Number(aiRow?.n ?? 0);
+  const overridden = Number(ovRow?.n ?? 0);
 
   // Guardrail: denied AI writes ÷ attempted, from the PDP audit log (cumulative).
   const aiAudits = await prisma.platAuditEvent.findMany({
@@ -778,12 +803,22 @@ async function computeTimeliness(
     .filter((w): w is { id: string; name: string; field: string } => !!w.field);
   if (scope.length === 0) return null;
 
-  const scopeIds = scope.map((s) => s.id);
-  const payloadRows = (await prisma.eventLog.findMany({
-    where: { organizationId: orgId, workflowId: { in: scopeIds } },
-    select: { workflowId: true, caseId: true, payload: true, occurredAt: true },
-    orderBy: { occurredAt: "asc" },
-  })) as { workflowId: string | null; caseId: string | null; payload: string; occurredAt: Date }[];
+  // Only events whose payload CARRIES the mapped field can contribute a due
+  // date, so filter them in SQL (`payload LIKE %"<field>"%`) instead of
+  // marshalling and JSON.parsing EVERY event's payload in JS — with real data
+  // that was megabytes of TEXT per request and pinned the event loop. The LIKE
+  // is a safe superset (a value string could also match); the fold below still
+  // parses and reads the actual field.
+  const payloadRows: { workflowId: string | null; caseId: string | null; payload: string; occurredAt: Date }[] = [];
+  for (const s of scope) {
+    payloadRows.push(
+      ...(await prisma.eventLog.findMany({
+        where: { organizationId: orgId, workflowId: s.id, payload: { contains: `"${s.field}"` } },
+        select: { workflowId: true, caseId: true, payload: true, occurredAt: true },
+        orderBy: { occurredAt: "asc" },
+      })),
+    );
+  }
 
   // Latest mapped-field value per instance (asc order ⇒ last write wins).
   const dueByInstance = new Map<string, Date>();

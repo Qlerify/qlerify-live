@@ -169,7 +169,15 @@ export async function createWorkspace(organizationId: string, environmentId: str
 export async function createWorkflow(organizationId: string, workspaceId: string, name: string, ownerId: string) {
   const ws = await prisma.platWorkspace.findFirst({ where: { id: workspaceId, organizationId } });
   if (!ws) throw new DomainError(`workspace "${workspaceId}" not found in this organization`);
-  const proj = await prisma.platWorkflow.create({ data: { id: newId(), organizationId, workspaceId, name } });
+  let proj;
+  try {
+    proj = await prisma.platWorkflow.create({ data: { id: newId(), organizationId, workspaceId, name } });
+  } catch (e: any) {
+    // (organizationId, workspaceId, name) is unique — surface a duplicate as a
+    // clean 422 instead of a raw Prisma 500.
+    if (e?.code === "P2002") throw new DomainError(`a workflow named "${name}" already exists in this workspace`);
+    throw e;
+  }
   await recordAudit({ organizationId, actorPrincipalId: ownerId, action: "workflow.create", targetRef: `workflow:${proj.id}`, decision: "allow", reason: name });
   // A new workflow starts with NO model — the user points it at their own Qlerify
   // model via PUT /v1/workflow/model. Nothing is cloned/preloaded.

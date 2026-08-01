@@ -13,7 +13,7 @@ import { prisma } from "../../src/db.js";
 import { newId } from "../../src/platform/ids.js";
 import { runWithTenant } from "../../src/platform/tenancy/context.js";
 import { encryptSecret } from "../../src/platform/secrets/secret-box.js";
-import { parseWorkflowUrl } from "../../src/ontology/sync.js";
+import { deriveNameFromModel, modellerWorkflowName, parseWorkflowUrl, sanitizeWorkflowName } from "../../src/ontology/sync.js";
 import {
   resolveQlerifyCreds,
   resolveQlerifyStatus,
@@ -84,6 +84,91 @@ describe("parseWorkflowUrl host-pinning", () => {
 
   it("rejects a non-URL string", () => {
     expect(() => parseWorkflowUrl("not a url")).toThrow();
+  });
+});
+
+// Workflow-name derivation — creating a workflow without a name takes it from
+// the loaded model: the modeller payload's own name (link pulls), else the
+// model's overlay title / primary bounded context.
+describe("modellerWorkflowName payload probing", () => {
+  it("takes the payload's top-level name", () => {
+    expect(modellerWorkflowName({ name: "Order Fulfilment", specification: {} })).toBe("Order Fulfilment");
+  });
+
+  it("falls back through workflowName / workflow.name / title", () => {
+    expect(modellerWorkflowName({ workflowName: "A" })).toBe("A");
+    expect(modellerWorkflowName({ workflow: { name: "B" } })).toBe("B");
+    expect(modellerWorkflowName({ title: "C" })).toBe("C");
+  });
+
+  it("trims, and ignores blank or non-string candidates", () => {
+    expect(modellerWorkflowName({ name: "  Padded  " })).toBe("Padded");
+    expect(modellerWorkflowName({ name: "   ", workflowName: 7, title: "Real" })).toBe("Real");
+  });
+
+  it("is null when the payload names nothing", () => {
+    expect(modellerWorkflowName({ specification: {} })).toBeNull();
+    expect(modellerWorkflowName(null)).toBeNull();
+  });
+});
+
+describe("deriveNameFromModel (upload/paste fallback)", () => {
+  it("prefers the overlay title over the bounded context", () => {
+    expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), JSON.stringify({ title: "Order Fulfilment" }))).toBe("Order Fulfilment");
+  });
+
+  it("falls back to the primary bounded context", () => {
+    expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), null)).toBe("Orders");
+    expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), JSON.stringify({ title: "  " }))).toBe("Orders");
+  });
+
+  it("a bad overlay never blocks derivation", () => {
+    expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), "not json")).toBe("Orders");
+  });
+
+  it("is null when the model names nothing or doesn't parse", () => {
+    expect(deriveNameFromModel(JSON.stringify({ domainEvents: {} }), null)).toBeNull();
+    expect(deriveNameFromModel("not json", null)).toBeNull();
+  });
+
+  // The stale-overlay guard (mirrors model.ts's overlayForThisModel): a title
+  // from an overlay whose event keys belong to a DIFFERENT model must not name
+  // the new workflow — that's the model-switch "stale labels" bug.
+  it("ignores the title of a stale overlay (event keys from another model)", () => {
+    const wf = JSON.stringify({ boundedContext: "Orders", domainEvents: { OrderPlaced: {} } });
+    const stale = JSON.stringify({ title: "Billing Pipeline", events: { InvoiceSent: {}, PaymentTaken: {} } });
+    expect(deriveNameFromModel(wf, stale)).toBe("Orders");
+  });
+
+  it("honors the title of an overlay whose event keys match (incl. external BCs)", () => {
+    const wf = JSON.stringify({
+      boundedContext: "Orders",
+      domainEvents: { OrderPlaced: {} },
+      externalBoundedContexts: { SAP: { domainEvents: { GoodsIssued: {} } } },
+    });
+    const matching = JSON.stringify({ title: "Order Fulfilment", events: { OrderPlaced: {}, GoodsIssued: {} } });
+    expect(deriveNameFromModel(wf, matching)).toBe("Order Fulfilment");
+  });
+});
+
+describe("sanitizeWorkflowName", () => {
+  it("strips control and format characters (bidi override, zero-width, BEL)", () => {
+    expect(sanitizeWorkflowName("Ord\u202Eers\u200B\u0007")).toBe("Orders");
+    expect(sanitizeWorkflowName("\u202E\u200B\u0007")).toBeNull();
+  });
+
+  it("collapses whitespace and trims", () => {
+    expect(sanitizeWorkflowName("  Order \n\t Fulfilment  ")).toBe("Order Fulfilment");
+  });
+
+  it("caps the length at 200", () => {
+    expect(sanitizeWorkflowName("x".repeat(5000))!.length).toBe(200);
+  });
+
+  it("is null for blank or non-string input", () => {
+    expect(sanitizeWorkflowName("   ")).toBeNull();
+    expect(sanitizeWorkflowName(null)).toBeNull();
+    expect(sanitizeWorkflowName(undefined)).toBeNull();
   });
 });
 

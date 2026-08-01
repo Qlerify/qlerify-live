@@ -34,7 +34,7 @@ import { resolveAnthropicStatus } from "../../llm/anthropic.js";
 import { resolveQlerifyStatus } from "../../llm/qlerify.js";
 import { requireIdentity, requireTenant, runWithTenant } from "../tenancy/context.js";
 import { applyWorkflowModel } from "../../twin/apply.js";
-import { fetchSpecificationFromUrl } from "../../ontology/sync.js";
+import { deriveNameFromModel, fetchSpecificationFromUrl, fetchWorkflowModelFromUrl, sanitizeWorkflowName } from "../../ontology/sync.js";
 import {
   createVersion,
   currentContent,
@@ -106,13 +106,15 @@ interface ModelInputBody {
  * modeller link (sourceUrl) when given, else use the uploaded/pasted workflow text.
  * Throws FetchError (→502) on a bad/unreachable link, DomainError (→400) when no
  * model is provided at all. The returned sourceUrl (null for upload/paste) is
- * recorded on the version so a later "reload" can re-pull. */
-async function resolveModelInput(body: ModelInputBody): Promise<{ workflow: string; overlay: string | null; sourceUrl: string | null }> {
+ * recorded on the version so a later "reload" can re-pull. modelName is the
+ * modeller's own workflow name (link pulls only) — creation defaults to it. */
+async function resolveModelInput(body: ModelInputBody): Promise<{ workflow: string; overlay: string | null; sourceUrl: string | null; modelName: string | null }> {
   const sourceUrl = body.sourceUrl && body.sourceUrl.trim() ? body.sourceUrl.trim() : null;
   let workflow = body.workflow;
+  let modelName: string | null = null;
   if (sourceUrl) {
     try {
-      workflow = await fetchSpecificationFromUrl(sourceUrl);
+      ({ workflow, name: modelName } = await fetchWorkflowModelFromUrl(sourceUrl));
     } catch (e: any) {
       // A missing/invalid Qlerify key is a configuration problem, not a fetch
       // failure — let its DomainError surface as-is (422 + "add a key in
@@ -124,7 +126,7 @@ async function resolveModelInput(body: ModelInputBody): Promise<{ workflow: stri
   if (typeof workflow !== "string" || !workflow.trim()) {
     throw new DomainError("Provide a Qlerify model link, or upload/paste a workflow.json");
   }
-  return { workflow, overlay: body.overlay ?? null, sourceUrl };
+  return { workflow, overlay: body.overlay ?? null, sourceUrl, modelName };
 }
 
 export function registerControlRoutes(app: FastifyInstance) {
@@ -682,18 +684,44 @@ export function registerControlRoutes(app: FastifyInstance) {
   // anything is created); the workflow row is then created and the model applied to
   // it (bound via runWithTenant since the new workflow isn't the active one). If the
   // model is invalid, the just-created workflow is rolled back so no orphan remains.
+  // `name` is optional: when omitted it is taken from the loaded model — the
+  // modeller's workflow name (link pulls), else the model's title/boundedContext.
   app.post("/v1/workflows", async (req, reply) => {
     try {
       const ctx = requireTenant();
       const body = (req.body ?? {}) as { name?: string; workspaceId?: string } & ModelInputBody;
-      if (!body.name || !body.workspaceId) throw new DomainError("name and workspaceId are required");
+      if (!body.workspaceId) throw new DomainError("workspaceId is required");
+      if (body.name != null && typeof body.name !== "string") throw new DomainError("name must be a string");
       await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
 
       // Resolve (and, for a link, fetch) the model BEFORE creating anything — a bad
       // link/network 502s here and leaves no workflow behind.
-      const { workflow, overlay, sourceUrl } = await resolveModelInput(body);
+      const { workflow, overlay, sourceUrl, modelName } = await resolveModelInput(body);
 
-      const proj = await createWorkflow(ctx.organizationId, body.workspaceId, body.name, ctx.principal.id);
+      // Explicit name wins; otherwise the loaded model names the workflow. All
+      // candidates are sanitized — the name is echoed in every list/whoami reply
+      // and permanently embedded in the audit chain, and the model/modeller side
+      // is not authored by the org admin creating the workflow.
+      const explicit = sanitizeWorkflowName(body.name);
+      const derived = explicit ?? sanitizeWorkflowName(modelName) ?? sanitizeWorkflowName(deriveNameFromModel(workflow, overlay));
+      if (!derived) {
+        throw new DomainError("Couldn't take a name from the loaded model (it has no name, title, or boundedContext) — provide a workflow name.");
+      }
+
+      // Duplicates within the workspace: a typed duplicate is the caller's to fix
+      // (422); a derived one (e.g. re-importing the same link) gets a numbered
+      // suffix — the user never chose the colliding name. createWorkflow's P2002
+      // mapping backs up the remaining create/create race.
+      const taken = new Set(
+        (await prisma.platWorkflow.findMany({ where: { organizationId: ctx.organizationId, workspaceId: body.workspaceId }, select: { name: true } })).map((w) => w.name),
+      );
+      let name = derived;
+      if (taken.has(name) && explicit) {
+        throw new DomainError(`A workflow named "${name}" already exists in this workspace — pick another name.`);
+      }
+      for (let n = 2; taken.has(name); n++) name = `${derived} (${n})`;
+
+      const proj = await createWorkflow(ctx.organizationId, body.workspaceId, name, ctx.principal.id);
       try {
         await runWithTenant({ ...ctx, workflowId: proj.id }, () =>
           applyWorkflowModel(workflow, overlay, { source: "set", sourceUrl }),

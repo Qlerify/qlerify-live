@@ -3,7 +3,9 @@
 // `get_workflow`), and validate a Qlerify API key before it is persisted.
 //
 // This is the seam used by the PER-WORKFLOW model flow: setting a workflow's own
-// model from a modeller link goes through fetchSpecificationFromUrl(), and the
+// model from a modeller link goes through fetchWorkflowModelFromUrl() (which also
+// carries the modeller's workflow name, so creation can default to it — the
+// reload path uses the name-less fetchSpecificationFromUrl() wrapper), and the
 // returned text is stored in the content-addressed ontology store. There is no
 // global model file anymore — the legacy .qlerify/workflow.json materialization
 // + version-history machinery has been removed.
@@ -81,9 +83,64 @@ function qlerifyAuthError(): DomainError {
   );
 }
 
-/** Fetch a workflow's `.specification` object from the Qlerify modeller via MCP,
- * for explicit (projectId, workflowId). */
-async function fetchSpecificationFor(projectId: string, workflowId: string): Promise<unknown> {
+/** Best-effort workflow name from a `get_workflow` payload. The modeller names
+ * the workflow outside `.specification`; the exact key has varied, so probe the
+ * known spellings. Null when the payload names nothing. Exported for tests. */
+export function modellerWorkflowName(payload: unknown): string | null {
+  const p = payload as Record<string, any> | null;
+  const candidates = [p?.name, p?.workflowName, p?.workflow?.name, p?.title];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return null;
+}
+
+/** Mirror of the ontology loader's stale-overlay guard (model.ts): an overlay
+ * belongs to a model when it has no event keys, or a MAJORITY of them resolve to
+ * the model's domain events (primary + external bounded contexts). An overlay
+ * carried over from a previously loaded model must never name the new one. */
+function overlayBelongsToModel(overlay: any, spec: any): boolean {
+  const overlayKeys = Object.keys(overlay?.events ?? {});
+  if (overlayKeys.length === 0) return true;
+  const modelKeys = new Set(Object.keys(spec?.domainEvents ?? {}));
+  for (const ctx of Object.values(spec?.externalBoundedContexts ?? {})) {
+    for (const k of Object.keys((ctx as any)?.domainEvents ?? {})) modelKeys.add(k);
+  }
+  const matching = overlayKeys.filter((k) => modelKeys.has(k)).length;
+  return matching / overlayKeys.length >= 0.5;
+}
+
+/** Best-effort workflow name from the MODEL ITSELF (upload/paste, or a link whose
+ * payload names nothing): the overlay's title — honored only when the overlay
+ * belongs to this model, same as the ontology's display title — else the primary
+ * bounded context. Null when the model names nothing (or doesn't parse). */
+export function deriveNameFromModel(workflowJson: string, overlayJson: string | null): string | null {
+  let spec: any = null;
+  try { spec = JSON.parse(workflowJson); } catch { /* fall through — bc stays unreadable */ }
+  try {
+    const overlay = overlayJson ? JSON.parse(overlayJson) : null;
+    const title = overlay?.title;
+    if (typeof title === "string" && title.trim() && overlayBelongsToModel(overlay, spec)) return title.trim();
+  } catch { /* a bad overlay never blocks name derivation */ }
+  const bc = spec?.boundedContext;
+  return typeof bc === "string" && bc.trim() ? bc.trim() : null;
+}
+
+/** Normalize a candidate workflow name before it is stored: strip control and
+ * format characters (bidi overrides, zero-width marks — invisible or spoofing in
+ * the switcher and audit log), collapse whitespace, and cap the length (the name
+ * is echoed in every workflow-list/whoami response and permanently embedded in
+ * the hash-chained audit log). Null when nothing survives. */
+export function sanitizeWorkflowName(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\s+/g, " ").trim().slice(0, 200).trimEnd();
+  return cleaned || null;
+}
+
+/** Fetch a workflow's full `get_workflow` payload from the Qlerify modeller via
+ * MCP, for explicit (projectId, workflowId). The payload carries `.specification`
+ * (the model) plus modeller metadata such as the workflow's name. */
+async function fetchWorkflowPayload(projectId: string, workflowId: string): Promise<unknown> {
   const { url, apiKey } = await resolveQlerifyCreds();
   const res = await fetch(url, {
     method: "POST",
@@ -116,16 +173,29 @@ async function fetchSpecificationFor(projectId: string, workflowId: string): Pro
   if (payload?.specification == null) {
     throw new Error("Qlerify response has no `.specification` — nothing to store");
   }
-  return payload.specification;
+  return payload;
+}
+
+export interface FetchedWorkflowModel {
+  /** Serialized `.specification` — the workflow.json text that gets stored. */
+  workflow: string;
+  /** The modeller's own name for the workflow, when the payload carries one. */
+  name: string | null;
 }
 
 /** Fetch + serialize a Qlerify model from a modeller workflow URL — used to set a
- * workflow's OWN model from a link. Returns the workflow.json text. Throws a clear
- * error on a malformed URL or a fetch failure. */
-export async function fetchSpecificationFromUrl(workflowUrl: string): Promise<string> {
+ * workflow's OWN model from a link. Returns the workflow.json text plus the
+ * modeller's workflow name (so creation can default to it). Throws a clear error
+ * on a malformed URL or a fetch failure. */
+export async function fetchWorkflowModelFromUrl(workflowUrl: string): Promise<FetchedWorkflowModel> {
   const { projectId, workflowId } = parseWorkflowUrl(workflowUrl); // throws on a bad URL
-  const spec = await fetchSpecificationFor(projectId, workflowId);
-  return serialize(spec);
+  const payload = await fetchWorkflowPayload(projectId, workflowId);
+  return { workflow: serialize((payload as any).specification), name: modellerWorkflowName(payload) };
+}
+
+/** Name-less variant for callers that only want the workflow.json text (reload). */
+export async function fetchSpecificationFromUrl(workflowUrl: string): Promise<string> {
+  return (await fetchWorkflowModelFromUrl(workflowUrl)).workflow;
 }
 
 /** Validate a Qlerify MCP credential by making a cheap `tools/list` call. Throws

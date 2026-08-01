@@ -968,11 +968,12 @@ function bindTenantBar() {
   // (the same default the empty-org view uses). The model is MANDATORY and sent
   // with the create call — the server creates workflow + model atomically (and
   // rolls the workflow back if the model is bad), so we only switch into it on
-  // success. Mirrors createOrg's open/busy/err state pattern.
+  // success. The name is OPTIONAL: left blank, the server takes it from the
+  // loaded model (the modeller's workflow name, else its title/boundedContext).
+  // Mirrors createOrg's open/busy/err state pattern.
   const createWorkflow = async () => {
     if (state.newWfBusy) return;
     const name = (document.getElementById("new-wf-name")?.value || state.newWfName || "").trim();
-    if (!name) { state.newWfErr = "Workflow name is required"; render(); return; }
     const url = (document.getElementById("new-wf-url")?.value || state.newWfUrl || "").trim();
     const text = (document.getElementById("new-wf-text")?.value || state.newWfText || "").trim();
     let modelPayload;
@@ -990,7 +991,7 @@ function bindTenantBar() {
       const wss = await api("/v1/workspaces");
       const workspaceId = (wss[0] || {}).id;
       if (!workspaceId) throw new Error("This org has no workspace — create one in Org Admin first.");
-      const wf = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ name, workspaceId, ...modelPayload }) });
+      const wf = await api("/v1/workflows", { method: "POST", body: JSON.stringify({ ...(name ? { name } : {}), workspaceId, ...modelPayload }) });
       AUTH.setWorkflow(wf.id); // switch straight into the brand-new workflow
       state.newWfOpen = false; state.newWfBusy = false; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
       state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new workflow
@@ -1030,7 +1031,7 @@ function bindTenantBar() {
     state.wfMenuOpen = false;
     state.newWfOpen = true; state.newWfErr = null; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
     render();
-    setTimeout(() => document.getElementById("new-wf-name")?.focus(), 30);
+    setTimeout(() => document.getElementById("new-wf-url")?.focus(), 30);
   };
   document.getElementById("wf-menu-create")?.addEventListener("click", openCreateWorkflow);
   document.getElementById("wf-empty-create")?.addEventListener("click", openCreateWorkflow);
@@ -1138,15 +1139,15 @@ function newWfDialog() {
       <div class="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col max-h-[88vh]">
         <div class="px-5 py-4 border-b border-stone-200">
           <div class="text-lg font-semibold">Create workflow</div>
-          <div class="text-sm text-stone-500 mt-0.5">Name it and point it at a Qlerify model — they're created together. A workflow is its model, so there's no empty state to fill in later.</div>
+          <div class="text-sm text-stone-500 mt-0.5">Point it at a Qlerify model — the workflow and its model are created together, and the name is taken from the loaded workflow unless you type one.</div>
         </div>
         <div class="p-5 overflow-auto flex-1">
           ${err}
-          <label class="block text-sm font-medium text-stone-700 mb-1">Workflow name</label>
-          <input id="new-wf-name" value="${escapeHtml(state.newWfName || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="Q3 Forecast" />
-          <label class="block text-sm font-medium text-stone-700 mb-1 mt-4">Qlerify model link</label>
+          <label class="block text-sm font-medium text-stone-700 mb-1">Qlerify model link</label>
           <input id="new-wf-url" type="url" value="${escapeHtml(state.newWfUrl || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="https://app.qlerify.com/workflow/&lt;projectId&gt;/&lt;workflowId&gt;" />
           <div class="text-xs text-stone-500 mt-1">Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.</div>
+          <label class="block text-sm font-medium text-stone-700 mb-1 mt-4">Workflow name <span class="font-normal text-stone-400">(optional)</span></label>
+          <input id="new-wf-name" value="${escapeHtml(state.newWfName || "")}" class="w-full rounded-md border border-stone-300 px-3 py-2 text-sm" placeholder="Defaults to the loaded workflow's name" />
           <details class="mt-4">
             <summary class="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">Advanced — upload or paste a workflow.json instead</summary>
             <div class="mt-3">
@@ -1191,7 +1192,7 @@ function bindEmptyOrg() {
   document.getElementById("empty-proj-create")?.addEventListener("click", () => {
     state.newWfOpen = true; state.newWfErr = null; state.newWfName = ""; state.newWfUrl = ""; state.newWfText = "";
     render();
-    setTimeout(() => document.getElementById("new-wf-name")?.focus(), 30);
+    setTimeout(() => document.getElementById("new-wf-url")?.focus(), 30);
   });
 }
 

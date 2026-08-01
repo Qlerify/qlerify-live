@@ -235,6 +235,20 @@ describe("planDerivation — connector date roles", () => {
     const reg = p.AccountRegistered.fired[0].businessAt as Date;
     expect(reg.toISOString().startsWith("2025-09-09")).toBe(true); // rowBaseDate → row.createdAt
   });
+
+  // Timestamp trust: only the create anchored to the source's creation date is a
+  // WITNESSED time. An update's last-modified anchor merely bounds when it
+  // happened, and every fallback is a heuristic — those read as estimates.
+  it("marks the role-anchored create time known and the update time estimated", () => {
+    const p = planWithRoles([row]);
+    expect(p.AccountRegistered.fired[0].businessAtKnown).toBe(true);
+    expect(p.AccountConfirmed.fired[0].businessAtKnown).toBe(false);
+  });
+
+  it("a create with no declared roles (heuristic date) reads as estimated", () => {
+    const p = plan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A", createdAt: "2026-06-01T00:00:00.000Z" }]);
+    expect(p.AccountRegistered.fired[0].businessAtKnown).toBe(false);
+  });
 });
 
 // The detail view reconstructs "state as of step N" by folding payloads in

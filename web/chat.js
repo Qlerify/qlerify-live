@@ -4,7 +4,7 @@
 // imported from ./app.js — safe because they are only called at runtime.
 import { state } from "./state.js";
 import { escapeHtml, prettyEntity, renderTextContent } from "./format.js";
-import { EVIDENCE_KIND, evidenceChip, provChip } from "./chips.js";
+import { EST_TIME_TITLE, EVIDENCE_KIND, bizTimeEstimated, evidenceChip, provChip } from "./chips.js";
 import { AUTH, api, apiStream, render } from "./app.js";
 import { loadDashboard } from "./dashboard.js";
 import { loadDetail } from "./detail.js";
@@ -565,6 +565,10 @@ export function eventLogBody() {
     catch { payloadStr = String(e.payload ?? ""); }
     const hasPayload = payloadStr && !["null", "{}", '""'].includes(payloadStr);
     const biz = e.businessAt ? new Date(e.businessAt).toLocaleDateString() : null;
+    // Estimated business time (see chips.js bizTimeEstimated) → greyed, ~-prefixed.
+    const bizHtml = !biz ? "" : bizTimeEstimated(e)
+      ? ` · <span class="italic text-stone-400" title="${EST_TIME_TITLE}">~${biz}</span>`
+      : ` · <span title="business date">${biz}</span>`;
     // "Why it fired": the derivation scenario (kind) gives the headline, the
     // persisted evidence reason gives the specifics. Absent for synthetic events.
     const km = EVIDENCE_KIND[e.evidenceKind];
@@ -580,7 +584,7 @@ export function eventLogBody() {
           <span class="text-[11px] tabular-nums text-stone-400 mr-1">${i + 1}</span>
           <span class="font-medium text-stone-900">${escapeHtml(e.eventName)}</span> ${provChip(e.provenance)} ${evidenceChip(e.evidenceKind)}
           <div class="text-xs text-stone-500 mt-0.5 ml-5">
-            <span class="mono">${escapeHtml(e.boundedContext)}</span> · ${escapeHtml(e.role)} · ${new Date(e.occurredAt).toLocaleTimeString()}${biz ? ` · <span title="business date">${biz}</span>` : ""}
+            <span class="mono">${escapeHtml(e.boundedContext)}</span> · ${escapeHtml(e.role)} · ${new Date(e.occurredAt).toLocaleTimeString()}${bizHtml}
           </div>
         </summary>
         <div class="px-4 pb-3 pl-9">

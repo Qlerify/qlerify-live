@@ -31,6 +31,20 @@ export function evidenceChip(kind) {
   if (!e) return "";
   return `<span class="text-[9px] font-semibold px-1 py-px rounded ${e.chip}" title="${e.headline}">${e.label}</span>`;
 }
+
+// Timestamp trust: is this log entry's business time an ESTIMATE rather than a
+// witnessed source timestamp? The server stamps businessAtKind (known/estimated)
+// at derivation; rows from before that stamp existed fall back to the evidence
+// kind — only a create event's time is witnessed by the source (its creation
+// date), every other derived event's time is inferred from last-modified /
+// heuristics. Rows with no evidence at all (simulator steps, live commands)
+// need no qualifier. Estimated times render greyed with a ~ prefix.
+export const EST_TIME_TITLE = "Estimated — the source records that this step happened, but not exactly when. The date shown is inferred from the record's timestamps.";
+export function bizTimeEstimated(entry) {
+  if (!entry) return false;
+  if (entry.businessAtKind) return entry.businessAtKind === "estimated";
+  return entry.evidenceKind != null && entry.evidenceKind !== "create";
+}
 // Faint diagonal hatch so simulated step cards read as "ghosted" vs solid real
 // data (Tailwind has no hatch utility → inline style). "" for real modes.
 export function provHatch(mode) {

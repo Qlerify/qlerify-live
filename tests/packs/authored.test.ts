@@ -145,7 +145,7 @@ describe("ingestPull timing + failure journaling", () => {
       expect(readSidecar(FAIL_ID)?.lastPullAt).toBeUndefined();
     }));
 
-  it("a derive failure after a committed pull is best-effort: no throw, derived null, no 'failed' note", () =>
+  it("a derive failure after a committed pull is best-effort: no throw, derived null, no 'failed' note — but a visible 'note'", () =>
     model.run(async () => {
       deleteDoc(DERIVE_FAIL_ID);
       const c = { ...cfg(writtenPath), id: DERIVE_FAIL_ID };
@@ -157,10 +157,15 @@ describe("ingestPull timing + failure journaling", () => {
       expect(typeof summary.durationMs).toBe("number");
 
       const doc = readDoc(DERIVE_FAIL_ID);
+      // Not a pull failure ("failed" would mislabel the committed run) — but not
+      // silent either: a swallowed derive error once left rows landed with an
+      // empty event log and no trace anywhere of why.
       expect(doc?.notes.some((n) => n.kind === "failed")).toBe(false);
-      const last = doc?.notes[doc.notes.length - 1];
-      expect(last?.kind).toBe("ingested"); // the pull note — rows are committed
-      expect(last?.text).toMatch(/^Ingested /);
+      const [pullNote, deriveNote] = doc?.notes.slice(-2) ?? [];
+      expect(pullNote?.kind).toBe("ingested"); // the pull note — rows are committed
+      expect(pullNote?.text).toMatch(/^Ingested /);
+      expect(deriveNote?.kind).toBe("note");
+      expect(deriveNote?.text).toMatch(/deriving events from them failed: .*derive boom/);
     }));
 
   it("does not create a journal doc for an unknown adapter id (pre-run failure)", async () => {

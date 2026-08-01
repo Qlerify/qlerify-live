@@ -3,7 +3,7 @@
 // from app.js (the largest view module).
 import { state } from "./state.js";
 import { escapeHtml, prettyEntity } from "./format.js";
-import { provChip, provHatch, provModeForBC } from "./chips.js";
+import { EST_TIME_TITLE, bizTimeEstimated, provChip, provHatch, provModeForBC } from "./chips.js";
 import { STATUS_TONE, PHASE_TONE, api, navigate, render } from "./app.js";
 import { attrText, genericColumns, loadFlowRows, loadMeta } from "./dashboard.js";
 import { loadRegistryStatus } from "./model.js";
@@ -93,11 +93,14 @@ export function shortId(id) {
   return String(id).length > 14 ? String(id).slice(0, 8) + "…" : id;
 }
 
-// Build a per-step lookup of the businessAt timestamp recorded when each step fired.
+// Build a per-step lookup of the businessAt timestamp recorded when each step
+// fired, plus whether that time is estimated (see chips.js bizTimeEstimated).
 export function businessByStep() {
-  const m = new Map(); // eventRef → ISO businessAt
+  const m = new Map(); // eventRef → { iso, est }
   for (const entry of state.log) {
-    if (entry.businessAt && !m.has(entry.eventRef)) m.set(entry.eventRef, entry.businessAt);
+    if (entry.businessAt && !m.has(entry.eventRef)) {
+      m.set(entry.eventRef, { iso: entry.businessAt, est: bizTimeEstimated(entry) });
+    }
   }
   return m;
 }
@@ -450,6 +453,7 @@ export function caseFirings(layout) {
     aggId: e.aggregateId || "",
     payload: parsePayload(e.payload),
     businessAt: e.businessAt,
+    est: bizTimeEstimated(e),
     col: layout.place.get(e.eventRef)?.col ?? 0,
   }));
   const aggIds = new Set(firings.map((f) => f.aggId).filter(Boolean));
@@ -551,6 +555,7 @@ export function timeline() {
   const pct = total ? (firedRefs.size / total) * 100 : 0;
   const biz = businessByStep();
   let prevBizIso = null;
+  let prevBizEst = false;
 
   const layout = computeFlowLayout(state.events);
 
@@ -611,13 +616,19 @@ export function timeline() {
     const isPast = fired;
     const open = isExpanded(e.ref);
 
-    const bizIso = biz.get(e.ref);
+    const bz = biz.get(e.ref);
+    const bizIso = bz?.iso;
+    const bizEst = !!bz?.est;
     const bizLabel = fired ? fmtBizDate(bizIso) : null;
     const gapMin = fired && prevBizIso && bizIso ? minutesBetween(prevBizIso, bizIso) : null;
-    if (fired && bizIso) prevBizIso = bizIso;
+    // A gap read off an estimated endpoint is itself an estimate.
+    const gapEst = gapMin != null && (bizEst || prevBizEst);
+    if (fired && bizIso) { prevBizIso = bizIso; prevBizEst = bizEst; }
 
-    // Highlight long gaps (≥10 days) in amber so the supplier-slip moment pops.
-    const gapTone = gapMin != null && gapMin >= 10 * 1440 ? "text-amber-700 font-semibold" : "text-stone-500";
+    // Highlight long gaps (≥10 days) in amber so the supplier-slip moment pops —
+    // unless an endpoint is estimated: an alarm colour on an inferred number
+    // would signal false confidence, so estimated gaps stay muted and ~-prefixed.
+    const gapTone = gapMin != null && gapMin >= 10 * 1440 && !gapEst ? "text-amber-700 font-semibold" : "text-stone-500";
 
     // Each step's source mode = its bounded context's configured mode.
     const provMode = provModeForBC(e.boundedContext);
@@ -628,24 +639,35 @@ export function timeline() {
     let footer = "";
     if (open) {
       let prevIso = null;
+      let prevEst = false;
       const rows = (firingsByRef.get(e.ref) || []).map((f, k) => {
+        const est = bizTimeEstimated(f);
         const d = fmtBizDate(f.businessAt) ?? "—";
         const g = prevIso && f.businessAt ? minutesBetween(prevIso, f.businessAt) : null;
-        if (f.businessAt) prevIso = f.businessAt;
-        const gt = g != null && g >= 10 * 1440 ? "text-amber-700 font-semibold" : "text-stone-500";
+        const ge = g != null && (est || prevEst);
+        if (f.businessAt) { prevIso = f.businessAt; prevEst = est; }
+        const gt = g != null && g >= 10 * 1440 && !ge ? "text-amber-700 font-semibold" : "text-stone-500";
+        const dateHtml = est
+          ? `<span class="mono italic text-stone-400" title="${EST_TIME_TITLE}">~${d}</span>`
+          : `<span class="mono font-medium">${d}</span>`;
         return `<div class="flex items-baseline justify-between gap-1 leading-none py-0.5">
-            <span class="text-stone-700"><span class="text-stone-400 tabular-nums mr-1">${k + 1}.</span><span class="mono font-medium">${d}</span></span>
-            ${g != null && g > 0 ? `<span class="${gt}">${fmtGap(g)}</span>` : ""}
+            <span class="text-stone-700"><span class="text-stone-400 tabular-nums mr-1">${k + 1}.</span>${dateHtml}</span>
+            ${g != null && g > 0 ? `<span class="${gt}">${ge ? "~" : ""}${fmtGap(g)}</span>` : ""}
           </div>`;
       }).join("");
       footer = `<div class="mt-1.5 pt-1.5 border-t border-stone-100 flex-1 min-h-0 overflow-y-auto text-[10px]">${rows}</div>
         <button data-split-ref="${e.ref}" title="Give each execution its own full box and branch downstream"
           class="mt-1 shrink-0 w-full text-[9px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded px-1 py-0.5 leading-none">⑂ Split into ${firedCounts.get(e.ref)} branches</button>`;
     } else if (fired) {
+      const dateHtml = bizLabel == null
+        ? `<span class="text-stone-700 font-medium mono">—</span>`
+        : bizEst
+          ? `<span class="text-stone-400 italic mono" title="${EST_TIME_TITLE}">~${bizLabel}</span>`
+          : `<span class="text-stone-700 font-medium mono">${bizLabel}</span>`;
       footer = `
           <div class="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
-            <span class="text-stone-700 font-medium mono">${bizLabel ?? "—"}</span>
-            ${gapMin != null && gapMin > 0 ? `<span class="${gapTone}">${fmtGap(gapMin)}</span>` : ""}
+            ${dateHtml}
+            ${gapMin != null && gapMin > 0 ? `<span class="${gapTone}">${gapEst ? "~" : ""}${fmtGap(gapMin)}</span>` : ""}
           </div>`;
     }
 
@@ -720,8 +742,11 @@ export function timeline() {
 }
 
 // Provenance legend + "last event" strip shared by the flow and branch views.
+// When any step's business time is an estimate, the legend explains the ~date
+// styling so a greyed timestamp is self-describing.
 export function timelineLegend() {
   const prov = state.meta.provenance;
+  const hasEst = (state.log || []).some(bizTimeEstimated);
   return `
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
         ${prov ? `
@@ -729,6 +754,7 @@ export function timelineLegend() {
         <span class="flex items-center gap-1">${provChip("live")} live</span>
         <span class="flex items-center gap-1">${provChip("recorded")} recorded</span>
         <span class="flex items-center gap-1">${provChip("simulated")} simulated</span>` : ""}
+        ${hasEst ? `<span class="flex items-center gap-1" title="${EST_TIME_TITLE}"><span class="mono italic text-stone-400">~date</span> = estimated time</span>` : ""}
         ${lastEventInline()}
       </div>`;
 }
@@ -779,12 +805,15 @@ export function splitTimelineView(layout, splitRef, firedCounts) {
     const f = n.f;
     const ev = eventByRef.get(f.ref);
     const label = f.payload.name || f.payload.title || shortId(f.aggId);
-    const date = fmtBizDate(f.businessAt) ?? "—";
+    const date = fmtBizDate(f.businessAt);
+    const dateHtml = date == null ? "—" : f.est
+      ? `<span class="italic text-stone-400" title="${EST_TIME_TITLE}">~${date}</span>`
+      : date;
     return `<div class="absolute rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 flex flex-col overflow-hidden shadow-sm"
          style="left:${xOf(f.col)}px; top:${yOf(n.row)}px; width:${cardW}px; height:${cardH}px;">
         <div class="text-[9px] text-stone-500 truncate">${ev ? escapeHtml(ev.name) : escapeHtml(f.ref.split("/").pop())}</div>
         <div class="text-[11px] font-semibold leading-tight text-stone-800 truncate" title="${escapeHtml(String(label))}">${escapeHtml(String(label))}</div>
-        <div class="mt-auto text-[9px] text-stone-500 mono">${date}</div>
+        <div class="mt-auto text-[9px] text-stone-500 mono">${dateHtml}</div>
       </div>`;
   }).join("");
 

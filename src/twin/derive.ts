@@ -32,7 +32,10 @@
 //
 // The derived event carries the ROW's provenance (recorded/live/simulated) — a
 // real ingested Account yields a real-looking AccountRegistered. The only thing
-// "simulated" is the ordering/timing (businessAt), which is nominal.
+// "simulated" is the ordering/timing (businessAt), which is nominal — except a
+// create event anchored to the connector's declared creation date, whose time IS
+// witnessed. That split is stamped per event as businessAtKind known/estimated
+// (see eventBaseDate) so the UI can show which timestamps to trust.
 //
 // SHAPE: planDerivation() is the PURE model-driven core (no DB, no I/O) — given
 // an ontology and the rows per entity it returns exactly which events would fire
@@ -260,13 +263,19 @@ function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date {
  * When no roles are declared (or the named column is empty/unparseable) it falls
  * back to rowBaseDate's model heuristic, so behaviour is unchanged for connectors
  * that set no roles. The caller still adds the order-index offset, which keeps
- * multiple events sharing one anchor (two updates, or create==update) ordered. */
+ * multiple events sharing one anchor (two updates, or create==update) ordered.
+ *
+ * `known` says whether that date is a WITNESSED time for this event, not just the
+ * best estimate. Only the create shape qualifies: the source's creation date is by
+ * definition when the row (and so its create event) came into being. An update
+ * event's time is always inferred — even a real last-modified only bounds it (the
+ * row may have changed again since), and every fallback is a heuristic. */
 function eventBaseDate(
   kind: EvidenceKind,
   row: Record<string, unknown>,
   entity: EntitySchema,
   roles: { created?: string; updated?: string } | undefined,
-): Date {
+): { date: Date; known: boolean } {
   const fromRole = (field?: string): Date | null => {
     if (!field || !present(row[field])) return null;
     const d = new Date(String(row[field]));
@@ -275,13 +284,13 @@ function eventBaseDate(
   if (roles) {
     if (kind === "create") {
       const d = fromRole(roles.created);
-      if (d) return d;
+      if (d) return { date: d, known: true };
     } else if (kind === "status" || kind === "fields") {
       const d = fromRole(roles.updated) ?? fromRole(roles.created);
-      if (d) return d;
+      if (d) return { date: d, known: false };
     }
   }
-  return rowBaseDate(row, entity);
+  return { date: rowBaseDate(row, entity), known: false };
 }
 
 function rowProvenance(row: Record<string, unknown>): ProvMode | undefined {
@@ -353,6 +362,9 @@ interface PlannedEmission {
   role: string;
   payload: Record<string, unknown>;
   businessAt: Date;
+  /** True when a source timestamp witnesses this event's time (see eventBaseDate);
+   * false = businessAt is inferred and should read as an estimate. */
+  businessAtKnown: boolean;
   provenance?: ProvMode;
   evidence: string;
 }
@@ -420,12 +432,14 @@ export function planDerivation(
         }
         reason = ev.reason;
       }
+      const base = eventBaseDate(kind, row, entity, roles);
       fired.push({
         ref: event.ref,
         aggregateId: id,
         role: event.role,
         payload: buildPayload(kind, event, row, entity, ont),
-        businessAt: new Date(eventBaseDate(kind, row, entity, roles).getTime() + oi * 1000),
+        businessAt: new Date(base.date.getTime() + oi * 1000),
+        businessAtKnown: base.known,
         provenance: rowProvenance(row),
         evidence: reason,
       });
@@ -550,6 +564,7 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
           evidenceKind: plan.kind,
           evidence: e.evidence,
           businessAt: e.businessAt,
+          businessAtKind: e.businessAtKnown ? "known" : "estimated",
           caseId,
         });
       }

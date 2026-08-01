@@ -26,6 +26,10 @@ export interface EmittedEvent {
   // for synthetic/simulator-stepped events, which have no row-state evidence.
   evidenceKind?: string;
   evidence?: string;
+  // How trustworthy businessAt is: "known" (a source timestamp directly anchors
+  // this event) or "estimated" (inferred — ordering right, moment nominal).
+  // Omitted for simulator/live events, whose time needs no qualifier.
+  businessAtKind?: "known" | "estimated";
 }
 
 // Scope override: the generic simulator runs every command of one "run" with the
@@ -136,6 +140,7 @@ function eventRow(
     payload: JSON.stringify(ev.payload),
     ...(occurredAt ? { occurredAt } : {}),
     businessAt,
+    businessAtKind: ev.businessAtKind ?? null,
     provenance,
     evidenceKind: ev.evidenceKind ?? null,
     evidence: ev.evidence ?? null,
@@ -166,7 +171,7 @@ export interface BatchEvent extends EmittedEvent {
   caseId: string | null;
 }
 
-// SQLite bind-variable budget: ~18 columns per EventLog row must stay under the
+// SQLite bind-variable budget: ~19 columns per EventLog row must stay under the
 // engine's variable cap (999 on conservative builds), so 50 rows per INSERT.
 const EMIT_CHUNK = 50;
 

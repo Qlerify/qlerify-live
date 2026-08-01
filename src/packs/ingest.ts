@@ -144,8 +144,16 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
       if (r.totalEmitted > 0) {
         appendNote(adapter.id, "ingested", `Derived ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the data.`, { durationMs: r.durationMs });
       }
-    } catch {
-      /* ingest succeeded; leave derivation to the next pull if it failed here */
+    } catch (e: any) {
+      // The rows ARE committed, so this is not a pull failure ("failed" would
+      // mislabel the run) — but it must not vanish either: a fully silent skip
+      // here once hid a broken emit path for hours (rows landed, event log stayed
+      // empty, nothing anywhere said why). Journal it as a note; the next pull or
+      // POST /sim/derive retries.
+      try {
+        const msg = String(e?.message ?? e).slice(0, 300);
+        appendNote(adapter.id, "note", `Rows landed, but deriving events from them failed: ${msg} — retried on the next pull or POST /sim/derive.`);
+      } catch { /* ignore journaling errors */ }
     }
   }
   return { adapterId: adapter.id, entity: adapter.targetEntity, inserted, skipped, mode: adapter.mode, derived, durationMs, fetchMs };

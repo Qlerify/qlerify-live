@@ -133,7 +133,14 @@ export function deriveNameFromModel(workflowJson: string, overlayJson: string | 
  * the hash-chained audit log). Null when nothing survives. */
 export function sanitizeWorkflowName(raw: string | null | undefined): string | null {
   if (typeof raw !== "string") return null;
-  const cleaned = raw.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\s+/g, " ").trim().slice(0, 200).trimEnd();
+  const cleaned = raw
+    .replace(/\s+/g, " ") // FIRST, so \t \n \r become separators, not deletions
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .replace(/ {2,}/g, " ") // a control stripped between two spaces leaves a double
+    .trim()
+    .slice(0, 200)
+    .replace(/[\uD800-\uDBFF]$/, "") // never cut a surrogate pair in half
+    .trimEnd();
   return cleaned || null;
 }
 

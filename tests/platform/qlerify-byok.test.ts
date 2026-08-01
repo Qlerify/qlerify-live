@@ -161,8 +161,20 @@ describe("sanitizeWorkflowName", () => {
     expect(sanitizeWorkflowName("  Order \n\t Fulfilment  ")).toBe("Order Fulfilment");
   });
 
-  it("caps the length at 200", () => {
+  it("turns a bare newline/tab separator into a space (not a deletion)", () => {
+    expect(sanitizeWorkflowName("Q3\nForecast")).toBe("Q3 Forecast");
+    expect(sanitizeWorkflowName("Order\tFulfilment")).toBe("Order Fulfilment");
+  });
+
+  it("leaves no double space where a control sat between two spaces", () => {
+    expect(sanitizeWorkflowName("a \u0007 b")).toBe("a b");
+  });
+
+  it("caps the length at 200 without cutting a surrogate pair in half", () => {
     expect(sanitizeWorkflowName("x".repeat(5000))!.length).toBe(200);
+    const emoji = sanitizeWorkflowName("a" + "🍕".repeat(120))!;
+    expect(emoji.length).toBeLessThanOrEqual(200);
+    expect(/[\uD800-\uDBFF]$/.test(emoji)).toBe(false);
   });
 
   it("is null for blank or non-string input", () => {

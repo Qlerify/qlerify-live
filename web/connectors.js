@@ -3,7 +3,7 @@
 
 import { state } from "./state.js";
 import { escapeHtml } from "./format.js";
-import { api, render } from "./app.js";
+import { api, apiDownload, render } from "./app.js";
 import { NOTE_BADGE, connectorName } from "./explorer.js";
 import { formatVersionDate } from "./model.js";
 
@@ -167,7 +167,7 @@ ${timestampsSection}
           ? `<div class="text-sm text-stone-600 mt-2 italic">${escapeHtml(c.summary)}</div>`
           : `<div class="text-sm text-stone-400 mt-2 italic">No description yet — build the connector to generate one.</div>`}
         ${orphan ? `<div class="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">Its target table <b>${escapeHtml(c.targetEntity)}</b> no longer exists in the model — likely renamed or removed. It can't ingest until you <b>re-point</b> it at a current table (or delete it).</div>` : ""}
-        <div class="flex items-center gap-1 mt-4">${tabBtn("details", "Details")}${tabBtn("code", "Code")}</div>
+        <div class="flex items-center gap-1 mt-4">${tabBtn("details", "Details")}${tabBtn("code", "Code")}<button id="conn-export-btn" ${state.connBusy ? "disabled" : ""} class="ml-auto px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Download this connector as a portable JSON backup — config, code, and credential field names (never secret values)">⬇ Export</button></div>
       </div>
       ${tab === "code" ? connCodeBody(c) : detailsBody}
     </div>`;
@@ -214,6 +214,9 @@ export function connectorsView() {
   return `
     <main class="flex-1 flex min-h-0">
       <div class="w-[340px] border-r border-stone-200 overflow-y-auto bg-white">
+        <div class="flex items-center justify-end px-3 py-2 border-b border-stone-200 bg-stone-50">
+          <button id="conn-export-all-btn" ${state.connBusy ? "disabled" : ""} class="px-3 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Download every connector in this workflow as one portable JSON backup — config, code, and credential field names (never secret values)">⬇ Export all (${list.length})</button>
+        </div>
         ${section("Needs attention", orphaned, "text-rose-600 font-semibold")}
         ${section("Active", active, "text-stone-500")}
       </div>
@@ -231,6 +234,8 @@ export function bindConnectors() {
   document.getElementById("conn-verify")?.addEventListener("click", connVerify);
   document.getElementById("conn-test")?.addEventListener("click", connTest);
   document.getElementById("conn-delete-btn")?.addEventListener("click", connDelete);
+  document.getElementById("conn-export-btn")?.addEventListener("click", connExport);
+  document.getElementById("conn-export-all-btn")?.addEventListener("click", connExportAll);
   document.getElementById("conn-code-save")?.addEventListener("click", connCodeSave);
   document.getElementById("conn-code-revert")?.addEventListener("click", connCodeRevert);
   mountConnCode(); // (re)attach or lazily build the Monaco editor if the Code tab is open
@@ -245,6 +250,10 @@ export function bindConnectors() {
 // able div Monaco mounts into; we move it between successive #conn-code-mount nodes.
 let connMonaco = null;
 let connMonacoBusy = false;   // guards against concurrent (re)builds while loading
+// True only while a code SAVE is in flight. The toolbar's "Saving…" label keys off
+// this, not state.connBusy — other busy ops (export, verify) can run while the
+// Code tab is mounted and must not masquerade as a save.
+let connCodeSaving = false;
 let monacoLoaderPromise = null;
 
 function makeNode(tag, className, text) {
@@ -357,8 +366,8 @@ function updateConnCodeStatus() {
   if (saveBtn) saveBtn.disabled = !dirty || state.connBusy;
   if (revertBtn) revertBtn.disabled = !dirty || state.connBusy;
   if (status) {
-    status.textContent = state.connBusy ? "Saving…" : (dirty ? "● Unsaved changes" : "Saved");
-    status.className = "text-xs ml-auto shrink-0 " + (dirty && !state.connBusy ? "text-amber-600" : "text-stone-400");
+    status.textContent = connCodeSaving ? "Saving…" : (dirty ? "● Unsaved changes" : "Saved");
+    status.className = "text-xs ml-auto shrink-0 " + (dirty && !connCodeSaving ? "text-amber-600" : "text-stone-400");
   }
 }
 
@@ -376,17 +385,17 @@ async function connCodeSave() {
   const code = connMonaco.editor.getValue();
   if (code === connMonaco.savedCode) return;
   if (!confirm(`Save and register this code for connector "${connectorName(c)}"?\n\nIt runs in the connector sandbox on the next Test or Fetch. Any npm packages it imports are installed now. This does not pull data yet.`)) return;
-  state.connBusy = true; updateConnCodeStatus();
+  state.connBusy = true; connCodeSaving = true; updateConnCodeStatus();
   try {
     const r = await api(`/api/connectors/${encodeURIComponent(c.id)}/code`, { method: "POST", body: JSON.stringify({ code }) });
     connMonaco.savedCode = code;
-    state.connBusy = false;
+    state.connBusy = false; connCodeSaving = false;
     await loadConnectors(); // refresh deps/hasCode/history on the Details tab (re-renders; the editor host is re-attached)
     const pkgs = (r.deps || []).length ? `Installed/checked packages: ${(r.deps || []).join(", ")}.` : "No external packages imported.";
     const failed = r.install && r.install.ok === false ? `\n\n⚠ Package install reported a problem:\n${r.install.log || ""}` : "";
     alert(`Saved ${r.bytes} byte(s). ${pkgs}${failed}\n\nTest it (Details → Test, or Fetch rows) to run it.`);
   } catch (e) {
-    state.connBusy = false;
+    state.connBusy = false; connCodeSaving = false;
     updateConnCodeStatus();
     alert("Save failed: " + (e?.message || e));
   }
@@ -478,6 +487,33 @@ async function connDelete() {
     alert(`Connector "${name}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s).`);
   } catch (e) {
     alert("Delete failed: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+// Download a portable JSON backup of the selected connector (config + code +
+// credential field names — never secret values). Non-destructive, so no confirm.
+async function connExport() {
+  const id = state.connSel;
+  if (!id || state.connBusy) return;
+  state.connBusy = true; render();
+  try {
+    await apiDownload(`/api/connectors/${encodeURIComponent(id)}/export`, `qlerify-connector-${id}.json`);
+  } catch (e) {
+    alert("Export failed: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+async function connExportAll() {
+  if (state.connBusy) return;
+  state.connBusy = true; render();
+  try {
+    await apiDownload("/api/connectors/export", "qlerify-connectors.json");
+  } catch (e) {
+    alert("Export failed: " + e.message);
   } finally {
     state.connBusy = false; render();
   }

@@ -1,7 +1,9 @@
 // Workflow-scoped connector management (the "Connectors" tab). A PROJECTION over
 // the connector sidecars + journal + projection store — no new source of truth.
-// Three operations, all scoped to the ACTIVE workflow:
-//   GET  /api/connectors            — inventory (active + orphaned) + the re-point picker
+// All operations are scoped to the ACTIVE workflow:
+//   GET  /api/connectors             — inventory (active + orphaned) + the re-point picker
+//   GET  /api/connectors/export      — portable backup of every connector (download)
+//   GET  /api/connectors/:id/export  — portable backup of one connector (download)
 //   POST /api/connectors/:id/repoint — change which table a connector populates (I1-guarded)
 //   POST /api/connectors/:id/delete  — full teardown (code + creds + data + events + history)
 //
@@ -23,9 +25,18 @@ import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/c
 import { registerAdapter } from "../packs/registry.js";
 import { writeSidecar } from "../packs/sidecar.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
+import { buildConnectorExport } from "../packs/connector/export.js";
 import { tableExists, countRows } from "../twin/projection-store.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { guardData } from "../platform/authz.js";
+
+/** `attachment; filename="<stem>-YYYY-MM-DD.json"` — stem sanitized so a hostile
+ * connector id can't inject header syntax into Content-Disposition. */
+function exportDisposition(stem: string): string {
+  const safe = stem.replace(/[^A-Za-z0-9._-]/g, "_");
+  const date = new Date().toISOString().slice(0, 10);
+  return `attachment; filename="${safe}-${date}.json"`;
+}
 
 export function registerConnectorRoutes(app: FastifyInstance): void {
   // Inventory for the active workflow + the available tables (with occupancy) the
@@ -68,6 +79,42 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
         ...o.valueObjects.map((v) => ({ name: v.name, kind: "valueObject" as const })),
       ].map((t) => ({ ...t, occupiedBy: connectorForTarget(t.name, wf)?.id ?? null }));
       return { connectors, tables };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Portable backup of EVERY connector in the active workflow, as a downloadable
+  // versioned envelope (see packs/connector/export.ts for what's included and
+  // what's deliberately stripped). Secrets never leave: credential field NAMES
+  // only. `connector.read` — config + code is the same kill-switch-covered
+  // disclosure surface as the /code GET. An empty workflow yields a valid empty
+  // envelope (an empty backup is not an error). No /:id conflict: Fastify's
+  // router prefers the static "export" segment over a param.
+  app.get("/api/connectors/export", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      reply.header("Content-Disposition", exportDisposition("qlerify-connectors"));
+      return buildConnectorExport(connectorsInWorkflow(wf));
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Same envelope with a single entry. Workflow-scoped: foreign and unknown ids
+  // get the identical 404 (no cross-tenant existence oracle).
+  app.get("/api/connectors/:id/export", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      reply.header("Content-Disposition", exportDisposition(`qlerify-connector-${id}`));
+      return buildConnectorExport([cfg]);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

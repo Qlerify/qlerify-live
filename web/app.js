@@ -128,6 +128,27 @@ export async function api(path, opts = {}) {
   return res.json();
 }
 
+// GET an attachment and hand it to the browser as a file download. Must go through
+// fetch (not a plain <a href>): the bearer token lives in localStorage and is only
+// attached by apiHeaders(), so a bare navigation would 401. The server names the
+// file via Content-Disposition; fallbackName covers a missing/unparsable header.
+export async function apiDownload(path, fallbackName) {
+  const res = await fetch(API + path, { cache: "no-store", headers: apiHeaders() });
+  if (!res.ok) await throwApiError(res, path);
+  const blob = await res.blob();
+  const cd = res.headers.get("content-disposition") || "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Deferred: revoking synchronously can cancel the still-starting download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // Streaming POST for long-running requests (the chat agent turn). Parses an SSE
 // response, invoking onEvent(name, data) per event; resolves with the "result"
 // event's data, throws on an "error" event. Extras over api():

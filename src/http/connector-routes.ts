@@ -4,6 +4,7 @@
 //   GET  /api/connectors             — inventory (active + orphaned) + the re-point picker
 //   GET  /api/connectors/export      — portable backup of every connector (download)
 //   GET  /api/connectors/:id/export  — portable backup of one connector (download)
+//   POST /api/connectors/import      — recreate connectors from an export envelope
 //   POST /api/connectors/:id/repoint — change which table a connector populates (I1-guarded)
 //   POST /api/connectors/:id/delete  — full teardown (code + creds + data + events + history)
 //
@@ -26,6 +27,7 @@ import { registerAdapter } from "../packs/registry.js";
 import { writeSidecar } from "../packs/sidecar.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
 import { buildConnectorExport } from "../packs/connector/export.js";
+import { parseConnectorExport, importConnectors } from "../packs/connector/import.js";
 import { tableExists, countRows } from "../twin/projection-store.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { guardData } from "../platform/authz.js";
@@ -115,6 +117,28 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
       reply.header("Content-Disposition", exportDisposition(`qlerify-connector-${id}`));
       return buildConnectorExport([cfg]);
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Restore/share counterpart of export: recreate the envelope's connectors in
+  // the ACTIVE workflow, per-entry (one conflict doesn't sink the file — see
+  // packs/connector/import.ts for the skip/rename policy). `connector.build`:
+  // imported code runs in the connector sandbox, so this IS the RCE surface,
+  // exactly like saving hand-edited code. bodyLimit raised above the 1MB
+  // default: an envelope bundles whole connector modules.
+  app.post("/api/connectors/import", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      let envelope;
+      try {
+        envelope = parseConnectorExport(req.body);
+      } catch (e) {
+        return reply.code(400).send({ error: "BAD_ENVELOPE", message: (e as Error).message });
+      }
+      return await importConnectors(envelope);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

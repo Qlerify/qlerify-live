@@ -202,6 +202,8 @@ export function connectorsView() {
         <div class="text-3xl mb-2">🔌</div>
         <div class="text-lg font-semibold text-stone-800">No connectors yet</div>
         <div class="text-sm text-stone-500 mt-1">Build one in <a href="#bcs" class="text-sky-700 hover:underline">Systems</a>: pick a table and choose “Build connector with AI”. Connectors show up here for management and re-pointing.</div>
+        <button id="conn-import-btn" ${state.connBusy ? "disabled" : ""} class="mt-4 px-4 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Restore connectors from a previously exported JSON backup">⬆ Import from backup</button>
+        <input type="file" id="conn-import-file" accept=".json,application/json" class="hidden">
       </div>
     </main>`;
   }
@@ -214,8 +216,10 @@ export function connectorsView() {
   return `
     <main class="flex-1 flex min-h-0">
       <div class="w-[340px] border-r border-stone-200 overflow-y-auto bg-white">
-        <div class="flex items-center justify-end px-3 py-2 border-b border-stone-200 bg-stone-50">
+        <div class="flex items-center justify-end gap-2 px-3 py-2 border-b border-stone-200 bg-stone-50">
+          <button id="conn-import-btn" ${state.connBusy ? "disabled" : ""} class="px-3 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Import connectors from a previously exported JSON backup — conflicts are skipped, never overwritten">⬆ Import</button>
           <button id="conn-export-all-btn" ${state.connBusy ? "disabled" : ""} class="px-3 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" title="Download every connector in this workflow as one portable JSON backup — config, code, and credential field names (never secret values)">⬇ Export all (${list.length})</button>
+          <input type="file" id="conn-import-file" accept=".json,application/json" class="hidden">
         </div>
         ${section("Needs attention", orphaned, "text-rose-600 font-semibold")}
         ${section("Active", active, "text-stone-500")}
@@ -236,6 +240,8 @@ export function bindConnectors() {
   document.getElementById("conn-delete-btn")?.addEventListener("click", connDelete);
   document.getElementById("conn-export-btn")?.addEventListener("click", connExport);
   document.getElementById("conn-export-all-btn")?.addEventListener("click", connExportAll);
+  document.getElementById("conn-import-btn")?.addEventListener("click", () => document.getElementById("conn-import-file")?.click());
+  document.getElementById("conn-import-file")?.addEventListener("change", connImportFile);
   document.getElementById("conn-code-save")?.addEventListener("click", connCodeSave);
   document.getElementById("conn-code-revert")?.addEventListener("click", connCodeRevert);
   mountConnCode(); // (re)attach or lazily build the Monaco editor if the Code tab is open
@@ -514,6 +520,50 @@ async function connExportAll() {
     await apiDownload("/api/connectors/export", "qlerify-connectors.json");
   } catch (e) {
     alert("Export failed: " + e.message);
+  } finally {
+    state.connBusy = false; render();
+  }
+}
+
+// Restore connectors from an exported envelope. The server decides per entry
+// (imported / skipped with a reason) and NEVER overwrites — so feeding it a
+// backup twice is safe. Secrets are not in the file; the summary tells the
+// operator which connectors need credentials re-entered.
+async function connImportFile(ev) {
+  const file = ev.target.files?.[0];
+  ev.target.value = ""; // allow re-picking the same file after a fix
+  if (!file || state.connBusy) return;
+  // Busy BEFORE the first await (file.text() can stall on a cloud-placeholder
+  // file) — same mutual exclusion discipline as every other handler here.
+  state.connBusy = true; render();
+  try {
+    let text;
+    try {
+      text = await file.text();
+      JSON.parse(text); // fail fast on a non-JSON pick, before any request
+    } catch {
+      alert(`"${file.name}" is not a valid JSON file.`);
+      return;
+    }
+    const r = await api("/api/connectors/import", { method: "POST", body: text });
+    await loadConnectors();
+    const okLine = r.imported.length
+      ? `Imported ${r.imported.length} connector(s): ${r.imported.map((c) => c.id + (c.originalId ? ` (renamed from ${c.originalId})` : "")).join(", ")}.`
+      : "Nothing imported.";
+    const skipLine = r.skipped.length
+      ? `\n\nSkipped ${r.skipped.length}:\n${r.skipped.map((s) => `• ${s.id} — ${s.message}`).join("\n")}`
+      : "";
+    const badInstall = r.imported.filter((c) => c.install && c.install.ok === false);
+    const installLine = badInstall.length
+      ? `\n\n⚠ Package install failed for: ${badInstall.map((c) => c.id).join(", ")} — open the connector's Code tab and Save to retry, or Test to see the error.`
+      : "";
+    const needCreds = r.imported.filter((c) => (c.credentialKeys || []).length);
+    const credLine = needCreds.length
+      ? `\n\n⚠ Secrets are never included in a backup. Re-enter credentials for: ${needCreds.map((c) => `${c.id} (${c.credentialKeys.join(", ")})`).join("; ")} — ask the chat to set them.`
+      : "";
+    alert(okLine + skipLine + installLine + credLine);
+  } catch (e) {
+    alert("Import failed: " + e.message);
   } finally {
     state.connBusy = false; render();
   }

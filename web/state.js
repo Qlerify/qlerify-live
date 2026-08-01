@@ -57,6 +57,11 @@ export const state = {
   chatMessages: [],      // Anthropic.MessageParam[] — the ACTIVE thread (advisor or connector)
   chatInput: "",
   chatBusy: false,
+  // Live progress of the in-flight turn, fed by the /chat SSE stream:
+  // { startedAt, activity, tool, iteration, toolsDone }. Painted via direct DOM
+  // writes (updateChatProgressDom) — NOT full render() — so a streaming update
+  // can't steal focus from the input mid-typing. null when idle.
+  chatProgress: null,
   chatInfo: null,        // { model, effort, apiKeyConfigured, ... }
   chatError: null,
   detailPanelMode: "chat",   // detail-view sidebar tab: "chat" (advisor) | "log" (event log)

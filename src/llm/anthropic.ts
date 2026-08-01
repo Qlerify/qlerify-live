@@ -32,6 +32,17 @@ import { decryptSecret, maskSecret } from "../platform/secrets/secret-box.js";
 
 const DEFAULT_MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 
+// The SDK default is 10 minutes per attempt — one wedged provider request would
+// hold an agent turn (and its HTTP connection) far past any user's patience.
+// 3 minutes comfortably covers the largest call we make (4096 max_tokens);
+// override for unusually slow deployments. Applies per attempt, on top of the
+// SDK's own retries.
+const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
+const LLM_CLIENT_OPTS = { timeout: LLM_TIMEOUT_MS, maxRetries: 2 } as const;
+// Validate-on-save makes a 1-token call and renders a spinner in the admin UI —
+// fail fast rather than retry long.
+const LLM_VALIDATE_OPTS = { timeout: 30_000, maxRetries: 1 } as const;
+
 export type LlmProvider = "anthropic" | "bedrock";
 type AnthropicSource = "org" | "platform";
 
@@ -142,7 +153,7 @@ function buildPlatformAnthropicClient(): ResolvedAnthropic {
         "default), or configure your organization's own AI provider in Organisation admin.",
     );
   }
-  return { client: new Anthropic(), model: DEFAULT_MODEL, source: "platform", provider: "anthropic" };
+  return { client: new Anthropic({ ...LLM_CLIENT_OPTS }), model: DEFAULT_MODEL, source: "platform", provider: "anthropic" };
 }
 
 /** Passed to every AnthropicBedrock so the platform's first-party key can
@@ -161,7 +172,7 @@ function buildPlatformBedrockClient(): ResolvedAnthropic {
   // AnthropicBedrock is a sibling BaseAnthropic subclass exposing the identical
   // `.messages.create` surface every caller uses — the cast keeps this seam typed as
   // Anthropic without threading a client union through the five call sites.
-  const client = new AnthropicBedrock({ awsRegion: region, ...BEDROCK_STRIP_FIRST_PARTY_KEY }) as unknown as Anthropic;
+  const client = new AnthropicBedrock({ awsRegion: region, ...LLM_CLIENT_OPTS, ...BEDROCK_STRIP_FIRST_PARTY_KEY }) as unknown as Anthropic;
   return { client, model, source: "platform", provider: "bedrock" };
 }
 
@@ -219,7 +230,7 @@ function orgFingerprint(org: OrgLlmRow): string {
 
 function buildOrgAnthropicClient(org: OrgLlmRow): ResolvedAnthropic {
   return {
-    client: new Anthropic({ apiKey: decryptSecret(org.anthropicKeyCiphertext!) }),
+    client: new Anthropic({ apiKey: decryptSecret(org.anthropicKeyCiphertext!), ...LLM_CLIENT_OPTS }),
     model: org.anthropicModel ?? DEFAULT_MODEL,
     source: "org",
     provider: "anthropic",
@@ -234,6 +245,7 @@ function buildOrgBedrockClient(org: OrgLlmRow): ResolvedAnthropic {
     awsRegion: org.bedrockRegion!,
     awsAccessKey: org.bedrockAccessKeyId!,
     awsSecretKey: decryptSecret(org.bedrockSecretCiphertext!),
+    ...LLM_CLIENT_OPTS,
     ...BEDROCK_STRIP_FIRST_PARTY_KEY,
   }) as unknown as Anthropic;
   return { client, model: org.bedrockModel!, source: "org", provider: "bedrock" };
@@ -350,7 +362,7 @@ export async function resolveAnthropicStatus(orgId: string | null = currentOrgId
  * failure so a bad key is rejected before it is ever persisted. */
 export async function validateAnthropicKey(apiKey: string, model?: string): Promise<void> {
   try {
-    await new Anthropic({ apiKey }).messages.create({
+    await new Anthropic({ apiKey, ...LLM_VALIDATE_OPTS }).messages.create({
       model: model || DEFAULT_MODEL,
       max_tokens: 1,
       messages: [{ role: "user", content: "ping" }],
@@ -375,6 +387,7 @@ export async function validateBedrockConfig(
       awsRegion: region,
       awsAccessKey: accessKeyId,
       awsSecretKey: secretAccessKey,
+      ...LLM_VALIDATE_OPTS,
       ...BEDROCK_STRIP_FIRST_PARTY_KEY,
     }).messages.create({
       model,

@@ -361,27 +361,84 @@ export function registerRoutes(app: FastifyInstance) {
     };
   });
 
+  // An agent turn can span many model calls + tool executions (minutes for a
+  // connector build→test→ingest), so the response is an SSE stream: one
+  // "progress" event per model/tool call, a final "result" (the full turn) or
+  // "error" event, and comment heartbeats so proxies don't idle the connection
+  // out mid-turn. Validation failures reply as plain JSON before streaming
+  // starts; the client handles both shapes.
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as { messages?: unknown };
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       return reply.code(400).send({ error: "messages[] required, must be non-empty" });
     }
+
+    // Take over the raw socket. Headers accumulated by hooks (CORS) live on the
+    // reply, not the raw response — carry them over or a cross-origin web build
+    // could not read the stream. JSON.stringify keeps each data line \n-free
+    // (control chars escaped), which SSE framing requires.
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      ...reply.getHeaders(),
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no", // nginx: pass events through unbuffered
+    } as import("node:http").OutgoingHttpHeaders);
+    let closed = false;
+    const send = (event: string, data: unknown) => {
+      if (!closed) raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    const heartbeat = setInterval(() => { if (!closed) raw.write(": hb\n\n"); }, 15_000);
+    // Client gone (Stop button, closed tab, dead network): stop the server-side
+    // work too — abort the in-flight provider call and halt the loop.
+    const abort = new AbortController();
+    raw.on("close", () => {
+      closed = true;
+      clearInterval(heartbeat);
+      abort.abort();
+    });
+    // A write racing the disconnect can emit 'error' on the response stream;
+    // unhandled that would crash the process — treat it as a close.
+    raw.on("error", () => { closed = true; });
+    // The client may have disconnected between body parsing and the handler
+    // (the post-parse hook phase), BEFORE the listener above attached — 'close'
+    // has already fired then and won't re-fire. Don't start a full agent turn
+    // for a dead socket.
+    if (raw.destroyed || raw.socket?.destroyed) {
+      closed = true;
+      clearInterval(heartbeat);
+      abort.abort();
+    }
+
     try {
-      const result = await runAgentTurn(body.messages as any);
-      // Use JSON.stringify explicitly — Fastify's default serializer was
+      const result = await runAgentTurn(body.messages as any, {
+        signal: abort.signal,
+        onProgress: (p) => send("progress", p),
+      });
+      // Explicit JSON.stringify (via send) — Fastify's default serializer was
       // emitting raw 0x0a inside nested string fields in some cases.
-      return reply.type("application/json").send(JSON.stringify(result));
+      send("result", result);
     } catch (e: any) {
-      req.log.error({ err: e }, "chat turn failed"); // full provider detail (incl. request_id) stays in server logs
-      // Turn an upstream LLM failure (bad key, rate limit, provider down) — or any
-      // handled domain error — into a clean message instead of a raw 500 that leaks
-      // the provider's JSON/request_id.
-      // Resolve which provider was active (org- and lock-aware) so a Bedrock
-      // failure gets AWS guidance, not "check your Anthropic key".
-      const provider = await resolveAnthropicStatus().then((s) => s.provider).catch(() => undefined);
-      const handled = friendlyLlmError(e, provider) ?? (isHandledError(e) ? e : null);
-      if (handled) return reply.code(handled.status).send({ error: handled.code, message: handled.message });
-      return reply.code(500).send({ error: "INTERNAL", message: e?.message ?? String(e) });
+      if (closed) {
+        req.log.info({ err: e }, "chat turn aborted — client disconnected");
+      } else {
+        req.log.error({ err: e }, "chat turn failed"); // full provider detail (incl. request_id) stays in server logs
+        // Turn an upstream LLM failure (bad key, rate limit, provider down) — or any
+        // handled domain error — into a clean message instead of a raw error that leaks
+        // the provider's JSON/request_id.
+        // Resolve which provider was active (org- and lock-aware) so a Bedrock
+        // failure gets AWS guidance, not "check your Anthropic key".
+        const provider = await resolveAnthropicStatus().then((s) => s.provider).catch(() => undefined);
+        const handled = friendlyLlmError(e, provider) ?? (isHandledError(e) ? e : null);
+        send("error", handled
+          ? { error: handled.code, message: handled.message }
+          : { error: "INTERNAL", message: e?.message ?? String(e) });
+      }
+    } finally {
+      clearInterval(heartbeat);
+      closed = true;
+      if (!raw.writableEnded) raw.end();
     }
   });
 

@@ -5,7 +5,7 @@
 import { state } from "./state.js";
 import { escapeHtml, prettyEntity, renderTextContent } from "./format.js";
 import { EVIDENCE_KIND, evidenceChip, provChip } from "./chips.js";
-import { AUTH, api, render } from "./app.js";
+import { AUTH, api, apiStream, render } from "./app.js";
 import { loadDashboard } from "./dashboard.js";
 import { loadDetail } from "./detail.js";
 import { connectorHistoryBody, expKindOf, refreshExplorerAfterChat } from "./explorer.js";
@@ -27,6 +27,66 @@ export function toggleChat() {
   if (state.chatOpen && !state.chatInfo) loadChatInfo().then(render);
   render();
   if (state.chatOpen) setTimeout(() => document.getElementById("chat-input")?.focus(), 30);
+}
+
+// Turn-in-flight plumbing. Module-local (not state): nothing renders from these,
+// they only steer the one live request.
+let chatAbort = null;        // AbortController for the in-flight turn (Stop button)
+let chatStopRequested = false; // distinguishes a user Stop from a network abort
+let chatTickerId = null;     // 1s interval that repaints the elapsed time
+let chatTurnGen = 0;         // bumped by disownChatTurn; a stale gen = discard the turn
+
+// User pressed Stop: cancel the request but keep the turn OWNED, so its
+// catch/finally report "Stopped" and clean up state.
+export function stopChat() {
+  chatStopRequested = true;
+  chatAbort?.abort();
+}
+
+// The active thread was discarded (clear button, logout/reset) while a turn was
+// in flight: cancel it AND disown it — its response must not resurrect the
+// cleared thread, and its error must not pollute the fresh state. sendChat's
+// gen checks make the orphaned continuation a no-op, so busy/progress are
+// cleared here instead of in its finally.
+function disownChatTurn() {
+  chatTurnGen++;
+  state.chatBusy = false;
+  state.chatProgress = null;
+  chatAbort?.abort();
+}
+
+// The live line under the messages while a turn runs: current activity (model
+// thinking vs a named tool), step/tool-call counts once there's more than one,
+// and elapsed time. Rendered by chatPanel; repainted in place by
+// updateChatProgressDom on every SSE progress event and ticker beat.
+function chatProgressHtml() {
+  const p = state.chatProgress;
+  if (!p) return `<span class="italic">thinking…</span>`;
+  const s = Math.max(0, Math.floor((Date.now() - p.startedAt) / 1000));
+  const elapsed = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const bits = [];
+  bits.push(p.tool
+    ? `🔧 <span class="font-medium text-stone-600">${escapeHtml(p.tool)}</span>…`
+    : `<span class="italic">thinking…</span>`);
+  if (p.iteration > 1 || p.toolsDone > 0) {
+    bits.push(`step ${p.iteration}${p.toolsDone ? ` · ${p.toolsDone} tool call${p.toolsDone === 1 ? "" : "s"}` : ""}`);
+  }
+  bits.push(`<span class="tabular-nums">${elapsed}</span>`);
+  return bits.join(" <span class='text-stone-300'>·</span> ");
+}
+
+function updateChatProgressDom() {
+  const el = document.getElementById("chat-progress");
+  if (el) el.innerHTML = chatProgressHtml();
+}
+
+function onChatProgress(name, data) {
+  const p = state.chatProgress;
+  if (name !== "progress" || !p) return;
+  if (data.kind === "model_call") { p.iteration = data.iteration; p.tool = null; }
+  else if (data.kind === "tool_start") { p.tool = data.name; }
+  else if (data.kind === "tool_end") { p.toolsDone++; p.tool = null; }
+  updateChatProgressDom();
 }
 
 export async function sendChat() {
@@ -63,8 +123,18 @@ export async function sendChat() {
   state.chatInput = "";
   state.chatBusy = true;
   state.chatError = null;
+  state.chatProgress = { startedAt: Date.now(), tool: null, iteration: 1, toolsDone: 0 };
+  chatStopRequested = false;
+  // Keep this turn's own controller/ticker in locals: after a disown a NEWER
+  // turn may already own the module slots, and this turn's finally must tear
+  // down only its own instances, never the successor's.
+  const myAbort = new AbortController();
+  chatAbort = myAbort;
+  const genAtSend = chatTurnGen;
   render();
   scrollChatToBottom();
+  const myTicker = setInterval(updateChatProgressDom, 1000);
+  chatTickerId = myTicker;
 
   // Identity of the thread this turn belongs to. If the user switches workflow
   // or table while the turn is in flight, the live thread is swapped out — the
@@ -75,10 +145,14 @@ export async function sendChat() {
   const keyAtSend = state.connectorChatKey;
 
   try {
-    const resp = await api("/chat", {
-      method: "POST",
+    const resp = await apiStream("/chat", {
       body: JSON.stringify({ messages: state.chatMessages }),
+      signal: myAbort.signal,
+      onEvent: onChatProgress,
     });
+    // Disowned (thread cleared / state reset mid-turn): the user discarded this
+    // conversation — drop the response entirely, unlike a swap which files it.
+    if (chatTurnGen !== genAtSend) return;
     const swapped = state.chatScope !== scopeAtSend
       || state.inConnectorMode !== wasConnector
       || state.connectorChatKey !== keyAtSend;
@@ -95,9 +169,23 @@ export async function sendChat() {
     else if (state.view === "detail") await loadDetail();
     else if (state.view === "bcs") { await refreshExplorerAfterChat(); persistConnectorChat(); }
   } catch (e) {
-    state.chatError = e.message;
+    // A disowned turn reports nothing — the thread it belonged to is gone.
+    if (chatTurnGen === genAtSend) {
+      // "Stopped" only for the user's own Stop (an abort), never for a real
+      // failure that happens to arrive while the flag is set — e.g. the 401
+      // session-expiry path, whose throwApiError resets chat state mid-flight.
+      state.chatError = chatStopRequested && e?.name === "AbortError"
+        ? "Stopped — the reply was cancelled before it finished."
+        : e.message;
+    }
   } finally {
-    state.chatBusy = false;
+    clearInterval(myTicker);
+    if (chatTickerId === myTicker) chatTickerId = null;
+    if (chatAbort === myAbort) chatAbort = null;
+    if (chatTurnGen === genAtSend) {
+      state.chatProgress = null;
+      state.chatBusy = false;
+    }
     render();
     scrollChatToBottom();
   }
@@ -108,6 +196,7 @@ export function clearChat() {
   // builder mode, or the advisor thread otherwise) since state.chatMessages IS
   // that thread. In connector mode also drop the server-persisted copy so the
   // cleared thread doesn't come back on reload.
+  disownChatTurn(); // an in-flight turn must not resurrect (or re-persist) the cleared thread
   if (state.inConnectorMode && state.connectorChatKey && state.exp?.system && state.exp?.entity) {
     state.connectorChats[state.connectorChatKey] = [];
     state.connectorChatsHydrated.add(state.connectorChatKey); // server now empty; don't re-hydrate
@@ -167,6 +256,7 @@ export function syncChatScope() {
 
 // Logout: a different identity may sign in next on this page — drop every thread.
 export function resetChatState() {
+  disownChatTurn(); // cancel any in-flight turn; its late continuation must not touch the fresh state
   state.chatMessages = [];
   state.chatInput = "";
   state.chatError = null;
@@ -439,7 +529,11 @@ export function chatPanel() {
             </div>
           </div>
         ` : messagesHtml}
-        ${state.chatBusy ? `<div class="text-stone-500 text-xs italic">thinking…</div>` : ""}
+        ${state.chatBusy ? `
+          <div class="flex items-center gap-2 text-stone-500 text-xs">
+            <div id="chat-progress" class="flex-1 min-w-0 truncate">${chatProgressHtml()}</div>
+            <button id="chat-stop" title="Stop the assistant" class="shrink-0 px-2 py-0.5 rounded border border-stone-300 text-stone-600 hover:bg-stone-100 font-medium">◼ Stop</button>
+          </div>` : ""}
         ${state.chatError ? `<div class="text-rose-700 text-xs">⚠ ${escapeHtml(state.chatError)}</div>` : ""}
         ${!empty && !state.chatBusy && lastAssistantAsksConfirmation() ? confirmQuickReplies() : ""}
       </div>
@@ -531,6 +625,7 @@ export function bindChat() {
     });
   }
   document.getElementById("chat-send")?.addEventListener("click", sendChat);
+  document.getElementById("chat-stop")?.addEventListener("click", stopChat);
   document.getElementById("chat-close")?.addEventListener("click", toggleChat);
   document.getElementById("chat-clear")?.addEventListener("click", clearChat);
   document.querySelectorAll("[data-example]").forEach((el) => {

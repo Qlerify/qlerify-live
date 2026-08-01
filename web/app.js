@@ -92,7 +92,7 @@ export const AUTH = {
 // switch has an old scope to stash under. chatScope is hoisted.
 state.chatScope = chatScope();
 
-export async function api(path, opts = {}) {
+function apiHeaders(opts = {}) {
   const headers = { "x-role": role, ...(opts.headers || {}) };
   if (opts.body != null) headers["Content-Type"] = "application/json";
   const token = AUTH.token();
@@ -101,24 +101,116 @@ export async function api(path, opts = {}) {
   if (org) headers["X-Org-Id"] = org;
   const workflow = AUTH.workflow();
   if (workflow) headers["X-Workflow-Id"] = workflow;
-  const res = await fetch(API + path, { cache: "no-store", ...opts, headers });
+  return headers;
+}
+
+// Session-expiry and error-body handling shared by api() and apiStream().
+async function throwApiError(res, path) {
   if (res.status === 401 && !path.startsWith("/v1/auth/")) {
     AUTH.clear();
     if (location.hash !== "#login") navigate("#login");
     throw new Error(`401 ${path}: session expired — please sign in`);
   }
-  if (!res.ok) {
-    const text = await res.text();
-    // Prefer the backend's human-readable {message}: it's already a clean sentence
-    // (e.g. the friendly LLM-key error). Fall back to the raw "status path: body"
-    // form only when there's no JSON message, so unexpected errors stay debuggable.
-    let msg = `${res.status} ${path}: ${text}`;
-    try { const j = JSON.parse(text); if (j && typeof j.message === "string" && j.message) msg = j.message; } catch { /* not JSON */ }
-    const err = new Error(msg);
-    err.status = res.status; err.path = path;
-    throw err;
-  }
+  const text = await res.text();
+  // Prefer the backend's human-readable {message}: it's already a clean sentence
+  // (e.g. the friendly LLM-key error). Fall back to the raw "status path: body"
+  // form only when there's no JSON message, so unexpected errors stay debuggable.
+  let msg = `${res.status} ${path}: ${text}`;
+  try { const j = JSON.parse(text); if (j && typeof j.message === "string" && j.message) msg = j.message; } catch { /* not JSON */ }
+  const err = new Error(msg);
+  err.status = res.status; err.path = path;
+  throw err;
+}
+
+export async function api(path, opts = {}) {
+  const res = await fetch(API + path, { cache: "no-store", ...opts, headers: apiHeaders(opts) });
+  if (!res.ok) await throwApiError(res, path);
   return res.json();
+}
+
+// Streaming POST for long-running requests (the chat agent turn). Parses an SSE
+// response, invoking onEvent(name, data) per event; resolves with the "result"
+// event's data, throws on an "error" event. Extras over api():
+//   - signal: caller-side cancellation (the chat Stop button).
+//   - stall detection: the server heartbeats every 15s, so a silent stream means
+//     the connection is dead (proxy idle-kill, sleeping laptop) — abort instead
+//     of hanging the UI forever. Any received byte re-arms the timer.
+//   - a plain application/json response is passed through, so the client keeps
+//     working against a non-streaming server build.
+export async function apiStream(path, { body, onEvent, signal, stallMs = 90_000 } = {}) {
+  const ctrl = new AbortController();
+  const onOuterAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", onOuterAbort, { once: true });
+  }
+  let stalled = false;
+  let stallTimer = null;
+  const armStall = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => { stalled = true; ctrl.abort(); }, stallMs);
+  };
+  try {
+    const res = await fetch(API + path, {
+      method: "POST", cache: "no-store", headers: apiHeaders({ body }), body, signal: ctrl.signal,
+    });
+    if (!res.ok) await throwApiError(res, path);
+    const ct = res.headers.get("content-type") || "";
+    // `await` (not a bare `return promise`) so the finally below runs only after
+    // the body has downloaded — leaving early would detach the caller's abort
+    // listener while the body is still streaming, making Stop a silent no-op.
+    if (!ct.includes("text/event-stream")) return await res.json();
+
+    // Arm stall detection only now that the response is KNOWN to be a heartbeat
+    // stream. Earlier would break the JSON fallback above: a non-streaming
+    // server sends no bytes at all until the turn finishes, which is silence by
+    // design, not a dead connection.
+    armStall();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let result;
+    let gotResult = false;
+    while (!gotResult) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      armStall(); // heartbeats land here too — only true silence trips the timer
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const rawEvent = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let event = "message";
+        const dataLines = [];
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+          // ":" comment lines (heartbeats) carry no data
+        }
+        if (dataLines.length === 0) continue;
+        let data;
+        try { data = JSON.parse(dataLines.join("\n")); } catch { continue; }
+        if (event === "result") { result = data; gotResult = true; }
+        else if (event === "error") {
+          const err = new Error(data.message || data.error || `${path} failed`);
+          err.code = data.error; err.path = path;
+          throw err;
+        } else {
+          onEvent?.(event, data);
+        }
+      }
+    }
+    if (!gotResult) throw new Error("Connection lost before the assistant finished — please try again.");
+    return result;
+  } catch (e) {
+    if (stalled) {
+      throw new Error(`The connection went silent for ${Math.round(stallMs / 1000)}s and was closed — check the network and try again.`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(stallTimer);
+    if (signal) signal.removeEventListener("abort", onOuterAbort);
+  }
 }
 
 

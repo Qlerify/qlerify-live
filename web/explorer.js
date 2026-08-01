@@ -1,7 +1,7 @@
 // Systems explorer (#bcs) — three-pane data console (systems → tables → items)
 // + the connector-builder entry points. Extracted from app.js.
 import { state } from "./state.js";
-import { escapeHtml } from "./format.js";
+import { escapeHtml, formatDuration } from "./format.js";
 import { api, render, showOverlay, hideOverlay } from "./app.js";
 import { formatVersionDate } from "./model.js";
 import { activateConnectorChat, loadChatInfo } from "./chat.js";
@@ -22,6 +22,8 @@ export function expState () {
       valueObjects: [],
       entity: null,
       items: [],
+      matched: 0,
+      total: 0,
       adapters: [],
       health: null,
       filters: [],
@@ -58,7 +60,7 @@ export async function loadHealth() {
 
 export async function selectExpSystem(name, targetEntity) {
   const e = expState();
-  e.system = name; e.entity = null; e.items = []; e.filters = []; e.page = 0;
+  e.system = name; e.entity = null; e.items = []; e.matched = 0; e.total = 0; e.filters = []; e.page = 0;
   try {
     const d = await api(`/api/bc/${encodeURIComponent(name)}`);
     e.entities = d.entities || [];
@@ -71,6 +73,38 @@ export async function selectExpSystem(name, targetEntity) {
   render();
 }
 
+// Rows come one pager window at a time: 25 rows for the current page, plus
+// `matched` (rows passing the filters — sizes the pager) and `total` (the whole
+// table — the "of N"). Filtering/paging happen in SQL, so every row is reachable.
+export const EXP_PAGE = 25;
+
+async function fetchExpRows(e) {
+  const filters = (e.filters || []).filter((f) => f.attr && f.value !== "");
+  const qs = new URLSearchParams({ entity: e.entity, limit: EXP_PAGE, offset: e.page * EXP_PAGE });
+  if (filters.length) qs.set("filters", JSON.stringify(filters));
+  const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?${qs}`);
+  e.items = d.rows || [];
+  e.matched = d.matched ?? e.items.length;
+  e.total = d.total ?? e.matched;
+  e.tableMissing = !!d.tableMissing;
+  // Filtering/deleting can strand the page past the end — snap to the last page.
+  if (e.page > 0 && !e.items.length && e.matched > 0) {
+    e.page = Math.max(0, Math.ceil(e.matched / EXP_PAGE) - 1);
+    return fetchExpRows(e);
+  }
+}
+
+// Page/filter change on the current table: re-pull the window. Lighter than
+// selectExpEntity — no overlay, and the row-events map (keyed by row id, fetched
+// table-wide) stays valid.
+async function refetchExpRows() {
+  const e = expState();
+  if (!e.system || !e.entity) return;
+  e.busy = true; render();
+  try { await fetchExpRows(e); } catch (_err) { /* keep prior rows */ }
+  finally { e.busy = false; render(); }
+}
+
 export async function selectExpEntity(name) {
   const e = expState();
   e.entity = name; e.page = 0; e.filters = []; e.busy = true;
@@ -79,10 +113,8 @@ export async function selectExpEntity(name) {
   showOverlay("Loading data…"); // 150ms-delayed → quick table loads won't flash
   try {
     try {
-      const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(name)}&limit=300`);
-      e.items = d.rows || [];
-      e.tableMissing = !!d.tableMissing;
-    } catch (_err) { e.items = []; e.tableMissing = true; }
+      await fetchExpRows(e);
+    } catch (_err) { e.items = []; e.matched = 0; e.total = 0; e.tableMissing = true; }
     e.rowEvents = {}; // events belong to the previous table — drop them
     e.rowEvents = await fetchRowEvents(e);
   } finally {
@@ -120,8 +152,9 @@ export async function expFetchRows() {
     const r = await api(`/api/adapters/${encodeURIComponent(adapter.id)}/pull`, { method: "POST", body: JSON.stringify({ limit: null }) }); // null = uncapped: pull ALL rows from the source
     await refreshExplorerAfterChat(); // re-pulls rows, adapters AND (if shown) the per-row events so the auto-derived events land in the ⚡ Events column
     hideOverlay(); // drop the scrim before the blocking result alert
-    const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
-    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}`);
+    const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s)${r.derived.durationMs != null ? `, ${formatDuration(r.derived.durationMs)}` : ""})` : "";
+    const took = r.durationMs != null ? `\nTook: ${formatDuration(r.durationMs)}${r.fetchMs != null ? ` (fetch ${formatDuration(r.fetchMs)})` : ""}` : "";
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}${took}`);
   } catch (err) {
     hideOverlay();
     alert("Fetch failed: " + err.message);
@@ -167,7 +200,8 @@ export async function expReimportAll() {
     hideOverlay(); // drop the scrim before the blocking result alert
     const ev = r.derived ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : "";
     const failed = r.failures && r.failures.length ? `\nConnectors that failed: ${r.failures.length} (${r.failures.map((f) => f.id).join(", ")})` : "";
-    alert(`Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}`);
+    const took = r.durationMs != null ? `\nTook: ${formatDuration(r.durationMs)}` : "";
+    alert(`Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}${took}`);
   } catch (err) {
     hideOverlay();
     alert("Reset & reimport failed: " + err.message);
@@ -211,9 +245,7 @@ export async function refreshExplorerAfterChat() {
   } catch (_e) { /* keep prior */ }
   if (e.entity) {
     try {
-      const d = await api(`/api/bc/${encodeURIComponent(e.system)}/raw?entity=${encodeURIComponent(e.entity)}&limit=300`);
-      e.items = d.rows || [];
-      e.tableMissing = !!d.tableMissing;
+      await fetchExpRows(e);
     } catch (_e) { /* keep prior */ }
     // Ingest/clear changes the derived events too → refresh the per-row trail.
     e.rowEvents = await fetchRowEvents(e);
@@ -221,24 +253,6 @@ export async function refreshExplorerAfterChat() {
   // A create/build/ingest changes connection status → refresh the Tables-pane
   // status dots too so they update without a manual reload (caller renders).
   try { e.health = await api("/api/bc/health"); } catch (_e) { /* keep prior */ }
-}
-
-export function applyExpFilters(items, filters) {
-  const active = (filters || []).filter((f) => f.attr && f.value !== "");
-  if (!active.length) return items;
-  return items.filter((row) => active.every((f) => {
-    let v = row[f.attr]; let t = f.value;
-    if (f.type === "Number") { v = Number(v); t = Number(t); } else { v = String(v == null ? "" : v).toLowerCase(); t = String(t).toLowerCase(); }
-    switch (f.cond) {
-      case "Equal to": return v == t;
-      case "Not equal to": return v != t;
-      case "Contains": return String(v).includes(String(t));
-      case "Begins with": return String(v).startsWith(String(t));
-      case "Greater than": return v > t;
-      case "Less than": return v < t;
-      default: return true;
-    }
-  }));
 }
 
 export function explorerView() {
@@ -461,12 +475,14 @@ export function expMain(e) {
         <span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full bg-violet-400"></span>In model, no data <span class="italic">(not populated)</span></span>
         <span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>In data, not in model <span class="italic">(stale / unmodelled)</span></span>
       </div>` : "";
-  const rows = applyExpFilters(e.items, e.filters);
+  const rows = e.items; // already the current page window, filtered server-side
+  // "120 of 1,234" when filters hide rows; just "1,234" otherwise.
+  const matched = e.matched ?? rows.length;
+  const total = e.total ?? matched;
+  const countLabel = matched < total ? `${matched.toLocaleString()} of ${total.toLocaleString()}` : total.toLocaleString();
   const tableAdapters = expAdaptersForEntity(e);
-  const PAGE = 25;
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const pages = Math.max(1, Math.ceil(matched / EXP_PAGE));
   const page = Math.min(e.page, pages - 1);
-  const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE);
   const headerCells = cols.map((c) => {
     const st = EXP_COL_STYLE[c.state] || EXP_COL_STYLE.neutral;
     return `<th class="px-3 py-2 text-left text-[11px] font-semibold ${st.text} whitespace-nowrap border-b border-stone-200" title="${st.title}"><span class="inline-flex items-center gap-1.5"><span class="inline-block w-1.5 h-1.5 rounded-full ${st.dot}"></span>${escapeHtml(c.name)}</span></th>`;
@@ -475,7 +491,7 @@ export function expMain(e) {
   // The events column is always on, so top-align every cell — a row that grows to
   // fit several stacked events keeps its other values lined up at the top.
   const tdAlign = "align-top";
-  const bodyRows = pageRows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
+  const bodyRows = rows.map((r) => `<tr class="hover:bg-stone-50 border-b border-stone-100">
       <td class="px-3 py-2 ${tdAlign}"><input type="checkbox" class="rounded border-stone-300" /></td>
       ${cols.map((col, ci) => {
         const val = r[col.name];
@@ -499,10 +515,10 @@ export function expMain(e) {
       </div>
       <div class="px-6 py-3 border-b border-stone-200">${expFiltersPanel(e, cols)}</div>
       <div class="px-6 pt-3 pb-1 flex items-center justify-between">
-        <div class="text-sm font-semibold text-stone-800">Table: ${escapeHtml(e.entity)} — Items returned <span class="text-stone-400 font-normal">(${rows.length})</span></div>
+        <div class="text-sm font-semibold text-stone-800">Table: ${escapeHtml(e.entity)} — Items <span class="text-stone-400 font-normal">(${countLabel})</span></div>
         <div class="flex items-center gap-2 text-sm text-stone-500">
           <button id="exp-prev" class="px-2 py-0.5 rounded hover:bg-stone-100 ${page <= 0 ? "opacity-40" : ""}">‹</button>
-          <span class="tabular-nums">${page + 1} / ${pages}</span>
+          <span class="tabular-nums">${matched ? `${(page * EXP_PAGE + 1).toLocaleString()}–${(page * EXP_PAGE + rows.length).toLocaleString()}` : "0"} of ${matched.toLocaleString()}</span>
           <button id="exp-next" class="px-2 py-0.5 rounded hover:bg-stone-100 ${page >= pages - 1 ? "opacity-40" : ""}">›</button>
         </div>
       </div>
@@ -560,6 +576,7 @@ export const NOTE_BADGE = {
   cleared: "bg-orange-100 text-orange-800",
   repointed: "bg-indigo-100 text-indigo-800",
   removed: "bg-rose-100 text-rose-800",
+  failed: "bg-red-100 text-red-800",
   note: "bg-stone-100 text-stone-700",
 };
 
@@ -595,6 +612,7 @@ export function connectorCard(a, bc) {
         ${notes.map((n) => `<div class="flex items-baseline gap-1.5 text-[11px]">
           <span class="px-1 py-0.5 rounded ${NOTE_BADGE[n.kind] || NOTE_BADGE.note} shrink-0">${escapeHtml(n.kind)}</span>
           <span class="flex-1 text-stone-600">${escapeHtml(n.text)}</span>
+          ${n.durationMs != null ? `<span class="text-stone-400 shrink-0 tabular-nums">${escapeHtml(formatDuration(n.durationMs))}</span>` : ""}
           <span class="text-stone-400 shrink-0">${escapeHtml(formatVersionDate(n.at))}</span>
         </div>`).join("")}
       </div>`
@@ -717,10 +735,10 @@ export function bindExplorer() {
   });
   document.querySelectorAll("[data-filter-remove]").forEach((el) => el.addEventListener("click", () => { expState().filters.splice(Number(el.dataset.filterRemove), 1); render(); }));
   document.getElementById("exp-add-filter")?.addEventListener("click", () => { expState().filters.push({ attr: "", cond: "Equal to", type: "String", value: "" }); render(); });
-  document.getElementById("exp-run")?.addEventListener("click", () => { expState().page = 0; render(); });
-  document.getElementById("exp-reset")?.addEventListener("click", () => { expState().filters = []; expState().page = 0; render(); });
-  document.getElementById("exp-prev")?.addEventListener("click", () => { const e = expState(); if (e.page > 0) { e.page--; render(); } });
-  document.getElementById("exp-next")?.addEventListener("click", () => { expState().page++; render(); });
+  document.getElementById("exp-run")?.addEventListener("click", () => { expState().page = 0; refetchExpRows(); });
+  document.getElementById("exp-reset")?.addEventListener("click", () => { const e = expState(); e.filters = []; e.page = 0; refetchExpRows(); });
+  document.getElementById("exp-prev")?.addEventListener("click", () => { const e = expState(); if (e.page > 0) { e.page--; refetchExpRows(); } });
+  document.getElementById("exp-next")?.addEventListener("click", () => { const e = expState(); if ((e.page + 1) * EXP_PAGE < e.matched) { e.page++; refetchExpRows(); } });
   // "Connectors" pill: toggle the single sidebar on its History tab.
   document.getElementById("exp-config-adapter")?.addEventListener("click", () => {
     const e = expState();

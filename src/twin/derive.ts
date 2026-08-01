@@ -460,6 +460,8 @@ interface DeriveResult {
   /** Distinct aggregate instances that gained at least one event. */
   instances: number;
   events: DerivedEventSummary[];
+  /** Wall-clock ms the derivation pass took. */
+  durationMs: number;
   /** Event-log rows deleted before re-deriving. Only set by rebuildFromData(). */
   cleared?: number;
 }
@@ -480,6 +482,7 @@ const pairKey = (eventRef: string, aggregateId: string): string => `${eventRef}\
  * chunked INSERTs. planDerivation's linear order still guarantees a referenced
  * parent's create is decided before the child that inherits its case. */
 export async function deriveFromData(opts: { preview?: boolean; limit?: number | null } = {}): Promise<DeriveResult> {
+  const t0 = Date.now();
   const preview = !!opts.preview;
   const limit = opts.limit ?? null;
   const ont = getOntology();
@@ -571,7 +574,7 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
   // attribute them to the adapter origin.
   if (batch.length > 0) await withActorKind("adapter", () => emitMany(batch));
 
-  return { preview, totalEmitted, instances: touched.size, events: summaries };
+  return { preview, totalEmitted, instances: touched.size, events: summaries, durationMs: Date.now() - t0 };
 }
 
 /** Clear the active workflow's EventLog, then re-derive from the ingested rows

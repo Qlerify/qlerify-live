@@ -22,12 +22,13 @@ const JOURNAL_DIR = join(QLERIFY_DIR, "connector-journal");
 const MAX_NOTES = 100; // keep the doc bounded; oldest notes roll off
 
 type ConnectorNoteKind =
-  | "created" | "built" | "edited" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "note";
+  | "created" | "built" | "edited" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "failed" | "note";
 
 export interface ConnectorNote {
   at: string;              // ISO timestamp
   kind: ConnectorNoteKind;
   text: string;
+  durationMs?: number;     // wall-clock ms the operation took (absent on old notes)
 }
 
 export interface ConnectorDoc {
@@ -108,9 +109,13 @@ function writeDoc(doc: ConnectorDoc): void {
 }
 
 /** Append a timestamped update note, creating the doc if needed. Returns the doc. */
-export function appendNote(id: string, kind: ConnectorNoteKind, text: string): ConnectorDoc {
+export function appendNote(id: string, kind: ConnectorNoteKind, text: string, extra?: { durationMs?: number }): ConnectorDoc {
   const doc = readDoc(id) ?? { id, notes: [], updatedAt: "" };
-  doc.notes.push({ at: new Date().toISOString(), kind, text });
+  const note: ConnectorNote = { at: new Date().toISOString(), kind, text };
+  if (extra?.durationMs != null && Number.isFinite(extra.durationMs)) {
+    note.durationMs = Math.max(0, Math.round(extra.durationMs));
+  }
+  doc.notes.push(note);
   if (doc.notes.length > MAX_NOTES) doc.notes = doc.notes.slice(-MAX_NOTES);
   doc.updatedAt = new Date().toISOString();
   writeDoc(doc);

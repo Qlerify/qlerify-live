@@ -1,7 +1,7 @@
 // Model page (#model) — version history, reload/restore, source link, and the
 // registry banner/toast. Extracted from app.js.
 import { state } from "./state.js";
-import { escapeHtml } from "./format.js";
+import { escapeHtml, formatDuration } from "./format.js";
 import { api, ensureMe, showOverlay, hideOverlay, onHashChange, render, selectedWorkflowId } from "./app.js";
 
 // ---------------------------------------------------------------------------
@@ -268,7 +268,8 @@ export function rebuildSummaryText(rebuild) {
   if (!rebuild || !rebuild.connectors) return "";
   const ev = rebuild.derived ? rebuild.derived.events : 0;
   const failed = (rebuild.failures || []).length;
-  return ` Re-ingested ${rebuild.inserted} row(s) from ${rebuild.connectors} connector(s), derived ${ev} event(s)${failed ? ` — ${failed} connector(s) failed to pull (re-pull from the explorer)` : ""}.`;
+  const took = rebuild.durationMs != null ? ` in ${formatDuration(rebuild.durationMs)}` : "";
+  return ` Re-ingested ${rebuild.inserted} row(s) from ${rebuild.connectors} connector(s), derived ${ev} event(s)${took}${failed ? ` — ${failed} connector(s) failed to pull (re-pull from the explorer)` : ""}.`;
 }
 
 // Re-pull the latest model from the current version's stored link, then rebuild

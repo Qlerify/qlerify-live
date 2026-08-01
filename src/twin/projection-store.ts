@@ -256,38 +256,83 @@ export async function findByIds(table: string, ids: string[]): Promise<Array<Rec
   return ids.map((id) => byId.get(id)).filter((r): r is Record<string, unknown> => !!r);
 }
 
+/** One explorer filter condition, applied in SQL so it covers the whole table
+ * rather than whatever window happens to be fetched. Mirrors the explorer UI's
+ * filter rows verbatim. */
+export type RowFilter = { attr: string; cond: string; type?: string; value: string };
+
+/** WHERE fragments for explorer filters. Semantics match the client-side filter
+ * this replaces: string matching is case-insensitive with NULL read as "",
+ * Number type compares numerically (NULL as 0). Filters on columns the table
+ * doesn't have are skipped — the UI only offers real columns, so a miss is a
+ * hand-typed name, and skipping beats poisoning the whole query. */
+async function rowFilterSql(table: string, filters: RowFilter[]): Promise<{ clauses: string[]; params: unknown[] }> {
+  const active = (filters ?? []).filter((f) => f && f.attr && f.value != null && f.value !== "");
+  if (!active.length) return { clauses: [], params: [] };
+  const cols = await tableColumns(table);
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  for (const f of active) {
+    if (!cols.has(f.attr)) continue;
+    const text = `LOWER(COALESCE(CAST(${ident(f.attr)} AS TEXT), ''))`;
+    const cmp = f.type === "Number" ? `COALESCE(CAST(${ident(f.attr)} AS REAL), 0)` : text;
+    const val = f.type === "Number" ? Number(f.value) : String(f.value).toLowerCase();
+    const str = String(f.value).toLowerCase(); // Contains/Begins with are string ops for either type
+    switch (f.cond) {
+      case "Equal to":     clauses.push(`${cmp} = ?`);  params.push(val); break;
+      case "Not equal to": clauses.push(`${cmp} != ?`); params.push(val); break;
+      case "Contains":     clauses.push(`instr(${text}, ?) > 0`); params.push(str); break;
+      case "Begins with":  clauses.push(`substr(${text}, 1, ?) = ?`); params.push(str.length, str); break;
+      case "Greater than": clauses.push(`${cmp} > ?`);  params.push(val); break;
+      case "Less than":    clauses.push(`${cmp} < ?`);  params.push(val); break;
+      default: break; // unknown condition matches everything, as the client filter did
+    }
+  }
+  return { clauses, params };
+}
+
 /** Read rows in a deterministic order (insertion order: createdAt, then id as
  * the tiebreaker) so a window, when one applies, is stable across calls instead
  * of whatever SQLite happens to return. `limit: null` reads ALL rows — the bulk
- * derivation path uses it so every ingested row produces its events. */
-export async function findMany(table: string, limit: number | null = 200): Promise<Array<Record<string, unknown>>> {
+ * derivation path uses it so every ingested row produces its events. `offset`
+ * and `filters` serve the explorer's server-side paging. */
+export async function findMany(
+  table: string,
+  limit: number | null = 200,
+  offset = 0,
+  filters: RowFilter[] = [],
+): Promise<Array<Record<string, unknown>>> {
   const f = await orgFilterSql(table);
-  const where = f.clause ? `WHERE ${f.clause} ` : "";
+  const rf = await rowFilterSql(table, filters);
+  const clauses = [f.clause, ...rf.clauses].filter(Boolean);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")} ` : "";
   const order = `ORDER BY ${ident("createdAt")}, ${ident("id")}`;
-  const rows =
-    limit == null
-      ? await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-          `SELECT * FROM ${phys(table)} ${where}${order}`,
-          ...f.params,
-        )
-      : await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-          `SELECT * FROM ${phys(table)} ${where}${order} LIMIT ?`,
-          ...f.params,
-          limit,
-        );
+  const params: unknown[] = [...f.params, ...rf.params];
+  // SQLite only accepts OFFSET after a LIMIT; -1 keeps it unbounded.
+  let page = "";
+  if (limit != null) { page += " LIMIT ?"; params.push(limit); }
+  else if (offset > 0) page += " LIMIT -1";
+  if (offset > 0) { page += " OFFSET ?"; params.push(offset); }
+  const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    `SELECT * FROM ${phys(table)} ${where}${order}${page}`,
+    ...params,
+  );
   return rows.map((r) => normalizeRow(r)!) as Array<Record<string, unknown>>;
 }
 
-/** Org-scoped row count for a projection table. 0 when the table doesn't exist
- * yet (so a model entity that has never been ingested reads as empty, not an
- * error). Mirrors findMany's org scoping. */
-export async function countRows(table: string): Promise<number> {
+/** Org-scoped row count for a projection table, optionally under the same
+ * explorer filters findMany applies. 0 when the table doesn't exist yet (so a
+ * model entity that has never been ingested reads as empty, not an error). */
+export async function countRows(table: string, filters: RowFilter[] = []): Promise<number> {
   if (!(await tableExists(table))) return 0;
   const f = await orgFilterSql(table);
-  const where = f.clause ? `WHERE ${f.clause}` : "";
+  const rf = await rowFilterSql(table, filters);
+  const clauses = [f.clause, ...rf.clauses].filter(Boolean);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>(
     `SELECT count(*) as n FROM ${phys(table)} ${where}`,
     ...f.params,
+    ...rf.params,
   );
   return Number(rows[0]?.n ?? 0);
 }

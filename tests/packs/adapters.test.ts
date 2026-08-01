@@ -3,7 +3,8 @@ import { applyFieldMap } from "../../src/packs/types.js";
 import { synthesizeRow } from "../../src/twin/synthesize.js";
 import { createSimulatedAdapter } from "../../src/packs/adapters/simulated.js";
 import { registerAdapter, listAdapters } from "../../src/packs/registry.js";
-import { ingestPull } from "../../src/packs/ingest.js";
+import { ingestPull, reingestAll } from "../../src/packs/ingest.js";
+import { readDoc, deleteDoc } from "../../src/packs/connector/journal.js";
 import { loadPacks } from "../../src/packs/loadPacks.js";
 import { getOntology } from "../../src/ontology/model.js";
 import * as store from "../../src/twin/projection-store.js";
@@ -19,6 +20,7 @@ const TEST_ENTITY = "PurchaseOrder";
 const model = modelHarness();
 
 afterAll(async () => {
+  deleteDoc("test-sim");
   await model.run(async () => {
     const e = getOntology().entity(TEST_ENTITY);
     if (e) await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${store.tableFor(e)}"`);
@@ -64,10 +66,34 @@ describe("SimulatedAdapter + ingestPull", () => {
       const summary = await ingestPull("test-sim", { limit: 4 });
       expect(summary.inserted).toBe(4);
       expect(summary.mode).toBe("simulated");
+      // The whole ingest is timed, and the fetch sub-step can't exceed the total.
+      expect(summary.durationMs).toBeGreaterThanOrEqual(0);
+      expect(summary.fetchMs).toBeGreaterThanOrEqual(0);
+      expect(summary.durationMs).toBeGreaterThanOrEqual(summary.fetchMs);
 
       const rows = await store.findMany(TEST_ENTITY, 50);
       expect(rows.length).toBeGreaterThanOrEqual(4);
       for (const r of rows) expect(r._provenance).toBe("simulated");
+
+      // Both journaled notes carry a structured duration: the pull note
+      // ("Ingested …", ingest time excluding derive) and the derive note
+      // ("Derived …", derive's own time). Select by text prefix — a kind filter
+      // alone would land on the derive note, and older notes may predate the
+      // timing feature (the doc survives on disk between runs) — newest last.
+      const doc = readDoc("test-sim");
+      const pullNotes = (doc?.notes ?? []).filter((n) => n.kind === "ingested" && n.text.startsWith("Ingested "));
+      expect(pullNotes.length).toBeGreaterThanOrEqual(1);
+      expect(typeof pullNotes[pullNotes.length - 1].durationMs).toBe("number");
+      const deriveNotes = (doc?.notes ?? []).filter((n) => n.kind === "ingested" && n.text.startsWith("Derived "));
+      expect(deriveNotes.length).toBeGreaterThanOrEqual(1); // 4 fresh rows always derive events
+      expect(typeof deriveNotes[deriveNotes.length - 1].durationMs).toBe("number");
+    }));
+
+  it("reingestAll reports how long the whole pass took", () =>
+    model.run(async () => {
+      const summary = await reingestAll();
+      expect(typeof summary.durationMs).toBe("number");
+      expect(summary.durationMs).toBeGreaterThanOrEqual(0);
     }));
 });
 

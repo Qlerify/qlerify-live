@@ -8,6 +8,22 @@ export function escapeHtml(s) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+// Compact duration label: 850ms, 2.3s, 45s, 3m 20s. Empty string for anything
+// unrenderable (null/undefined/negative) so callers can interpolate blindly.
+// Rounds BEFORE choosing the unit so boundaries carry (59.7s → "1m", never
+// "60s"; 119.7s → "2m", never "1m 60s").
+export function formatDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  const tenths = Math.round(s * 10) / 10;
+  if (tenths < 10) return `${tenths}s`;
+  const totalSec = Math.round(s);
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60), ss = totalSec % 60;
+  return ss ? `${m}m ${ss}s` : `${m}m`;
+}
+
 // Display label for an entity/aggregate identifier. The raw identifier is the
 // source of truth everywhere (model keys, $refs, gen_ table names, codegen, data
 // keys); this is the single hook for prettifying the text the user reads. With

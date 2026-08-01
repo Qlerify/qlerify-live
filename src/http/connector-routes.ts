@@ -68,6 +68,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           summary: doc?.summary ?? null,
           notes: (doc?.notes ?? []).slice(-6),
           lastPullAt: cfg.lastPullAt ?? null,
+          lastPullDurationMs: cfg.lastPullDurationMs ?? null,
           rowCount,
           owned: !!cfg.workflowId, // false = legacy, adopted by model membership
           dateRoles: info?.dateRoles ?? null,

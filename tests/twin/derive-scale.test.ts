@@ -85,6 +85,7 @@ describe("deriveFromData at scale (batched, uncapped)", () => {
       const r = await deriveFromData();
       expect(r.totalEmitted).toBe(2 * N);
       expect(r.instances).toBe(2 * N);
+      expect(r.durationMs).toBeGreaterThanOrEqual(0); // the pass reports its own wall-clock
 
       // Every account starts its own case; every order inherited its account's.
       const events = await prisma.eventLog.findMany({

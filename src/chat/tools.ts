@@ -800,7 +800,7 @@ async function handleBuildConnector(args: Record<string, any>) {
     typeof args.errorReport === "string" ? args.errorReport : undefined,
   );
   return ok({
-    built: true, adapterId: id, targetKind: r.targetKind, dependencies: r.deps, codeBytes: r.bytes,
+    built: true, adapterId: id, targetKind: r.targetKind, dependencies: r.deps, codeBytes: r.bytes, durationMs: r.durationMs,
     install: { ok: r.install.ok, installed: r.install.installed, skipped: r.install.skipped, ...(r.install.ok ? {} : { log: r.install.log }) },
     note: r.install.ok
       ? "Code written + packages installed. Now TEST it with adapter_dry_run before ingesting. If it errors, call build_connector again with the errorReport to fix it."
@@ -822,7 +822,7 @@ async function handleIngestConnector(args: Record<string, any>) {
     : "";
   return ok({
     ingested: true, ...summary,
-    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity}. They now appear in the explorer's Items pane.${ev}`,
+    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity} in ${(summary.durationMs / 1000).toFixed(1)}s. They now appear in the explorer's Items pane.${ev}`,
   });
 }
 

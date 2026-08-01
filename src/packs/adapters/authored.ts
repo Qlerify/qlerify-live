@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getOntology, type EntitySchema } from "../../ontology/model.js";
-import type { AdapterConfig, SourceAdapter } from "../types.js";
+import { UNCAPPED_PULL_ROWS, type AdapterConfig, type SourceAdapter } from "../types.js";
 import { createRunContext, runWithBudget, type AdapterBody } from "../authored-runtime.js";
 import { denyScan } from "../codegen/deny-scan.js";
 import { connectorsEnabled } from "../../config/features.js";
@@ -67,9 +67,10 @@ export function createAuthoredAdapter(cfg: AdapterConfig): SourceAdapter {
       // null = uncapped (pull everything); only an OMITTED limit falls back.
       const limit = opts.limit === null ? null : opts.limit ?? cfg.limits?.limit ?? 10;
       const body = await loadBody();
-      const ctx = await createRunContext(cfg, e, limit ?? Number.MAX_SAFE_INTEGER);
+      const cap = limit ?? UNCAPPED_PULL_ROWS; // full ingest still gets a real ceiling
+      const ctx = await createRunContext(cfg, e, cap);
       const rows = await runWithBudget(() => body.fetchRows(ctx), RUN_BUDGET_MS);
-      const arr = Array.isArray(rows) ? (limit == null ? rows : rows.slice(0, limit)) : [];
+      const arr = Array.isArray(rows) ? rows.slice(0, cap) : [];
       return { rows: { [e.name]: arr }, count: arr.length };
     },
     async push() {

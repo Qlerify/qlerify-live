@@ -33,6 +33,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { connectorsEnabled } from "../../config/features.js";
+import { UNCAPPED_PULL_ROWS } from "../types.js";
 import type { EntitySchema } from "../../ontology/model.js";
 
 // D1 — the workspace is OUTSIDE the repo tree. Override with QLERIFY_DATA_DIR (a
@@ -326,7 +327,7 @@ export async function installDeps(deps: string[]): Promise<InstallResult> {
 
 interface RunRequest {
   entity: EntitySchema;
-  /** Max rows the runner returns; null = uncapped (a full ingest). */
+  /** Max rows the runner returns; null = full ingest (UNCAPPED_PULL_ROWS ceiling). */
   limit: number | null;
   endpoint?: string;
   op?: "fetchRows" | "probe";
@@ -352,7 +353,10 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
   ensureWorkspace();
   if (!moduleExists(id)) return { ok: false, error: `connector "${id}" has no code yet — build it first`, trace: [] };
 
-  const input = { entity: req.entity, limit: req.limit, endpoint: req.endpoint, op: req.op ?? "fetchRows" };
+  // A full ingest still hands the module a real number: generated code defends
+  // with `ctx.limit ?? <fallback>`, so a null ctx.limit would silently shrink
+  // the pull to that fallback instead of the platform ceiling.
+  const input = { entity: req.entity, limit: req.limit ?? UNCAPPED_PULL_ROWS, endpoint: req.endpoint, op: req.op ?? "fetchRows" };
   writeFileSync(ctxPath(id), JSON.stringify(input));
   if (!existsSync(credPath(id))) writeFileSync(credPath(id), "{}");
   if (existsSync(resultPath(id))) rmSync(resultPath(id));

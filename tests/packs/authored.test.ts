@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { rmSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +7,19 @@ import { writeBody } from "../../src/packs/codegen/adapter-ai.js";
 import { createAuthoredAdapter } from "../../src/packs/adapters/authored.js";
 import { ingestPull } from "../../src/packs/ingest.js";
 import { registerAdapter } from "../../src/packs/registry.js";
+import { readDoc, deleteDoc } from "../../src/packs/connector/journal.js";
+import { readSidecar, writeSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
 import { prisma } from "../../src/db.js";
 import * as store from "../../src/twin/projection-store.js";
 import { getOntology } from "../../src/ontology/model.js";
 import { modelHarness } from "../helpers/po-model.js";
+import { deriveFromData } from "../../src/twin/derive.js";
 import type { AdapterConfig } from "../../src/packs/types.js";
+
+// Spy mode: real derivation everywhere, overridable per test — used to prove a
+// derive failure after a committed pull stays best-effort (no throw, no
+// "failed" note), which a pull-phase failure test cannot cover.
+vi.mock("../../src/twin/derive.js", { spy: true });
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ENTITY = "PurchaseOrder";
@@ -37,9 +45,17 @@ const cfg = (bodyPath?: string): AdapterConfig => ({
 // harness's tenant context, which also scopes the gen__p<hex>_ projection table.
 const model = modelHarness();
 
+// Extra ids used by the failure-journaling / lastPullAt tests below. Unique to
+// this file; docs + sidecars are removed in afterAll so nothing leaks into a
+// later loadPacks() scan.
+const FAIL_ID = "test-authored-sap-missing";
+const STAMP_ID = "test-authored-sap-stamp";
+const DERIVE_FAIL_ID = "test-authored-sap-derive-fail";
+
 let writtenPath = "";
 afterAll(async () => {
   if (writtenPath && existsSync(join(ROOT, writtenPath))) rmSync(join(ROOT, writtenPath));
+  for (const id of [FAIL_ID, STAMP_ID, DERIVE_FAIL_ID]) { deleteDoc(id); deleteSidecar(id); }
   await model.run(async () => {
     const e = getOntology().entity(ENTITY);
     if (e) await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${store.tableFor(e)}"`);
@@ -104,5 +120,65 @@ describe("authored host — the Lambda execution", () => {
       const a = createAuthoredAdapter(cfg("src/packs/sap/generated/does-not-exist.logic.ts"));
       expect((await a.healthcheck()).ok).toBe(false); // no throw
       await expect(a.pull({ limit: 1 })).rejects.toThrow(/missing/);
+    }));
+});
+
+describe("ingestPull timing + failure journaling", () => {
+  it("journals EXACTLY ONE 'failed' note (error + attempt duration) when the pull throws, and leaves the sidecar unstamped", () =>
+    model.run(async () => {
+      deleteDoc(FAIL_ID); // a crashed earlier run must not inflate the count below
+      const c = { ...cfg("src/packs/sap/generated/does-not-exist.logic.ts"), id: FAIL_ID };
+      writeSidecar(c);
+      registerAdapter(createAuthoredAdapter(c));
+      await expect(ingestPull(FAIL_ID, { limit: 1 })).rejects.toThrow(/missing/);
+
+      const doc = readDoc(FAIL_ID);
+      // Exactly one note total: the single "failed" entry — proves neither
+      // ingestPull nor any caller journals the same failure twice.
+      expect(doc?.notes.length).toBe(1);
+      const last = doc?.notes[doc.notes.length - 1];
+      expect(last?.kind).toBe("failed");
+      expect(last?.text).toMatch(/^Pull failed: /);
+      expect(last?.text).toMatch(/missing/);
+      expect(typeof last?.durationMs).toBe("number");
+      // A failed attempt is not a pull: no freshness stamp.
+      expect(readSidecar(FAIL_ID)?.lastPullAt).toBeUndefined();
+    }));
+
+  it("a derive failure after a committed pull is best-effort: no throw, derived null, no 'failed' note", () =>
+    model.run(async () => {
+      deleteDoc(DERIVE_FAIL_ID);
+      const c = { ...cfg(writtenPath), id: DERIVE_FAIL_ID };
+      registerAdapter(createAuthoredAdapter(c));
+      vi.mocked(deriveFromData).mockRejectedValueOnce(new Error("derive boom"));
+
+      const summary = await ingestPull(DERIVE_FAIL_ID, { limit: 2 }); // resolves despite the derive throw
+      expect(summary.derived).toBeNull();
+      expect(typeof summary.durationMs).toBe("number");
+
+      const doc = readDoc(DERIVE_FAIL_ID);
+      expect(doc?.notes.some((n) => n.kind === "failed")).toBe(false);
+      const last = doc?.notes[doc.notes.length - 1];
+      expect(last?.kind).toBe("ingested"); // the pull note — rows are committed
+      expect(last?.text).toMatch(/^Ingested /);
+    }));
+
+  it("does not create a journal doc for an unknown adapter id (pre-run failure)", async () => {
+    await expect(ingestPull("no-such-adapter-xyz")).rejects.toThrow(/unknown adapter/);
+    expect(readDoc("no-such-adapter-xyz")).toBeNull();
+  });
+
+  it("stamps lastPullAt + lastPullDurationMs on the sidecar after a successful pull", () =>
+    model.run(async () => {
+      const c = { ...cfg(writtenPath), id: STAMP_ID };
+      writeSidecar(c);
+      registerAdapter(createAuthoredAdapter(c));
+      const before = Date.now();
+      const summary = await ingestPull(STAMP_ID, { limit: 2 });
+
+      const stamped = readSidecar(STAMP_ID);
+      expect(stamped?.lastPullAt).toBeDefined();
+      expect(new Date(stamped!.lastPullAt!).getTime()).toBeGreaterThanOrEqual(before - 1000);
+      expect(stamped?.lastPullDurationMs).toBe(summary.durationMs);
     }));
 });

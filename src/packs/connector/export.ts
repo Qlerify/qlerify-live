@@ -21,8 +21,9 @@ export const CONNECTOR_EXPORT_FORMAT = "qlerify-connector-export";
 export const CONNECTOR_EXPORT_VERSION = 1;
 
 /** The portable subset of AdapterConfig. Everything environment- or tenant-
- * specific (workflowId, organizationId, credentialsRef, lastPullAt, fixturesDir,
- * bodyPath, bodyPromptHash) is deliberately absent. */
+ * specific (workflowId, organizationId, credentialsRef, lastPullAt,
+ * lastPullDurationMs, fixturesDir, bodyPath, bodyPromptHash) is deliberately
+ * absent. */
 export type ExportedConnectorConfig = Pick<AdapterConfig,
   | "id" | "kind" | "boundedContext" | "targetEntity" | "targetKind"
   | "phase" | "mode" | "instructions" | "deps" | "dateRoles"

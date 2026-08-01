@@ -184,12 +184,15 @@ interface BuildConnectorResult {
   install: InstallResult;
   bytes: number;
   targetKind: "entity" | "valueObject";
+  /** Wall-clock ms of the whole build (codegen + npm install + summary LLMs). */
+  durationMs: number;
 }
 
 /** Author (or repair) the connector's code with AI, install whatever npm packages
  * it imports, write the module, and re-register the adapter. Stop-and-show: this
  * does NOT run or ingest — the caller tests it next. */
 export async function buildConnector(id: string, instructions?: string, errorReport?: string): Promise<BuildConnectorResult> {
+  const t0 = Date.now();
   const cfg = readSidecar(id);
   if (!cfg) throw new Error(`no connector "${id}"`);
   const target = resolveTargetSchema(cfg.targetEntity);
@@ -218,8 +221,12 @@ export async function buildConnector(id: string, instructions?: string, errorRep
       if (proposed.created || proposed.updated) dateRoles = proposed;
     } catch { /* leave roles unset; derive falls back to its first-date-field heuristic */ }
   }
+  // Re-read the sidecar before writing: the LLM/npm awaits above leave a long
+  // window in which a concurrent pull may have stamped lastPullAt — base the
+  // write on the freshest copy so that stamp isn't clobbered.
+  const latest = readSidecar(id) ?? cfg;
   const next: AdapterConfig = {
-    ...cfg, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps,
+    ...latest, kind: "connector", targetKind, phase: "built", instructions: instr, deps: gen.deps,
     ...(dateRoles?.created || dateRoles?.updated ? { dateRoles } : {}),
   };
   writeSidecar(next);
@@ -232,14 +239,16 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   // the description stays in sync with the code.
   await regenerateConnectorSummary(id, gen.code);
   const depsNote = gen.deps.length ? `, deps: ${gen.deps.join(", ")}` : "";
+  const durationMs = Date.now() - t0;
   appendNote(
     id,
     errorReport ? "repaired" : "built",
     errorReport
       ? `Repaired connector code after an error (${gen.code.length} bytes${depsNote}).`
       : `Built connector code (${gen.code.length} bytes${depsNote}).`,
+    { durationMs },
   );
-  return { deps: gen.deps, install, bytes: gen.code.length, targetKind };
+  return { deps: gen.deps, install, bytes: gen.code.length, targetKind, durationMs };
 }
 
 interface SaveConnectorCodeResult {
@@ -263,7 +272,9 @@ export async function saveConnectorCode(id: string, code: string): Promise<SaveC
   // failed install still leaves the operator's edit on disk to repair.
   const install = await installDeps(deps);
   writeModule(id, code);
-  const next: AdapterConfig = { ...cfg, kind: "connector", phase: "built", deps };
+  // Fresh read before write (see buildConnector): don't clobber a lastPullAt
+  // stamped by a pull that ran during the npm install above.
+  const next: AdapterConfig = { ...(readSidecar(id) ?? cfg), kind: "connector", phase: "built", deps };
   writeSidecar(next);
   registerAdapter(createConnectorAdapter(next));
   // Keep the description in step with the hand-edited code (best-effort; falls back

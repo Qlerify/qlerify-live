@@ -18,6 +18,7 @@ import { getAdapter } from "./registry.js";
 import { connectorsInWorkflow } from "./connector/orchestrate.js";
 import { applyFieldMap } from "./types.js";
 import { appendNote } from "./connector/journal.js";
+import { readSidecar, writeSidecar } from "./sidecar.js";
 
 export interface IngestSummary {
   adapterId: string;
@@ -25,13 +26,19 @@ export interface IngestSummary {
   inserted: number;
   skipped: number;
   mode: ProvMode;
+  /** Wall-clock ms of the ingest itself (table + pull + insert loop), EXCLUDING
+   * derivation — the derive pass reports its own durationMs below, so the two
+   * numbers deliberately don't add up to one total. */
+  durationMs: number;
+  /** Wall-clock ms of the adapter.pull() call alone — the fetch/network step. */
+  fetchMs: number;
   /** Domain events derived from the ingested rows. Derivation auto-runs on every
    * pull (replacing the old manual "Rebuild from data" button), so the event log
    * always reflects the current data — including a backfill of rows that were
    * ingested before this became automatic. null if derivation errored, or was
    * deferred by the caller (opts.derive === false, e.g. a batch re-ingest that
    * derives once at the end). */
-  derived: { events: number; instances: number } | null;
+  derived: { events: number; instances: number; durationMs: number } | null;
 }
 
 /** Coerce a row's values to what the raw-SQL projection columns accept. Nested
@@ -46,42 +53,76 @@ function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/** Persist the pull stamp onto the adapter's sidecar (no-op for code-pack
+ * adapters that have none). Fresh-read → write, the same pattern every other
+ * config mutator uses, so neither side clobbers the other. */
+function stampLastPull(id: string, at: string, durationMs: number): void {
+  const cfg = readSidecar(id);
+  if (!cfg) return;
+  writeSidecar({ ...cfg, lastPullAt: at, lastPullDurationMs: durationMs });
+}
+
 export async function ingestPull(adapterId: string, opts: { limit?: number | null; derive?: boolean } = {}): Promise<IngestSummary> {
   const adapter = getAdapter(adapterId);
-  if (!adapter) throw new Error(`unknown adapter: ${adapterId}`);
-  // The target may be an entity OR a value object (a value object populated
-  // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
-  const o = getOntology();
-  const entity = o.entity(adapter.targetEntity) ?? o.valueObject(adapter.targetEntity);
-  if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
-
-  await store.ensureTable(entity);
-  const fieldMap = await adapter.mapping();
-  const { rows } = await adapter.pull({ limit: opts.limit });
-  const incoming = rows[adapter.targetEntity] ?? [];
-
+  if (!adapter) throw new Error(`unknown adapter: ${adapterId}`); // pre-run: no adapter identity to journal against
+  const t0 = Date.now();
+  let durationMs = 0;
+  let fetchMs = 0;
   let inserted = 0;
   let skipped = 0;
-  for (const raw of incoming) {
-    const mapped = flattenValues(applyFieldMap(raw, fieldMap));
-    const id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
-    mapped.id = id;
-    mapped._provenance = adapter.mode; // current-state provenance on the row
-    if (await store.findById(adapter.targetEntity, id)) {
-      skipped++; // idempotent: a row with this id already ingested
-      continue;
+  try {
+    // The target may be an entity OR a value object (a value object populated
+    // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
+    const o = getOntology();
+    const entity = o.entity(adapter.targetEntity) ?? o.valueObject(adapter.targetEntity);
+    if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
+
+    await store.ensureTable(entity);
+    const fieldMap = await adapter.mapping();
+    const tFetch = Date.now();
+    const { rows } = await adapter.pull({ limit: opts.limit });
+    fetchMs = Date.now() - tFetch;
+    const incoming = rows[adapter.targetEntity] ?? [];
+
+    for (const raw of incoming) {
+      const mapped = flattenValues(applyFieldMap(raw, fieldMap));
+      const id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
+      mapped.id = id;
+      mapped._provenance = adapter.mode; // current-state provenance on the row
+      if (await store.findById(adapter.targetEntity, id)) {
+        skipped++; // idempotent: a row with this id already ingested
+        continue;
+      }
+      await store.insert(adapter.targetEntity, mapped);
+      inserted++;
     }
-    await store.insert(adapter.targetEntity, mapped);
-    inserted++;
+
+    // The bounded context's data now comes from this adapter; the mode reflects the
+    // ladder rung (simulated/recorded/live) so the UI badges follow automatically.
+    await setAdapterMode(adapter.boundedContext, adapter.mode, adapter.id);
+    durationMs = Date.now() - t0;
+  } catch (e: any) {
+    // Record the failed attempt — the error and how long it ran — so the pull
+    // leaves a trace in the connector's history (it previously left none). Then
+    // rethrow: the HTTP 400 / chat-tool error paths stay exactly as before.
+    // Best-effort: journaling must never mask the original error.
+    try {
+      const msg = String(e?.message ?? e).slice(0, 300);
+      appendNote(adapter.id, "failed", `Pull failed: ${msg}`, { durationMs: Date.now() - t0 });
+    } catch { /* ignore journaling errors */ }
+    throw e;
   }
 
-  // The bounded context's data now comes from this adapter; the mode reflects the
-  // ladder rung (simulated/recorded/live) so the UI badges follow automatically.
-  await setAdapterMode(adapter.boundedContext, adapter.mode, adapter.id);
-  // Journal the pull onto the connector's history so it shows in the builder's
-  // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
-  // rows" button (every ingestPull caller is covered here — the single place).
-  appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present) into ${adapter.targetEntity}.`);
+  // The pull is committed — everything below is post-commit bookkeeping, kept
+  // OUTSIDE the try/catch and best-effort so an fs hiccup here can neither fail
+  // the ingest nor mislabel a completed run as a failed pull.
+  try {
+    stampLastPull(adapter.id, new Date().toISOString(), durationMs);
+    // Journal the pull onto the connector's history so it shows in the builder's
+    // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
+    // rows" button (every ingestPull caller is covered here — the single place).
+    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present) into ${adapter.targetEntity}.`, { durationMs });
+  } catch { /* ignore bookkeeping errors */ }
 
   // Ingested rows imply domain events — derive them right here so the event log
   // always tracks the data with no manual step. Run on EVERY pull (not just when
@@ -90,23 +131,24 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
   // never produced (e.g. rows ingested before derivation became automatic).
   // Workflow-scoped via the active context, and best-effort: the rows are already
   // committed, so a derivation hiccup must not fail the ingest (the next pull, or
-  // POST /sim/derive, retries). Covers every ingestPull caller from one place.
-  // Batch callers (reingestAll) pass derive:false and derive ONCE at the end —
-  // a single pass over the fully restored data is cheaper and gets cross-aggregate
-  // linear order right in one go.
-  let derived: { events: number; instances: number } | null = null;
+  // POST /sim/derive, retries) — and must not journal a "failed" note either,
+  // which is why this block sits OUTSIDE the try/catch above. Covers every
+  // ingestPull caller from one place. Batch callers (reingestAll) pass
+  // derive:false and derive ONCE at the end — a single pass over the fully
+  // restored data is cheaper and gets cross-aggregate linear order right in one go.
+  let derived: { events: number; instances: number; durationMs: number } | null = null;
   if (opts.derive !== false) {
     try {
       const r = await deriveFromData();
-      derived = { events: r.totalEmitted, instances: r.instances };
+      derived = { events: r.totalEmitted, instances: r.instances, durationMs: r.durationMs };
       if (r.totalEmitted > 0) {
-        appendNote(adapter.id, "ingested", `Derived ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the data.`);
+        appendNote(adapter.id, "ingested", `Derived ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the data.`, { durationMs: r.durationMs });
       }
     } catch {
       /* ingest succeeded; leave derivation to the next pull if it failed here */
     }
   }
-  return { adapterId: adapter.id, entity: adapter.targetEntity, inserted, skipped, mode: adapter.mode, derived };
+  return { adapterId: adapter.id, entity: adapter.targetEntity, inserted, skipped, mode: adapter.mode, derived, durationMs, fetchMs };
 }
 
 export interface ReingestSummary {
@@ -121,7 +163,9 @@ export interface ReingestSummary {
   failures: Array<{ id: string; entity: string; error: string }>;
   /** Events derived from the combined restored data (single final pass). null
    * only if that derivation itself errored. */
-  derived: { events: number; instances: number } | null;
+  derived: { events: number; instances: number; durationMs: number } | null;
+  /** Wall-clock ms of the whole re-ingest, INCLUDING the final derive pass. */
+  durationMs: number;
 }
 
 /**
@@ -141,6 +185,7 @@ export interface ReingestSummary {
  * per-pull step), so events are rebuilt correctly even if the last pull errored.
  */
 export async function reingestAll(opts: { limit?: number | null } = {}): Promise<ReingestSummary> {
+  const t0 = Date.now();
   // Default UNCAPPED: a reimport's whole point is a full restore, so every
   // connector pulls everything unless the caller windows it explicitly.
   const limit = opts.limit ?? null;
@@ -156,10 +201,10 @@ export async function reingestAll(opts: { limit?: number | null } = {}): Promise
   }
   // One derive over everything just ingested: idempotent, and the single place
   // that turns the restored rows into events for the whole workflow.
-  let derived: { events: number; instances: number } | null = null;
+  let derived: { events: number; instances: number; durationMs: number } | null = null;
   try {
     const r = await deriveFromData();
-    derived = { events: r.totalEmitted, instances: r.instances };
+    derived = { events: r.totalEmitted, instances: r.instances, durationMs: r.durationMs };
   } catch {
     /* data is restored; the next pull or POST /sim/derive will derive */
   }
@@ -169,5 +214,6 @@ export async function reingestAll(opts: { limit?: number | null } = {}): Promise
     pulls,
     failures,
     derived,
+    durationMs: Date.now() - t0,
   };
 }

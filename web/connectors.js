@@ -2,7 +2,7 @@
 // app.js — see the section comment below for what this view does.
 
 import { state } from "./state.js";
-import { escapeHtml } from "./format.js";
+import { escapeHtml, formatDuration } from "./format.js";
 import { api, apiDownload, render } from "./app.js";
 import { NOTE_BADGE, connectorName } from "./explorer.js";
 import { formatVersionDate } from "./model.js";
@@ -57,6 +57,7 @@ function connDetail(c) {
     ? notes.map((n) => `<div class="flex items-baseline gap-1.5 text-[11px] py-0.5">
         <span class="px-1 py-0.5 rounded ${NOTE_BADGE[n.kind] || NOTE_BADGE.note} shrink-0">${escapeHtml(n.kind)}</span>
         <span class="flex-1 text-stone-600">${escapeHtml(n.text)}</span>
+        ${n.durationMs != null ? `<span class="text-stone-400 shrink-0 tabular-nums">${escapeHtml(formatDuration(n.durationMs))}</span>` : ""}
         <span class="text-stone-400 shrink-0">${escapeHtml(formatVersionDate(n.at))}</span>
       </div>`).join("")
     : `<div class="text-xs text-stone-400">No history recorded.</div>`;
@@ -127,7 +128,7 @@ function connDetail(c) {
           ${chip("Credentials", c.credentialKeys.length ? escapeHtml(c.credentialKeys.join(", ")) : "none")}
           ${chip("Packages", c.deps.length ? escapeHtml(c.deps.join(", ")) : "none")}
           ${chip("Endpoint", c.endpoint ? escapeHtml(c.endpoint) : "—")}
-          ${chip("Last pull", c.lastPullAt ? escapeHtml(formatVersionDate(c.lastPullAt)) : "never")}
+          ${chip("Last pull", c.lastPullAt ? `${escapeHtml(formatVersionDate(c.lastPullAt))}${c.lastPullDurationMs != null ? ` · ${escapeHtml(formatDuration(c.lastPullDurationMs))}` : ""}` : "never")}
           ${c.owned ? "" : chip("Owner", "legacy (unassigned)")}
         </div>
 ${diagnostics}

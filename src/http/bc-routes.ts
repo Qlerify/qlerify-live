@@ -71,6 +71,19 @@ function diffRows(rows: Array<Record<string, unknown>>, entity: EntitySchema) {
   };
 }
 
+/** Explorer filters arrive as a JSON array in the /raw query string. Keep only
+ * well-formed, active entries ({attr, cond, value} with a non-empty value) —
+ * the store additionally skips attrs the table has no column for. */
+function parseRowFilters(raw: unknown): store.RowFilter[] {
+  if (typeof raw !== "string" || !raw) return [];
+  let arr: unknown;
+  try { arr = JSON.parse(raw); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((f: any) => f && typeof f.attr === "string" && f.attr && typeof f.cond === "string" && f.value != null && f.value !== "")
+    .map((f: any) => ({ attr: f.attr, cond: f.cond, type: f.type === "Number" ? "Number" : "String", value: String(f.value) }));
+}
+
 function matchesType(value: unknown, dataType?: string): boolean {
   if (value === undefined || value === null) return true; // coverage handled separately
   switch ((dataType ?? "string").toLowerCase()) {
@@ -181,15 +194,27 @@ export function registerBcRoutes(app: FastifyInstance): void {
     }
   });
 
-  // Raw ingestion — verbatim gen_<Entity> rows (incl. _provenance).
+  // Raw ingestion — verbatim gen_<Entity> rows (incl. _provenance), one pager
+  // window at a time: `rows` honours limit/offset/filters, `matched` counts
+  // every row passing the filters (drives the pager), `total` the whole
+  // org-scoped table (the "of N" in the explorer header).
   app.get("/api/bc/:bc/raw", async (req, reply) => {
     const bc = resolveBc((req.params as any).bc);
     if (!bc) return reply.code(404).send({ error: "UNKNOWN_BC" });
-    const entity = (req.query as any)?.entity || defaultEntityForBc(getOntology(), bc);
-    if (!entity) return { entity: null, rows: [], tableMissing: true };
-    const limit = Math.max(1, Math.min(500, Number((req.query as any)?.limit ?? 50)));
-    if (!(await store.tableExists(entity))) return { entity, rows: [], tableMissing: true };
-    return { entity, rows: await store.findMany(entity, limit), tableMissing: false };
+    const q = (req.query as any) ?? {};
+    const entity = q.entity || defaultEntityForBc(getOntology(), bc);
+    if (!entity) return { entity: null, rows: [], matched: 0, total: 0, tableMissing: true };
+    const limit = Math.max(1, Math.min(500, Number(q.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(Number(q.offset)) || 0);
+    const filters = parseRowFilters(q.filters);
+    if (!(await store.tableExists(entity))) return { entity, rows: [], matched: 0, total: 0, tableMissing: true };
+    const totalP = store.countRows(entity);
+    const [rows, matched, total] = await Promise.all([
+      store.findMany(entity, limit, offset, filters),
+      filters.length ? store.countRows(entity, filters) : totalP,
+      totalP,
+    ]);
+    return { entity, rows, matched, total, tableMissing: false };
   });
 
   // Row-level event trail — every domain event produced for each row of one gen_

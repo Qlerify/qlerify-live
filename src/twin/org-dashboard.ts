@@ -300,9 +300,11 @@ interface ValueAtRisk {
   byWorkflow: { workflowId: string; workflowName: string; overdueDays: number; slipDays: number; overrunDays: number; totalDays: number }[];
 }
 
-/** Connector freshness / health. PREVIEW: currently STATIC sample data — there is
- * no real per-pull `lastPullAt` writer yet (AdapterConfig.lastPullAt is interface-
- * only). The shape is the contract a real wiring will fill: swap `sources` to read
+/** Connector freshness / health. PREVIEW: currently STATIC sample data.
+ * ingestPull now writes AdapterConfig.lastPullAt + lastPullDurationMs on every
+ * successful pull, so the raw signal exists; this panel stays a preview until an
+ * org→workflow→sidecar mapping + per-source SLA config exist to read it through.
+ * The shape is the contract that wiring will fill: swap `sources` to read
  * now − lastPullAt per source + healthcheck, and flip `preview` to false. */
 interface ConnectorFreshness {
   preview: boolean;
@@ -762,10 +764,11 @@ async function computeAiActivity(orgId: string): Promise<AiActivity> {
 
 // PREVIEW connector-freshness data. The source NAMES are real (the org's bounded
 // contexts, from the loaded models), but the freshness / SLA / status values are
-// STATIC samples — there is no per-pull lastPullAt writer yet. When the adapter
-// layer starts stamping lastPullAt + healthchecks, replace the sample assignment
-// with `now − lastPullAt` per source and set preview=false. Kept deliberately so
-// the panel (and this gap) is never forgotten.
+// STATIC samples. ingestPull now stamps lastPullAt + lastPullDurationMs on each
+// adapter's sidecar; what's still missing is an org→workflow→sidecar mapping and
+// per-source SLA config to read them through here. When that exists, replace the
+// sample assignment with `now − lastPullAt` per source and set preview=false.
+// Kept deliberately so the panel (and this gap) is never forgotten.
 const FRESHNESS_SAMPLES: { lastEventAgo: string; slaMinutes: number; status: "ok" | "stale" | "unknown" }[] = [
   { lastEventAgo: "2m", slaMinutes: 15, status: "ok" },
   { lastEventAgo: "9m", slaMinutes: 15, status: "ok" },

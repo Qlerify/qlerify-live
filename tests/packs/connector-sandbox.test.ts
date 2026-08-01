@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { isBlockedIp, assertSafeUrl } from "../../src/packs/net-guard.js";
 import { writeModule, writeCredentials, deleteConnectorFiles, runConnector, permissionFlag } from "../../src/packs/connector/runtime.js";
+import { UNCAPPED_PULL_ROWS } from "../../src/packs/types.js";
 
 const ENTITY = { name: "Thing", required: [], fields: [] } as any;
 
@@ -39,6 +40,16 @@ describe("connector subprocess sandbox", () => {
     const r = await runConnector("sbx-ok", { entity: ENTITY, limit: 10 });
     expect(r.ok).toBe(true);
     expect(r.rows).toEqual([{ id: "1", ok: true }]);
+  });
+
+  // Generated modules defend with `ctx.limit ?? <fallback>`, so a null ctx.limit
+  // would silently shrink a full ingest to the module's fallback (the exactly-
+  // 1,000-rows-from-Cognito bug). An uncapped run must see the real ceiling.
+  it("an uncapped run (limit: null) hands the module the UNCAPPED_PULL_ROWS ceiling, never null", async () => {
+    mk("sbx-limit", `export async function fetchRows(ctx) { return [{ id: "1", seen: ctx.limit ?? "null" }]; }`);
+    const r = await runConnector("sbx-limit", { entity: ENTITY, limit: null });
+    expect(r.ok).toBe(true);
+    expect(r.rows).toEqual([{ id: "1", seen: UNCAPPED_PULL_ROWS }]);
   });
 
   // The FS / child_process confinement is enforced by the Node permission model.

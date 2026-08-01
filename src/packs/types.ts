@@ -32,6 +32,13 @@ interface IntrospectResult {
   fields: Array<{ name: string; dataType?: string; sample?: unknown }>;
 }
 
+/** Row ceiling substituted for an "uncapped" pull (`limit: null`). The module
+ * body must always see a real number as ctx.limit: generated connector code
+ * defends with `ctx.limit ?? <its own fallback>`, so a null would silently
+ * shrink a full ingest to that fallback (a 1,000-row module default is how a
+ * larger Cognito pool once ingested as exactly 1,000 rows, with no error). */
+export const UNCAPPED_PULL_ROWS = 10_000;
+
 export interface PullResult {
   rows: RowsByEntity;
   count: number;
@@ -48,9 +55,9 @@ export interface SourceAdapter {
   /** The source→model field map this adapter applies on pull. */
   mapping(): Promise<FieldMap>;
   /** Fetch a batch, keyed by model entity, already field-mapped. `limit: null`
-   * means NO cap — pull everything the source returns (large ingests are a
-   * supported path; the caller decides the ceiling, not the adapter). Omitted →
-   * the adapter's own conservative default. */
+   * means a full ingest — pull everything the source returns, up to the
+   * platform-wide UNCAPPED_PULL_ROWS ceiling. Omitted → the adapter's own
+   * conservative default. */
   pull(opts?: { limit?: number | null }): Promise<PullResult>;
   /** Push model rows back to the source (envelope; no-op for simulated). */
   push(rows: RowsByEntity): Promise<{ pushed: number }>;
@@ -86,6 +93,8 @@ export interface AdapterConfig {
   fieldMap?: FieldMap;
   limits?: { pageSize?: number; limit?: number };
   lastPullAt?: string;
+  /** Wall-clock ms the last successful pull took (written with lastPullAt). */
+  lastPullDurationMs?: number;
   fixturesDir?: string;
   // --- AI-authored adapter (Part 2.3, Slice 2) ---
   /** Configured source endpoint (passed to the body as ctx.endpoint). */

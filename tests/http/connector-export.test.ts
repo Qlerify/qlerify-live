@@ -126,7 +126,7 @@ describe("GET /api/connectors/:id/export", () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).not.toContain(SECRET);
     const config = res.json().connectors[0].config;
-    for (const stripped of ["workflowId", "organizationId", "credentialsRef", "lastPullAt", "fixturesDir", "bodyPath", "bodyPromptHash"]) {
+    for (const stripped of ["workflowId", "organizationId", "credentialsRef", "lastPullAt", "lastPullDurationMs", "fixturesDir", "bodyPath", "bodyPromptHash"]) {
       expect(config, `"${stripped}" must not be exported`).not.toHaveProperty(stripped);
     }
   });
@@ -181,7 +181,7 @@ describe("exportConnectorEntry allow-list", () => {
       id: `pin-${SFX}`, kind: "connector", boundedContext: "BC", targetEntity: "E",
       targetKind: "entity", phase: "built", mode: "live",
       workflowId: "wf", organizationId: "org", credentialsRef: "CRED_X",
-      lastPullAt: "2026-01-01T00:00:00.000Z", fixturesDir: "/x", bodyPath: "b.ts", bodyPromptHash: "h",
+      lastPullAt: "2026-01-01T00:00:00.000Z", lastPullDurationMs: 1234, fixturesDir: "/x", bodyPath: "b.ts", bodyPromptHash: "h",
       connectionOptionId: "opt", fieldMap: { a: "b" }, limits: { pageSize: 1 },
       endpoint: "https://e", instructions: "i", deps: ["d"], dateRoles: { created: "c" },
     };

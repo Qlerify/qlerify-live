@@ -469,8 +469,14 @@ export function registerRoutes(app: FastifyInstance) {
   });
 
   // List all runs with progress (the dashboard's main query) — the loaded model's
-  // root-aggregate instances, via the generic simulator.
-  app.get("/sim/cases", async () => genericListInstances());
+  // root-aggregate instances, via the generic simulator. Default cap keeps the
+  // old behaviour; ?limit=0 (or any non-positive value) lifts it and returns
+  // every case — same idiom as /sim/flow-by-case. The Overview list fetches all
+  // and searches/sorts/pages client-side.
+  app.get("/sim/cases", async (req) => {
+    const q = Number((req.query as any)?.limit ?? 200);
+    return genericListInstances(Number.isFinite(q) && q > 0 ? q : null);
+  });
 
   // Create a fresh run of the loaded model (instantiates the root aggregate).
   app.post("/sim/cases", async (_req, reply) => {

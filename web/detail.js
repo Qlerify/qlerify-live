@@ -5,8 +5,12 @@ import { state } from "./state.js";
 import { escapeHtml, prettyEntity } from "./format.js";
 import { EST_TIME_TITLE, bizTimeEstimated, provChip, provHatch, provModeForBC } from "./chips.js";
 import { STATUS_TONE, PHASE_TONE, api, navigate, render } from "./app.js";
-import { attrText, genericColumns, loadFlowRows, loadMeta } from "./dashboard.js";
+import { attrText, genericColumns, loadMeta } from "./dashboard.js";
 import { loadRegistryStatus } from "./model.js";
+import {
+  applyQuery, bindOvToolbar, caseRecords, chosenGutterAttrs, flowSlice,
+  ovActive, ovPager, ovQuerySuffix, ovToolbar,
+} from "./ovquery.js";
 
 // ---------------------------------------------------------------------------
 // Detail view — model-generic relationship forest (genericDetailView)
@@ -85,7 +89,9 @@ export async function doReset() {
 
 export function pill(text, status) {
   const tone = STATUS_TONE[status] || "bg-stone-100 text-stone-700";
-  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${tone}">${text}</span>`;
+  // `text` is model/source-controlled (a status value straight off an ingested
+  // row), so it must be escaped — the tone class is a lookup from a constant map.
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${tone}">${escapeHtml(text)}</span>`;
 }
 
 export function shortId(id) {
@@ -883,11 +889,14 @@ export function splitTimelineView(layout, splitRef, firedCounts) {
 export function viewSwitcher(active) {
   const seg = (href, label, on, title) =>
     `<a href="${href}" class="px-2.5 py-1 rounded ${on ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-800"} whitespace-nowrap transition-colors" title="${escapeHtml(title)}">${label}</a>`;
+  // The active search/filter/sort travels with the tab hop (page resets — it's
+  // per-tab), so a slice carved out in one representation persists in the next.
+  const qs = ovQuerySuffix();
   return `
     <div class="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-stone-300 bg-stone-100 text-sm" role="group" aria-label="View">
-      ${seg("#flow", "⑂ Workflow", active === "flow", "All cases merged onto one flow, with a counter on each event")}
-      ${seg("#rows", "▦ By case", active === "rows", "The same flow split into one row per case")}
-      ${seg("#list", "▤ List", active === "list", "Every case as a list — pick one to follow it end to end")}
+      ${seg("#flow" + qs, "⑂ Workflow", active === "flow", "All cases merged onto one flow, with a counter on each event")}
+      ${seg("#rows" + qs, "▦ By case", active === "rows", "The same flow split into one row per case")}
+      ${seg("#list" + qs, "▤ List", active === "list", "Every case as a list — pick one to follow it end to end")}
     </div>`;
 }
 
@@ -899,7 +908,11 @@ export function viewSwitcher(active) {
 // that never fired stay ghosted; fired cards tint by relative volume so the
 // hotspots in the flow pop out.
 export function mergedTimeline() {
-  const counts = state.flow?.counts || {};
+  // An active search/filter recomputes the merged counters over just the
+  // matching cases (client-side, from the per-case rows); otherwise the
+  // server-side all-cases aggregate is shown untouched.
+  const slice = flowSlice();
+  const counts = slice ? slice.counts : (state.flow?.counts || {});
   const total = state.events.length;
   const firedRefs = new Set(state.events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
   const firedSteps = firedRefs.size;
@@ -971,15 +984,20 @@ export function mergedTimeline() {
           ${paths}
         </svg>` : "";
 
-  const cases = state.flow?.totalCases ?? 0;
+  const cases = slice ? slice.totalCases : (state.flow?.totalCases ?? 0);
+  const firings = slice ? slice.totalFirings : (state.flow?.totalFirings ?? 0);
   const pct = total ? (firedSteps / total) * 100 : 0;
+  const scopeNote = slice
+    ? `<span class="text-amber-700 font-semibold">${cases} of ${slice.allCases} case${slice.allCases === 1 ? "" : "s"} match the filter</span><span class="text-stone-300">·</span>`
+    : "";
   return `
     <section class="border-b border-stone-200 bg-stone-50">
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
-        <span class="font-semibold text-stone-600">${state.flow?.totalFirings ?? 0} firings across ${cases} case${cases === 1 ? "" : "s"}</span>
+        ${scopeNote}
+        <span class="font-semibold text-stone-600">${firings} firings across ${cases} case${cases === 1 ? "" : "s"}</span>
         <span class="text-stone-300">·</span>
         <span>${firedSteps} of ${total} events triggered</span>
-        <span class="ml-auto italic text-stone-400">The ×N badge on an event counts its firings across all cases</span>
+        <span class="ml-auto italic text-stone-400">The ×N badge on an event counts its firings ${slice ? "across the matching cases" : "across all cases"}</span>
       </div>
       <div id="timeline-scroll" class="px-6 py-3 overflow-x-auto">
         <div style="width:${W}px;">
@@ -1002,6 +1020,12 @@ export function mergedTimeline() {
 export function mergedFlowView() {
   const m = state.meta;
   const plural = prettyEntity(m.rootAggregatePlural);
+  // Search + filters narrow which cases feed the merged counters. Sorting and
+  // paging don't apply to a merged diagram, so the toolbar omits them here. The
+  // record set is EVERY case (matching the flowSlice denominator), not only
+  // those with events, so the toolbar's "N of M" agrees with the banner.
+  const flowRecords = caseRecords();
+  const slice = flowSlice();
   return `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-6">
@@ -1013,6 +1037,7 @@ export function mergedFlowView() {
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
+    ${ovToolbar("flow", flowRecords, { total: slice ? slice.totalCases : flowRecords.length })}
     ${mergedTimeline()}
     <main class="flex-1 overflow-auto p-6">
       <p class="text-sm text-stone-500 max-w-3xl">Every case in this workflow, merged onto the model flow. The ×N badge on an event counts how many times it triggered across all ${escapeHtml(plural.toLowerCase())}; brighter cards are busier steps. Switch to <a href="#rows" class="text-stone-800 underline">By case</a> to split it into one row per case, or <a href="#list" class="text-stone-800 underline">List</a> to follow a single case end to end.</p>
@@ -1027,15 +1052,21 @@ export function mergedFlowView() {
 // badge when a step fired more than once; the connector edges between them light
 // only where the case actually flowed. The left gutter names the case; the row
 // links into its full detail.
-export function rowsTimeline() {
-  const rows = state.flowRows?.cases || [];
+export function rowsTimeline(records, res) {
+  // `records` = every case with a flow row; `res` = the shared query engine's
+  // slice of them (filter → sort → page). Only the page's rows render — the
+  // pagination in the banner replaced the old server-side 50-row cap.
   const layout = computeFlowLayout(state.events);
   const { cardW, cardH, colPitch, rowPitch } = FLOW;
   const labelW = 210;
 
-  if (!rows.length) {
+  if (!records.length) {
     return `<section class="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">No cases have fired yet — run a case (or switch to <a href="#list" class="underline">List</a> and add one) to see it appear as a row here.</section>`;
   }
+  if (!res.total) {
+    return `<section class="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">No cases match the current search and filters — <button type="button" id="ov-nomatch-clear" class="underline text-stone-600 hover:text-stone-800">clear them</button> to see all ${records.length} again.</section>`;
+  }
+  const pageRecs = res.rows;
 
   // 2-D geometry, identical for every case row (same model topology): the spine,
   // its branches and the routed skip edges land exactly where the Workflow view
@@ -1053,13 +1084,12 @@ export function rowsTimeline() {
   // Heat is comparable across rows: tint each fired card by its count relative to
   // the busiest single (case, step) anywhere in view.
   let maxCount = 1;
-  for (const c of rows) for (const ref in (c.counts || {})) maxCount = Math.max(maxCount, c.counts[ref]);
+  for (const rec of pageRecs) for (const ref in (rec.fr.counts || {})) maxCount = Math.max(maxCount, rec.fr.counts[ref]);
 
-  // Each row's gutter shows that case's first (up to 3) mandatory attributes,
-  // joined from the case rows by id. Fall back to the first plain columns when the
-  // model marks nothing required.
-  const caseById = new Map((state.cases || []).map((r) => [String(r.id), r]));
-  let attrKeys = state.meta?.rootMandatoryAttributes || [];
+  // Each row's gutter shows that case's first (up to 3) attributes: the user's
+  // chosen List columns when customized, else the model's mandatory attributes,
+  // else the first plain columns.
+  let attrKeys = chosenGutterAttrs() || state.meta?.rootMandatoryAttributes || [];
   if (!attrKeys.length) attrKeys = genericColumns(state.cases || []);
   attrKeys = attrKeys.slice(0, 3);
 
@@ -1074,7 +1104,8 @@ export function rowsTimeline() {
     return { d, to };
   }).filter(Boolean);
 
-  const rowsHtml = rows.map((c) => {
+  const rowsHtml = pageRecs.map((rec) => {
+    const c = rec.fr;
     const counts = c.counts || {};
     const times = c.times || {};
     const firedRefs = new Set(state.events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
@@ -1151,7 +1182,7 @@ export function rowsTimeline() {
     // Mandatory-attribute lines: the first as the row's headline (bold value),
     // the rest as "name: value". Falls back to the short id if a case carries no
     // attribute values at all.
-    const caseRow = caseById.get(id) || {};
+    const caseRow = rec.row || {};
     const attrLines = attrKeys.map((k, ai) => {
       const val = attrText(caseRow[k]);
       const label = prettyEntity(k);
@@ -1167,6 +1198,18 @@ export function rowsTimeline() {
             class="absolute top-1.5 right-1.5 z-10 opacity-0 group-hover/case:opacity-100 focus:opacity-100 transition-opacity p-1 rounded text-stone-400 hover:text-stone-700 hover:bg-stone-200/70 cursor-pointer">${iconCopy}</span>
           <div class="min-w-0 group-hover/case:pr-5 transition-[padding] duration-150">
             ${headline}
+            ${(() => {
+              // Mandatory progress line: the same steps-done/total the List's
+              // Progress column shows, joined from the case row when available.
+              const done = caseRow.progress ?? Object.keys(counts).length;
+              const tot = caseRow.total ?? (state.events.length || 1);
+              const pct = Math.min(100, Math.round((done / (tot || 1)) * 100)) || 0;
+              return `
+                <div class="flex items-center gap-1.5 mt-1" title="${pct}% — ${done} of ${tot} steps">
+                  <div class="flex-1 h-1 bg-stone-200 rounded overflow-hidden"><div class="h-1 bg-amber-400" style="width:${pct}%"></div></div>
+                  <span class="text-[9px] text-stone-500 tabular-nums shrink-0">${done}/${tot}</span>
+                </div>`;
+            })()}
             ${c.startAt || c.lastAt ? (() => {
               const start = c.startAt || c.lastAt;
               const active = c.lastAt && c.lastAt !== start;
@@ -1187,22 +1230,20 @@ export function rowsTimeline() {
       </a>`;
   }).join("");
 
-  const total = state.flowRows?.totalCases ?? rows.length;
-  const truncated = total > rows.length;
   const totalW = labelW + gridW;
-  const anyEst = rows.some((c) => Object.values(c.times || {}).some((t) => bizTimeEstimated(t)));
+  const anyEst = pageRecs.some((rec) => Object.values(rec.fr.times || {}).some((t) => bizTimeEstimated(t)));
+  const filtered = ovActive();
   return `
     <section class="border-b border-stone-200 bg-white">
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200">
-        <span class="font-semibold text-stone-600">${rows.length}${truncated ? ` of ${total}` : ""} case${total === 1 ? "" : "s"}</span>
+        <span class="font-semibold text-stone-600">${res.from}–${res.to} of ${res.total} case${res.total === 1 ? "" : "s"}${filtered ? ` <span class="text-amber-700">(filtered from ${records.length})</span>` : ""}</span>
         <span class="text-stone-300">·</span>
-        <span>one row per case, most recently active first</span>
+        <span>one row per case</span>
         ${anyEst ? `<span class="flex items-center gap-1" title="${EST_TIME_TITLE}"><span class="mono italic text-stone-400">~date</span> = estimated time</span>` : ""}
-        ${truncated
-          ? `<button type="button" data-show-all-cases title="Load every case (may be slow for very large workflows)" class="ml-auto italic text-amber-600 hover:text-amber-700 hover:underline cursor-pointer">Showing the ${rows.length} most recent of ${total} — show all</button>`
-          : `<span class="ml-auto italic text-stone-400">Click a row to follow that case end to end</span>`}
+        <span class="italic text-stone-400">Click a row to follow that case end to end</span>
+        <div class="ml-auto">${ovPager("rows", res)}</div>
       </div>
-      <div class="overflow-x-auto">
+      <div id="timeline-scroll" class="overflow-x-auto">
         <svg width="0" height="0" class="absolute"><defs>
           <marker id="rows-arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
             <path d="M0,0 L8,4 L0,8 z" fill="#a8a29e"/>
@@ -1218,6 +1259,10 @@ export function rowsTimeline() {
 export function flowRowsView() {
   const m = state.meta;
   const singular = prettyEntity(m.rootAggregate);
+  // Cases with a flow row, through the shared query engine: the toolbar and the
+  // timeline read the same slice, so counts, page and rows always agree.
+  const records = caseRecords().filter((r) => r.fr);
+  const res = applyQuery(records, "rows");
   return `
     <header class="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-20">
       <div class="px-6 py-4 flex items-center gap-6">
@@ -1229,7 +1274,8 @@ export function flowRowsView() {
         <button id="chat-toggle" class="px-3 py-2 text-sm rounded-md border ${state.chatOpen ? "border-amber-400 bg-amber-50 text-amber-800" : "border-stone-300 bg-white hover:bg-stone-50"}" title="Assistant">💬 Assistant</button>
       </div>
     </header>
-    ${rowsTimeline()}
+    ${records.length ? ovToolbar("rows", records, res) : ""}
+    ${rowsTimeline(records, res)}
     <main class="flex-1 overflow-auto p-6">
       <p class="text-sm text-stone-500 max-w-3xl">The merged flow split into one row per case — each row shows how far that ${escapeHtml(singular.toLowerCase())} got through the steps and which it triggered. Click a row to follow that case end to end, or switch to <a href="#flow" class="text-stone-800 underline">Workflow</a> for the combined view.</p>
     </main>`;
@@ -1240,9 +1286,9 @@ export function flowRowsView() {
 // without also navigating into the case. Keyboard-activatable (it's a role=button
 // span). Re-bound on every render of the view.
 export function bindFlowRows() {
-  document.querySelector("[data-show-all-cases]")?.addEventListener("click", () => {
-    state.flowRowsShowAll = true;
-    loadFlowRows();
+  bindOvToolbar("rows");
+  document.getElementById("ov-nomatch-clear")?.addEventListener("click", () => {
+    document.getElementById("ov-clear")?.click();
   });
   document.querySelectorAll("[data-copy-case]").forEach((el) => {
     el.addEventListener("click", (ev) => { ev.preventDefault(); ev.stopPropagation(); copyCaseId(el); });

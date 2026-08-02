@@ -376,39 +376,49 @@ export function branchTotal(ont: Ontology, firedRefs: Set<string>): number {
 
 /** List runs: one row per root-aggregate instance, with progress. Batched: the
  * old shape issued TWO EventLog queries per case (400+ round trips per page
- * load); this resolves every case's fired refs and last event in three queries
- * total, so the list stays fast however many events the cases hold. */
-export async function genericListInstances(): Promise<any[]> {
+ * load); this resolves every case's fired refs and last event in a handful of
+ * queries total, so the list stays fast however many events the cases hold.
+ * `limit` mirrors findMany's contract (null = every row) — the Overview list
+ * passes null (via ?limit=0) and slices client-side. */
+export async function genericListInstances(limit: number | null = 200): Promise<any[]> {
   const ont = getOntology();
   const table = ont.rootAggregate;
   if (!(await store.tableExists(table))) return [];
-  const rows = await store.findMany(table, 200);
+  const rows = await store.findMany(table, limit);
   const ids = rows.map((r) => String(r.id));
   if (ids.length === 0) return [];
+  const idSet = new Set(ids);
+  // Small pages keep the cheap IN-list; past SQLite's bound-parameter comfort
+  // zone (≈1000), scan the workflow-scoped log unfiltered (what flow-aggregate
+  // does anyway) and intersect against the id set in JS.
+  const caseWhere = ids.length <= 500 ? { caseId: { in: ids } } : { caseId: { not: null } };
 
   // Distinct (case, eventRef) pairs → each case's fired-ref set.
   const refPairs = await prisma.eventLog.findMany({
-    where: { caseId: { in: ids }, ...eventLogOrgWhere() },
+    where: { ...caseWhere, ...eventLogOrgWhere() },
     distinct: ["caseId", "eventRef"],
     select: { caseId: true, eventRef: true },
   });
   const refsByCase = new Map<string, Set<string>>();
   for (const p of refPairs) {
-    if (!p.caseId) continue;
+    if (!p.caseId || !idSet.has(p.caseId)) continue;
     (refsByCase.get(p.caseId) ?? refsByCase.set(p.caseId, new Set()).get(p.caseId)!).add(p.eventRef);
   }
 
   // Last event per case: the max occurredAt, then one fetch for those rows.
   const lastAt = await prisma.eventLog.groupBy({
     by: ["caseId"],
-    where: { caseId: { in: ids }, ...eventLogOrgWhere() },
+    where: { ...caseWhere, ...eventLogOrgWhere() },
     _max: { occurredAt: true },
   });
   const lastByCase = new Map<string, { eventName: string; occurredAt: Date; provenance: string | null }>();
-  const pairs = lastAt.filter((g) => g.caseId && g._max.occurredAt);
-  if (pairs.length > 0) {
+  const pairs = lastAt.filter((g) => g.caseId && idSet.has(g.caseId) && g._max.occurredAt);
+  // The OR of (caseId, occurredAt) pairs binds two parameters each — chunk it so
+  // an uncapped list can't overrun the same parameter budget.
+  for (let i = 0; i < pairs.length; i += 400) {
+    const chunk = pairs.slice(i, i + 400);
     const lastRows = await prisma.eventLog.findMany({
-      where: { OR: pairs.map((g) => ({ caseId: g.caseId, occurredAt: g._max.occurredAt! })), ...eventLogOrgWhere() },
+      where: { OR: chunk.map((g) => ({ caseId: g.caseId, occurredAt: g._max.occurredAt! })), ...eventLogOrgWhere() },
       select: { caseId: true, eventName: true, occurredAt: true, provenance: true },
     });
     for (const r of lastRows) {

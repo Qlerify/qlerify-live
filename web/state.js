@@ -13,11 +13,11 @@ export const state = {
   flow: null,
   // Per-case flow (#rows): { cases: [{caseId, counts, firings, startAt, lastAt}], totalCases, cap }
   // startAt = first event's business date (case start); lastAt = most recent (business).
-  // from /sim/flow-by-case. The merged flow split into one row per case.
+  // from /sim/flow-by-case (always ?limit=0 — pagination bounds what renders).
   flowRows: null,
-  // When the user clicks "show all" in the By-case banner, lift the server-side
-  // 50-row cap on subsequent fetches (incl. the live poll). Sticky for the session.
-  flowRowsShowAll: false,
+  // Overview query state (search / filters / sort / paging / columns for the
+  // #flow, #rows and #list tabs) — lazy-built and owned by ovquery.js ovState().
+  ov: null,
   busy: false,
   dashboardTimer: null,  // #flow/#org/#rows live-poll interval handle (shared: routing + dashboard)
   // model-derived UI labels (filled from /sim/meta); defaults keep the UI sane

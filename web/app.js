@@ -11,11 +11,12 @@ import { loadChatInfo, chatScope, syncChatScope, resetChatState, activateConnect
 import { loadOrg, orgView, bindOrg } from "./org.js";
 import { expState, explorerView, bindExplorer, loadExplorer } from "./explorer.js";
 import { modelView, loadModel, bindModelPage, registryBanner, modelToast } from "./model.js";
-import { loadDashboard, loadFlow, loadFlowRows, loadOverview, loadMeta, genericColumns, attrText, dashboardView, bindDashboard } from "./dashboard.js";
+import { loadDashboard, loadFlow, loadFlowRows, loadOverview, loadMeta, genericColumns, attrText, dashboardView, bindDashboard, pollOverview } from "./dashboard.js";
 import { loadDetail, detailView, bindDetail, mergedFlowView, flowRowsView, bindFlowRows } from "./detail.js";
 import { loadConnectors, connectorsView, bindConnectors, disposeConnMonaco } from "./connectors.js";
 import { loginView, bindLogin, changePasswordView, bindChangePassword } from "./auth.js";
 import { loadAdmin, adminView, bindAdmin } from "./admin.js";
+import { bindOvToolbar, hydrateOv, ovTabForView } from "./ovquery.js";
 
 const API = "";
 const role = "Automation";
@@ -287,21 +288,26 @@ async function withOverlay(label, fn) {
 // ---------------------------------------------------------------------------
 
 function parseHash() {
-  const h = location.hash || "";
+  const full = location.hash || "";
+  // The Overview tabs carry their query state after a "?" (#list?q=…&s=-createdAt)
+  // — split it off so the route match sees only the path part.
+  const qi = full.indexOf("?");
+  const h = qi >= 0 ? full.slice(0, qi) : full;
+  const ovqs = qi >= 0 ? full.slice(qi + 1) : "";
   let m;
   if (h.startsWith("#login")) return { view: "login" };
   if (h.startsWith("#admin")) return { view: "admin" };
   if (h.startsWith("#org")) return { view: "org" };
   if (h.startsWith("#model")) return { view: "model" };
-  if (h.startsWith("#flow")) return { view: "flow" };
-  if (h.startsWith("#rows")) return { view: "rows" };
-  if (h.startsWith("#list")) return { view: "dashboard" };
+  if (h.startsWith("#flow")) return { view: "flow", ovqs };
+  if (h.startsWith("#rows")) return { view: "rows", ovqs };
+  if (h.startsWith("#list")) return { view: "dashboard", ovqs };
   if ((m = h.match(/^#connectors(?:\/(.+))?$/))) return { view: "connectors", connSel: m[1] ? decodeURIComponent(m[1]) : null };
   if ((m = h.match(/^#bcs(?:\/([^/]+)(?:\/(.+))?)?$/))) return { view: "bcs", expSys: m[1] ? decodeURIComponent(m[1]) : null, expEntity: m[2] ? decodeURIComponent(m[2]) : null };
   if ((m = h.match(/^#case\/([\w-]+)/))) return { view: "detail", caseId: m[1] };
   // Bare "#" (the Overview home) is a SMART default: the merged Workflow flow
   // when this workflow has cases, else the case List. Resolved in loadOverview().
-  return { view: "overview" };
+  return { view: "overview", ovqs };
 }
 
 export function navigate(hash) {
@@ -385,6 +391,15 @@ export async function onHashChange() {
     await ensureMe();
   }
 
+  // Overview tabs: hydrate the shared query state from the hash — AFTER the
+  // workflow is resolved, so ovState()'s per-workflow scope guard doesn't
+  // discard it (the query is scoped to the now-known workflow, and per-workflow
+  // prefs read from the right localStorage bucket). A hash with no query resets
+  // to a clean slate, so a plain #list / bare # is always the unfiltered view.
+  if (r.view === "overview" || r.view === "flow" || r.view === "rows" || r.view === "dashboard") {
+    hydrateOv(ovTabForView(r.view), r.ovqs || "");
+  }
+
   // A workflow that exists but has no model yet → the data plane throws
   // MODEL_NOT_LOADED. Catch it and show the "set this workflow's model" prompt
   // instead of a broken view.
@@ -403,15 +418,16 @@ export async function onHashChange() {
       await loadModel();
     } else if (r.view === "flow") {
       await loadFlow();
-      // Poll every 5s so the per-event counters tick up live as cases run.
+      // Poll every 5s so the per-event counters tick up live as cases run — the
+      // poll only re-downloads the heavy payloads when the data actually moved.
       state.dashboardTimer = setInterval(() => {
-        if (state.view === "flow" && !state.busy) loadFlow().catch(() => {});
+        if (state.view === "flow" && !state.busy) pollOverview("flow").catch(() => {});
       }, 5000);
     } else if (r.view === "rows") {
       await loadFlowRows();
       // Poll every 5s so rows appear / fill in live as cases run.
       state.dashboardTimer = setInterval(() => {
-        if (state.view === "rows" && !state.busy) loadFlowRows().catch(() => {});
+        if (state.view === "rows" && !state.busy) pollOverview("rows").catch(() => {});
       }, 5000);
     } else if (r.view === "overview") {
       await loadOverview();
@@ -423,9 +439,10 @@ export async function onHashChange() {
       }, 5000);
     } else {
       await loadDashboard();
-      // Poll every 5s so "last activity" pills age in front of the audience.
+      // Poll every 5s so "last activity" pills age in front of the audience —
+      // the heavy case payload is re-downloaded only when the data moved.
       state.dashboardTimer = setInterval(() => {
-        if (state.view === "dashboard" && !state.busy) loadDashboard().catch(() => {});
+        if (state.view === "dashboard" && !state.busy) pollOverview("dashboard").catch(() => {});
       }, 5000);
     }
   } catch (e) {
@@ -569,6 +586,7 @@ function renderView() {
     root.innerHTML = wrap(mergedFlowView());
     bindTenantBar();
     bindChat();
+    bindOvToolbar("flow");
     restoreTimelineScroll(prevScroll, prevScrollTop);
   } else if (state.view === "rows") {
     root.innerHTML = wrap(flowRowsView());

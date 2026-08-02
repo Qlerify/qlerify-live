@@ -97,6 +97,71 @@ describe("SimulatedAdapter + ingestPull", () => {
     }));
 });
 
+describe("ingestPull source-supplied dates", () => {
+  // Ingested rows carry ONLY timestamps the source recorded: a missing
+  // createdAt/updatedAt lands as NULL, never as the ingestion-time default —
+  // a fabricated "when we pulled" would sit indistinguishable next to real
+  // source dates.
+  function fixedRowsAdapter(id: string, rows: Array<Record<string, unknown>>) {
+    return {
+      id,
+      kind: "simulated",
+      boundedContext: "SAP",
+      targetEntity: TEST_ENTITY,
+      mode: "simulated" as const,
+      async introspect() { return { entity: TEST_ENTITY, fields: [] }; },
+      async mapping() { return {}; },
+      async pull() { return { rows: { [TEST_ENTITY]: rows }, count: rows.length }; },
+      async push() { return { pushed: 0 }; },
+      async healthcheck() { return { ok: true }; },
+    };
+  }
+
+  it("lands NULL createdAt for rows the source left blank, keeps real source dates — and derived events inherit the honesty", () =>
+    model.run(async () => {
+      // Unique ids per run: EventLog persists across test runs, and derivation
+      // is idempotent on (eventRef, aggregateId) — a reused id would silently
+      // skip the emit this test asserts on.
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const datedId = `po-dated-${suffix}`;
+      const undatedId = `po-undated-${suffix}`;
+      const po = { projectId: "p1", partNumber: "pn1", qty: 1, supplierId: "s1", status: "DRAFT" };
+      registerAdapter(fixedRowsAdapter("test-mixed-dates", [
+        { ...po, id: datedId, createdAt: "2023-04-05T06:07:08.000Z" },
+        { ...po, id: undatedId },
+      ]));
+      const summary = await ingestPull("test-mixed-dates", {});
+      expect(summary.inserted).toBe(2);
+
+      const withDate = await store.findById(TEST_ENTITY, datedId);
+      const withoutDate = await store.findById(TEST_ENTITY, undatedId);
+      expect(withDate!.createdAt).toBe("2023-04-05T06:07:08.000Z");
+      expect(withoutDate!.createdAt).toBeNull();
+
+      // Persisted derived events: a real source anchor lands with its date and
+      // an "estimated" trust stamp (heuristic createdAt, not a declared role);
+      // no anchor lands the null pair — businessAt AND businessAtKind NULL,
+      // never derivation time.
+      const dated = await prisma.eventLog.findFirst({ where: { aggregateId: datedId } });
+      const undated = await prisma.eventLog.findFirst({ where: { aggregateId: undatedId } });
+      expect(dated!.businessAt!.toISOString().startsWith("2023-04-05")).toBe(true);
+      expect(dated!.businessAtKind).toBe("estimated");
+      expect(undated!.businessAt).toBeNull();
+      expect(undated!.businessAtKind).toBeNull();
+    }));
+
+  it("lands NULL dates even when the source supplies none at all — ingestion never stamps its own time", () =>
+    model.run(async () => {
+      registerAdapter(fixedRowsAdapter("test-no-dates", [{ id: "po-no-source-date" }]));
+      const summary = await ingestPull("test-no-dates", { derive: false });
+      expect(summary.inserted).toBe(1);
+
+      const row = await store.findById(TEST_ENTITY, "po-no-source-date");
+      expect(row!.createdAt).toBeNull();
+      expect(row!.updatedAt).toBeNull();
+    }));
+});
+
 describe("loadPacks", () => {
   it("discovers the SAP pack via dynamic import and registers its adapter", async () => {
     const n = await loadPacks();

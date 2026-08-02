@@ -249,7 +249,7 @@ export function registerRoutes(app: FastifyInstance) {
       // render with the same known/estimated treatment the detail view uses (all
       // firings of one event in a case share one derivation rule, so _min is safe).
       _min: { businessAt: true, businessAtKind: true, evidenceKind: true },
-      _max: { businessAt: true },
+      _max: { businessAt: true, occurredAt: true },
     });
     interface CaseRow {
       caseId: string; counts: Record<string, number>; firings: number; startAt: string; lastAt: string;
@@ -259,6 +259,12 @@ export function registerRoutes(app: FastifyInstance) {
       times: Record<string, { businessAt: string; businessAtKind: string | null; evidenceKind: string | null }>;
     }
     const byCase = new Map<string, CaseRow>();
+    // Recording-time last activity per case — the ORDERING fallback for cases
+    // whose events carry no business time at all (businessAt is null when no
+    // source timestamp anchors an event). Recorded order is genuine metadata and
+    // keeps such cases in their recency slot instead of sinking below the
+    // ROW_CAP; it is never displayed as a business date.
+    const lastSeen = new Map<string, string>();
     for (const r of rows) {
       const id = r.caseId as string;
       let c = byCase.get(id);
@@ -276,9 +282,13 @@ export function registerRoutes(app: FastifyInstance) {
       }
       if (first && (c.startAt === "" || first < c.startAt)) c.startAt = first;
       if (last > c.lastAt) c.lastAt = last;
+      const seen = r._max?.occurredAt ? new Date(r._max.occurredAt).toISOString() : "";
+      if (seen > (lastSeen.get(id) ?? "")) lastSeen.set(id, seen);
     }
-    // Most recently active first (by business last-activity).
-    const all = [...byCase.values()].sort((a, b) => (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0));
+    // Most recently active first (by business last-activity, recorded activity
+    // as the tiebreak-fallback for business-time-less cases).
+    const sortKey = (c: CaseRow) => c.lastAt || lastSeen.get(c.caseId) || "";
+    const all = [...byCase.values()].sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0));
     const capped = ROW_CAP === Infinity ? all : all.slice(0, ROW_CAP);
     return { cases: capped, totalCases: all.length, cap: ROW_CAP === Infinity ? all.length : ROW_CAP };
   });

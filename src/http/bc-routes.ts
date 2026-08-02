@@ -235,7 +235,7 @@ export function registerBcRoutes(app: FastifyInstance): void {
       take: limit,
       select: {
         eventName: true, aggregateId: true, role: true, provenance: true,
-        evidence: true, evidenceKind: true, occurredAt: true, businessAt: true, caseId: true,
+        evidence: true, evidenceKind: true, occurredAt: true, businessAt: true, businessAtKind: true, caseId: true,
       },
     });
     const byRow: Record<string, any[]> = {};

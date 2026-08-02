@@ -34,7 +34,8 @@ const COLUMNS: ColumnUpgrade[] = [
   { table: "plat_identities", column: "mustChangePassword", type: "BOOLEAN NOT NULL DEFAULT 0" },
   // Timestamp trust on the event spine: businessAtKind = known | estimated,
   // stamped by data derivation (twin/derive.ts) so the UI can grey out inferred
-  // business times. Null = simulator/live rows and pre-existing derived rows.
+  // business times. Null = simulator/live rows, pre-existing derived rows, and
+  // derived events with no source anchor (businessAt NULL — nothing to qualify).
   { table: "EventLog", column: "businessAtKind", type: "TEXT" },
   // Per-org LLM provider choice + AWS Bedrock BYOK (org's own AWS credentials).
   { table: "plat_organizations", column: "llmProvider", type: "TEXT" },

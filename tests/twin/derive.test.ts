@@ -115,9 +115,15 @@ describe("planDerivation — Onboarding evidence rules", () => {
 
   it("orders an instance's events monotonically (Registered before Confirmed)", () => {
     const p = plan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A", createdAt: "2026-06-01T00:00:00.000Z" }]);
-    const reg = p.AccountRegistered.fired[0].businessAt.getTime();
-    const conf = p.AccountConfirmed.fired[0].businessAt.getTime();
+    const reg = p.AccountRegistered.fired[0].businessAt!.getTime();
+    const conf = p.AccountConfirmed.fired[0].businessAt!.getTime();
     expect(conf).toBeGreaterThan(reg);
+  });
+
+  it("leaves businessAt NULL when the row carries no timestamp at all — never derivation time", () => {
+    const p = plan([{ id: "a1", email: "a@x.com", status: "CONFIRMED", firstname: "A", lastname: "A" }]);
+    expect(p.AccountRegistered.fired[0].businessAt).toBeNull();
+    expect(p.AccountConfirmed.fired[0].businessAt).toBeNull();
   });
 
   it("carries the row's provenance onto the derived event", () => {

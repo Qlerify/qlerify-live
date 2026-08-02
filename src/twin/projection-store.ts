@@ -291,11 +291,15 @@ async function rowFilterSql(table: string, filters: RowFilter[]): Promise<{ clau
   return { clauses, params };
 }
 
-/** Read rows in a deterministic order (insertion order: createdAt, then id as
- * the tiebreaker) so a window, when one applies, is stable across calls instead
- * of whatever SQLite happens to return. `limit: null` reads ALL rows — the bulk
- * derivation path uses it so every ingested row produces its events. `offset`
- * and `filters` serve the explorer's server-side paging. */
+/** Read rows in a deterministic order (createdAt, then id as the tiebreaker) so
+ * a window, when one applies, is stable across calls instead of whatever SQLite
+ * happens to return. Ingested rows whose source recorded no creation date carry
+ * a NULL createdAt (never a fabricated ingestion stamp — see packs/ingest.ts);
+ * those sort LAST (id-ordered) — SQLite's NULLs-first default would let
+ * unknown-date rows monopolize every dated window (e.g. the dashboard's
+ * 200-row case list). `limit: null` reads ALL rows — the bulk derivation path
+ * uses it so every ingested row produces its events. `offset` and `filters`
+ * serve the explorer's server-side paging. */
 export async function findMany(
   table: string,
   limit: number | null = 200,
@@ -306,7 +310,7 @@ export async function findMany(
   const rf = await rowFilterSql(table, filters);
   const clauses = [f.clause, ...rf.clauses].filter(Boolean);
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")} ` : "";
-  const order = `ORDER BY ${ident("createdAt")}, ${ident("id")}`;
+  const order = `ORDER BY ${ident("createdAt")} IS NULL, ${ident("createdAt")}, ${ident("id")}`;
   const params: unknown[] = [...f.params, ...rf.params];
   // SQLite only accepts OFFSET after a LIMIT; -1 keeps it unbounded.
   let page = "";

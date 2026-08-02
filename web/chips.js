@@ -38,10 +38,13 @@ export function evidenceChip(kind) {
 // kind — only a create event's time is witnessed by the source (its creation
 // date), every other derived event's time is inferred from last-modified /
 // heuristics. Rows with no evidence at all (simulator steps, live commands)
-// need no qualifier. Estimated times render greyed with a ~ prefix.
+// need no qualifier — and neither does a null businessAt: the moment is UNKNOWN
+// (no source anchor at all), not estimated; there is no date to qualify.
+// Estimated times render greyed with a ~ prefix.
 export const EST_TIME_TITLE = "Estimated — the source records that this step happened, but not exactly when. The date shown is inferred from the record's timestamps.";
 export function bizTimeEstimated(entry) {
   if (!entry) return false;
+  if (entry.businessAt == null) return false;
   if (entry.businessAtKind) return entry.businessAtKind === "estimated";
   return entry.evidenceKind != null && entry.evidenceKind !== "create";
 }

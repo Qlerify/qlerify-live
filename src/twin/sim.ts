@@ -259,7 +259,9 @@ async function logSkippedStep(instanceId: string, event: OntologyEvent, caption:
     data: {
       eventName: event.name, eventRef: event.ref, boundedContext: event.boundedContext,
       aggregateRoot: event.aggregateRoot, aggregateId: "", caseId: instanceId,
-      role: event.role, payload: JSON.stringify({ skipped: true, error: caption }), businessAt: new Date(),
+      // No businessAt: the step did NOT happen — there is no business moment to
+      // record. occurredAt (DB default now) captures when the skip was logged.
+      role: event.role, payload: JSON.stringify({ skipped: true, error: caption }),
       provenance: await provenanceFor(event.boundedContext),
       organizationId: currentOrgId(),
       workflowId: currentWorkflowId(),

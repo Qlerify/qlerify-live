@@ -110,7 +110,7 @@ function queriesSection(): string {
 function durationsSection(): string {
   return [
     "## Business clock",
-    "Each event carries two timestamps: `occurredAt` (real wall-clock — when the simulator recorded the row) and `businessAt` (the event's business date, taken from a date attribute in the event's own data). Reason about how long a step took as the difference between consecutive events' `businessAt` dates.",
+    "Each event carries `occurredAt` (real wall-clock — when the simulator recorded the row) and, when a source timestamp anchors it, `businessAt` (the event's business date, taken from a date attribute in the event's own data). `businessAt` can be null — the business time is then UNKNOWN; never invent or estimate one. Reason about how long a step took as the difference between consecutive events' `businessAt` dates only when both are set; otherwise say the business duration is unknown (you may cite the `occurredAt` gap, explicitly labelled as recorded time, not business time).",
     "The simulator fires events seconds apart in real time, so for \"how long has this been stuck\" / \"is anything stalled\" questions reason in *real-time dwell* (`dwellSeconds` on each instance), not business time. A \"week\" in demo terms is anything stalled longer than the user expects to wait between clicks — usually a few minutes.",
   ].join("\n");
 }

@@ -243,8 +243,9 @@ function isTimestampField(name: string, dataType?: string): boolean {
 
 // gen_ projection tables ALWAYS carry these platform timestamp columns, and a
 // connector commonly maps the source's creation / last-modified times straight
-// INTO them (the returned values override the ingestion-time defaults on insert —
-// see projection-store.insert). They are therefore valid date anchors even when
+// INTO them. On the ingestion path these columns hold ONLY what the source
+// recorded — a record without a value lands as NULL, never as an ingestion-time
+// stamp (see packs/ingest.ts). They are therefore valid date anchors even when
 // the model declares no date-typed BUSINESS field — which is the common case (an
 // Account with email/status/… but no `registeredAt`, its real Cognito
 // UserCreateDate/UserLastModifiedDate sitting in createdAt/updatedAt).

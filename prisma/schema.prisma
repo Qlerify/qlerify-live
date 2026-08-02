@@ -36,14 +36,15 @@ model EventLog {
   role          String
   payload       String   // JSON-serialized command args
   occurredAt    DateTime @default(now())  // real wall-clock time the simulator recorded the event
-  businessAt    DateTime?  // simulated business time — the date the event would have occurred in the real world
+  businessAt    DateTime?  // business time — when the event (would have) occurred in the real world. Null = no source timestamp anchors it: the moment is unknown, deliberately NOT faked to derivation/ingestion time (twin/derive.ts).
   // How trustworthy businessAt is, stamped by data derivation (twin/derive.ts):
   //   known     — a source timestamp directly anchors THIS event (a create event
   //               anchored to the connector's declared creation date).
   //   estimated — inferred (last-modified / creation fallback / row heuristic):
   //               the ordering is right but the moment is nominal.
-  // Null = simulator-stepped/live rows (their time needs no qualifier) and rows
-  // derived before this column existed (re-derive to populate).
+  // Null = simulator-stepped/live rows (their time needs no qualifier), rows
+  // derived before this column existed (re-derive to populate), and events whose
+  // businessAt is null (no time, nothing to qualify).
   businessAtKind String?
   provenance    String?  // simulated | recorded | live — where this fact came from (null = legacy → simulated)
   // Why this event fired, from data derivation (twin/derive.ts). Null for

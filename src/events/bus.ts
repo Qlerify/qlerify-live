@@ -126,7 +126,7 @@ function eventRow(
   def: EventDef,
   caseId: string | null,
   provenance: ProvMode,
-  businessAt: Date,
+  businessAt: Date | null,
   occurredAt?: Date,
 ) {
   return {
@@ -164,10 +164,11 @@ export async function emit(ev: EmittedEvent): Promise<void> {
 
 /** An event for the batch path, with the two per-event decisions emit() makes
  * from context/DB already resolved by the caller: the business time (the
- * derivation planned it) and the case (correlated in memory — see
- * twin/derive.ts). */
+ * derivation planned it; null = no source timestamp anchors it — the moment is
+ * unknown and deliberately NOT faked to derivation time) and the case
+ * (correlated in memory — see twin/derive.ts). */
 export interface BatchEvent extends EmittedEvent {
-  businessAt: Date;
+  businessAt: Date | null;
   caseId: string | null;
 }
 

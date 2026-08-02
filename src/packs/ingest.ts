@@ -16,6 +16,7 @@ import { deriveFromData } from "../twin/derive.js";
 import * as store from "../twin/projection-store.js";
 import { getAdapter } from "./registry.js";
 import { connectorsInWorkflow } from "./connector/orchestrate.js";
+import { PLATFORM_TIMESTAMP_COLS } from "./connector/codegen.js";
 import { applyFieldMap } from "./types.js";
 import { appendNote } from "./connector/journal.js";
 import { readSidecar, writeSidecar } from "./sidecar.js";
@@ -53,6 +54,10 @@ function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+function hasValue(v: unknown): boolean {
+  return v !== null && v !== undefined && String(v).trim() !== "";
+}
+
 /** Persist the pull stamp onto the adapter's sidecar (no-op for code-pack
  * adapters that have none). Fresh-read → write, the same pattern every other
  * config mutator uses, so neither side clobbers the other. */
@@ -86,6 +91,14 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
 
     for (const raw of incoming) {
       const mapped = flattenValues(applyFieldMap(raw, fieldMap));
+      // Ingested rows carry ONLY timestamps the source actually recorded: a
+      // createdAt/updatedAt the record doesn't supply lands as NULL, never as
+      // insert's ingestion-time default. A fabricated "when we pulled" sits
+      // indistinguishable next to real source dates — and a date role pointing
+      // at the column would even certify it as a witnessed creation time
+      // (derive's known=true). Unknown stays unknown; only rows created live by
+      // commands stamp real wall-clock time.
+      for (const c of PLATFORM_TIMESTAMP_COLS) if (!hasValue(mapped[c])) mapped[c] = null;
       const id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
       mapped.id = id;
       mapped._provenance = adapter.mode; // current-state provenance on the row

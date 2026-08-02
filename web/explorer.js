@@ -374,15 +374,20 @@ export const EVENT_PROV_DOT = { live: "bg-emerald-500", recorded: "bg-violet-500
 export const EVENT_PROV_LABEL = { live: "Live", recorded: "Recorded", simulated: "Simulated" };
 
 // One event chip: name + provenance dot + business time, with a hover title
-// spelling out provenance, role, evidence, and time.
+// spelling out provenance, role, evidence, and time. A null businessAt means
+// the moment is UNKNOWN (no source anchor) — the chip shows no time rather
+// than passing off occurredAt (derivation/ingestion wall-clock) as when the
+// event happened; the tooltip still cites it, labelled as recorded time.
 export function eventChip(ev) {
   const prov = ev.provenance || "simulated";
-  const when = ev.businessAt || ev.occurredAt;
+  const when = ev.businessAt;
   const tip = [
     `${EVENT_PROV_LABEL[prov] || prov} event`,
     ev.role ? `Role: ${ev.role}` : "",
     ev.evidence ? `Evidence: ${ev.evidence}` : "",
-    when ? `When: ${formatVersionDate(when)}` : "",
+    when
+      ? `When: ${formatVersionDate(when)}`
+      : ev.occurredAt ? `Recorded: ${formatVersionDate(ev.occurredAt)} (business time unknown)` : "",
   ].filter(Boolean).join(" · ");
   const time = when ? `<span class="text-stone-400 ml-0.5 shrink-0">${escapeHtml(formatVersionDate(when))}</span>` : "";
   return `<span title="${escapeHtml(tip)}" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-stone-200 bg-white text-[11px] text-stone-700 max-w-full">

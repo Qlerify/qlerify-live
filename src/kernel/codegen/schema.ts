@@ -26,10 +26,16 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  // Absolute path via DATABASE_URL (see prisma/schema.prisma for why a relative
+  // file:./dev.db silently splits CLI and runtime onto two different .db files).
+  url      = env("DATABASE_URL")
 }`;
 
-// The infra table is domain-agnostic and preserved verbatim across swaps.
+// The infra table is domain-agnostic and preserved verbatim across swaps. It
+// MUST mirror prisma/schema.prisma's EventLog exactly — a swap regenerates the
+// schema from this text, and any column missing here (businessAtKind,
+// evidenceKind, tenancy/actor columns, …) gets DROPPED by `prisma db push` and
+// breaks every emit against the regenerated client.
 const EVENT_LOG_MODEL = `// ---------------------------------------------------------------------------
 // Platform infrastructure — append-only event log (domain-agnostic, preserved
 // verbatim across every model swap).
@@ -42,15 +48,28 @@ model EventLog {
   boundedContext String
   aggregateRoot  String
   aggregateId    String
-  scopeId        String?  // resolved owning-aggregate id the event belongs to
+  caseId         String?  // correlation id: the case (end-to-end run) this event belongs to
   role           String
   payload        String   // JSON-serialized command args
-  occurredAt     DateTime @default(now())
-  businessAt     DateTime?
+  occurredAt     DateTime @default(now())  // real wall-clock time the event was recorded
+  businessAt     DateTime? // business time; null = no source anchor (moment unknown, never faked)
+  businessAtKind String?  // known | estimated | null (see prisma/schema.prisma)
+  provenance     String?  // simulated | recorded | live
+  evidenceKind   String?  // derivation scenario: create | status | fields | none
+  evidence       String?  // human-readable evidence reason
+  organizationId String?
+  workflowId     String?
+  actorPrincipalId String?
+  actorKind        String?
 
   @@index([occurredAt])
   @@index([eventRef])
-  @@index([scopeId, occurredAt])
+  @@index([caseId, occurredAt])
+  @@index([organizationId, occurredAt])
+  @@index([workflowId, occurredAt])
+  @@index([workflowId, actorKind])
+  @@index([workflowId, aggregateId])
+  @@index([workflowId, eventRef, aggregateId])
 }`;
 
 function prismaType(dataType?: string): string {
@@ -92,10 +111,13 @@ function modelFor(entity: EntitySchema): string {
     lines.push(fieldLine(f.name, type + optional, "") + note);
   }
 
-  // Platform columns (only if the model didn't already declare them).
+  // Platform columns (only if the model didn't already declare them). The
+  // timestamps are NULLABLE: ingested rows carry only what the source recorded
+  // (a missing creation date is NULL, never an ingestion-time stamp — see
+  // packs/ingest.ts); the defaults still stamp genuine time on live writes.
   if (!declared.has("version")) lines.push(fieldLine("version", "Int", "@default(0)"));
-  if (!declared.has("createdAt")) lines.push(fieldLine("createdAt", "DateTime", "@default(now())"));
-  if (!declared.has("updatedAt")) lines.push(fieldLine("updatedAt", "DateTime", "@updatedAt"));
+  if (!declared.has("createdAt")) lines.push(fieldLine("createdAt", "DateTime?", "@default(now())"));
+  if (!declared.has("updatedAt")) lines.push(fieldLine("updatedAt", "DateTime?", "@updatedAt"));
 
   lines.push("}");
   return lines.join("\n");

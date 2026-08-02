@@ -118,7 +118,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_event_log",
     description:
-      "Return the events that have fired for a case, newest-first, with their business timestamps. Use when the user asks 'what's happened so far' or 'when did X fire'.",
+      "Return the events that have fired for a case, newest-first, with their business timestamps where known (businessAt is null when no source date anchors the event — the moment is unknown). Use when the user asks 'what's happened so far' or 'when did X fire'.",
     input_schema: {
       type: "object",
       properties: {
@@ -549,7 +549,7 @@ async function handleGetEventLog(caseId: string, limit: number) {
     where: { caseId, ...eventLogOrgWhere() },
     orderBy: { occurredAt: "desc" },
     take: limit,
-    select: { eventName: true, eventRef: true, boundedContext: true, role: true, businessAt: true, occurredAt: true },
+    select: { eventName: true, eventRef: true, boundedContext: true, role: true, businessAt: true, businessAtKind: true, occurredAt: true },
   });
   return { caseId, events: log };
 }

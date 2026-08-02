@@ -237,9 +237,12 @@ function evaluate(
 }
 
 /** A nominal business date for the row's events: the first date-typed business
- * column with a parseable value, else the row's createdAt, else now. Events are
- * then spread by their order index so an instance's timeline stays monotonic. */
-function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date {
+ * column with a parseable value, else the row's createdAt, else NULL — a row
+ * with no usable source timestamp yields events with NO business time, never a
+ * fabricated "now" (derivation time is not business time; unknown reads as
+ * unknown). Dated events are then spread by their order index so an instance's
+ * timeline stays monotonic. */
+function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date | null {
   const dateField = entity.fields.find(
     (f) => !PLATFORM_COLS.has(f.name) && f.name !== "id" && /date|time/i.test(f.dataType ?? "") && present(row[f.name]),
   );
@@ -251,7 +254,7 @@ function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date {
     const d = new Date(String(row.createdAt));
     if (!Number.isNaN(d.getTime())) return d;
   }
-  return new Date();
+  return null;
 }
 
 /** The real time anchor for ONE derived event on ONE row. A snapshot row records
@@ -262,20 +265,24 @@ function rowBaseDate(row: Record<string, unknown>, entity: EntitySchema): Date {
  *                                creation
  * When no roles are declared (or the named column is empty/unparseable) it falls
  * back to rowBaseDate's model heuristic, so behaviour is unchanged for connectors
- * that set no roles. The caller still adds the order-index offset, which keeps
- * multiple events sharing one anchor (two updates, or create==update) ordered.
+ * that set no roles. A row with no usable timestamp anywhere yields date NULL —
+ * the event lands without a business time rather than pretending derivation time
+ * is business time. The caller still adds the order-index offset to dated
+ * anchors, which keeps multiple events sharing one anchor (two updates, or
+ * create==update) ordered.
  *
  * `known` says whether that date is a WITNESSED time for this event, not just the
- * best estimate. Only the create shape qualifies: the source's creation date is by
- * definition when the row (and so its create event) came into being. An update
- * event's time is always inferred — even a real last-modified only bounds it (the
- * row may have changed again since), and every fallback is a heuristic. */
+ * best estimate (meaningless when date is null). Only the create shape qualifies:
+ * the source's creation date is by definition when the row (and so its create
+ * event) came into being. An update event's time is always inferred — even a real
+ * last-modified only bounds it (the row may have changed again since), and every
+ * fallback is a heuristic. */
 function eventBaseDate(
   kind: EvidenceKind,
   row: Record<string, unknown>,
   entity: EntitySchema,
   roles: { created?: string; updated?: string } | undefined,
-): { date: Date; known: boolean } {
+): { date: Date | null; known: boolean } {
   const fromRole = (field?: string): Date | null => {
     if (!field || !present(row[field])) return null;
     const d = new Date(String(row[field]));
@@ -361,9 +368,12 @@ interface PlannedEmission {
   aggregateId: string;
   role: string;
   payload: Record<string, unknown>;
-  businessAt: Date;
+  /** Null = no source timestamp anchors this event; it lands without a business
+   * time (the moment is unknown — deliberately not faked to derivation time). */
+  businessAt: Date | null;
   /** True when a source timestamp witnesses this event's time (see eventBaseDate);
-   * false = businessAt is inferred and should read as an estimate. */
+   * false = businessAt is inferred and should read as an estimate. Irrelevant
+   * when businessAt is null. */
   businessAtKnown: boolean;
   provenance?: ProvMode;
   evidence: string;
@@ -438,7 +448,7 @@ export function planDerivation(
         aggregateId: id,
         role: event.role,
         payload: buildPayload(kind, event, row, entity, ont),
-        businessAt: new Date(base.date.getTime() + oi * 1000),
+        businessAt: base.date ? new Date(base.date.getTime() + oi * 1000) : null,
         businessAtKnown: base.known,
         provenance: rowProvenance(row),
         evidence: reason,
@@ -564,7 +574,10 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
           evidenceKind: plan.kind,
           evidence: e.evidence,
           businessAt: e.businessAt,
-          businessAtKind: e.businessAtKnown ? "known" : "estimated",
+          // No business time → no trust qualifier either; the null pair reads
+          // as "moment unknown", distinct from simulator/live rows (businessAt
+          // set, kind null).
+          ...(e.businessAt ? { businessAtKind: (e.businessAtKnown ? "known" : "estimated") as "known" | "estimated" } : {}),
           caseId,
         });
       }

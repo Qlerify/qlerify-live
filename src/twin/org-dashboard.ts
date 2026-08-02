@@ -533,6 +533,12 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
       if ([...st.refCounts.values()].some((n) => n > 1)) rework++;
       if (st.done) {
         completed++;
+        // No termBiz → the completion's business time is UNKNOWN (its events
+        // carry no source anchor) and it stays OUT of the weekly series —
+        // deliberately. Bucketing by occurredAt instead would file historical
+        // completions under the week they were derived, fabricating a spike of
+        // "throughput" at ingestion time. The all-time `completed` count above
+        // still includes them, so the series may sum to less than it.
         if (st.termBiz) series.set(isoWeekKey(st.termBiz), (series.get(isoWeekKey(st.termBiz)) ?? 0) + 1);
         // cycle-time index: actual end-to-end ÷ derived expected.
         if (bl && bl.expectedTotal > 0 && st.firstBiz) {
@@ -557,7 +563,10 @@ export async function computePortfolio(orgId: string): Promise<PortfolioResult> 
     }
 
     // started (root creations) within the series window, by businessAt of the
-    // earliest event — used for the org flow ratio.
+    // earliest event — used for the org flow ratio. Instances with no business
+    // anchor at all (firstBiz/termBiz null) count on NEITHER side: without a
+    // date you cannot say whether they started or completed "recently", and an
+    // occurredAt fallback would claim everything ingested this week did.
     const windowWeeks = recentWeeks(now, SERIES_WEEKS);
     let startedRecent = 0, throughputRecent = 0;
     for (const st of insts) {

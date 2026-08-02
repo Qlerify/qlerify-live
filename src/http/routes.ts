@@ -245,19 +245,35 @@ export function registerRoutes(app: FastifyInstance) {
       // wall-clock (occurredAt): startAt is the case's first event's business date
       // (the create date), lastAt its most recent. occurredAt is ~ingestion time
       // for replayed/ingested data and would make every case look like it started
-      // "just now".
-      _min: { businessAt: true },
+      // "just now". businessAtKind/evidenceKind ride along so each card's date can
+      // render with the same known/estimated treatment the detail view uses (all
+      // firings of one event in a case share one derivation rule, so _min is safe).
+      _min: { businessAt: true, businessAtKind: true, evidenceKind: true },
       _max: { businessAt: true },
     });
-    const byCase = new Map<string, { caseId: string; counts: Record<string, number>; firings: number; startAt: string; lastAt: string }>();
+    interface CaseRow {
+      caseId: string; counts: Record<string, number>; firings: number; startAt: string; lastAt: string;
+      /** Per event: the EARLIEST firing's business time + its trust fields, in the
+       * same field names the log entries use so the client's bizTimeEstimated()
+       * applies unchanged. */
+      times: Record<string, { businessAt: string; businessAtKind: string | null; evidenceKind: string | null }>;
+    }
+    const byCase = new Map<string, CaseRow>();
     for (const r of rows) {
       const id = r.caseId as string;
       let c = byCase.get(id);
-      if (!c) { c = { caseId: id, counts: {}, firings: 0, startAt: "", lastAt: "" }; byCase.set(id, c); }
+      if (!c) { c = { caseId: id, counts: {}, firings: 0, startAt: "", lastAt: "", times: {} }; byCase.set(id, c); }
       c.counts[r.eventRef] = r._count._all;
       c.firings += r._count._all;
       const first = r._min?.businessAt ? new Date(r._min.businessAt).toISOString() : "";
       const last = r._max?.businessAt ? new Date(r._max.businessAt).toISOString() : "";
+      if (first) {
+        c.times[r.eventRef] = {
+          businessAt: first,
+          businessAtKind: r._min?.businessAtKind ?? null,
+          evidenceKind: r._min?.evidenceKind ?? null,
+        };
+      }
       if (first && (c.startAt === "" || first < c.startAt)) c.startAt = first;
       if (last > c.lastAt) c.lastAt = last;
     }

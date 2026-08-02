@@ -1076,7 +1076,15 @@ export function rowsTimeline() {
 
   const rowsHtml = rows.map((c) => {
     const counts = c.counts || {};
+    const times = c.times || {};
     const firedRefs = new Set(state.events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref));
+
+    // Business-date footer per fired card, walking the events in declared order
+    // (same iteration the cards use). A KNOWN date also shows the time passed
+    // since the case's previous KNOWN event; an estimated date renders greyed
+    // with a ~ and neither shows a gap nor becomes the next gap's baseline — a
+    // duration measured against an inferred moment would just be noise.
+    let prevKnownIso = null;
 
     const cards = state.events.map((e, i) => {
       const pos = layout.place.get(e.ref) || { col: i, lane: 0 };
@@ -1086,6 +1094,30 @@ export function rowsTimeline() {
       const provMode = provModeForBC(e.boundedContext);
       const heat = fired ? (0.1 + 0.45 * (n / maxCount)).toFixed(3) : 0;
       const heatStyle = fired ? `background-color:rgba(16,185,129,${heat});` : "";
+
+      const t = fired ? times[e.ref] : null;
+      const label = t ? fmtBizDate(t.businessAt) : null;
+      let footer = "";
+      if (label) {
+        const est = bizTimeEstimated(t);
+        let gapHtml = "";
+        if (!est) {
+          const g = prevKnownIso ? minutesBetween(prevKnownIso, t.businessAt) : null;
+          if (g != null && g > 0) {
+            const tone = g >= 10 * 1440 ? "text-amber-700 font-semibold" : "text-stone-500";
+            gapHtml = `<span class="${tone}">${fmtGap(g)}</span>`;
+          }
+          prevKnownIso = t.businessAt;
+        }
+        footer = `
+          <div class="mt-auto pt-1 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
+            ${est
+              ? `<span class="text-stone-400 italic mono" title="${EST_TIME_TITLE}">~${label}</span>`
+              : `<span class="text-stone-700 font-medium mono">${label}</span>`}
+            ${gapHtml}
+          </div>`;
+      }
+
       return `
         <div class="absolute rounded-md border ${fired ? "border-emerald-300" : phaseBorder} bg-white px-3 py-2 ${fired ? "" : "opacity-60"} flex flex-col overflow-hidden"
              style="left:${pos.col * colPitch}px; top:${laneTop[pos.lane]}px; width:${cardW}px; height:${cardH}px; ${heatStyle} ${provHatch(provMode)}">
@@ -1095,6 +1127,7 @@ export function rowsTimeline() {
           </div>
           <div class="text-[12px] font-medium leading-tight text-stone-800">${escapeHtml(e.name)}</div>
           <div class="text-[10px] text-stone-500 mt-1">${escapeHtml(e.role)}</div>
+          ${footer}
         </div>`;
     }).join("");
 
@@ -1157,12 +1190,14 @@ export function rowsTimeline() {
   const total = state.flowRows?.totalCases ?? rows.length;
   const truncated = total > rows.length;
   const totalW = labelW + gridW;
+  const anyEst = rows.some((c) => Object.values(c.times || {}).some((t) => bizTimeEstimated(t)));
   return `
     <section class="border-b border-stone-200 bg-white">
       <div class="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200">
         <span class="font-semibold text-stone-600">${rows.length}${truncated ? ` of ${total}` : ""} case${total === 1 ? "" : "s"}</span>
         <span class="text-stone-300">·</span>
         <span>one row per case, most recently active first</span>
+        ${anyEst ? `<span class="flex items-center gap-1" title="${EST_TIME_TITLE}"><span class="mono italic text-stone-400">~date</span> = estimated time</span>` : ""}
         ${truncated
           ? `<button type="button" data-show-all-cases title="Load every case (may be slow for very large workflows)" class="ml-auto italic text-amber-600 hover:text-amber-700 hover:underline cursor-pointer">Showing the ${rows.length} most recent of ${total} — show all</button>`
           : `<span class="ml-auto italic text-stone-400">Click a row to follow that case end to end</span>`}

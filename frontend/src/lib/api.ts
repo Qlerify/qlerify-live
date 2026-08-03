@@ -117,6 +117,139 @@ export const api = async <T = any>(path: string, opts: RequestInit = {}): Promis
   return res.json()
 }
 
+type StreamOpts = {
+  body: string
+  onEvent?: (name: string, data: any) => void
+  signal?: AbortSignal
+  stallMs?: number
+}
+
+// Streaming POST for long-running requests (the chat agent turn). Parses an SSE
+// response, invoking onEvent(name, data) per event; resolves with the "result"
+// event's data, throws on an "error" event. Extras over api():
+//   - signal: caller-side cancellation (the chat Stop button).
+//   - stall detection: the server heartbeats every 15s, so a silent stream means
+//     the connection is dead (proxy idle-kill, sleeping laptop) — abort instead
+//     of hanging the UI forever. Any received byte re-arms the timer.
+//   - a plain application/json response is passed through, so the client keeps
+//     working against a non-streaming server build.
+export const apiStream = async <T = any>(path: string, { body, onEvent, signal, stallMs = 90_000 }: StreamOpts): Promise<T> => {
+  const ctrl = new AbortController()
+  const onOuterAbort = () => ctrl.abort()
+  if (signal) {
+    if (signal.aborted) {
+      ctrl.abort()
+    } else {
+      signal.addEventListener("abort", onOuterAbort, { once: true })
+    }
+  }
+  let stalled = false
+  let stallTimer: ReturnType<typeof setTimeout> | null = null
+  const armStall = () => {
+    if (stallTimer) {
+      clearTimeout(stallTimer)
+    }
+    stallTimer = setTimeout(() => {
+      stalled = true
+      ctrl.abort()
+    }, stallMs)
+  }
+
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      cache: "no-store",
+      headers: apiHeaders(undefined, true),
+      body,
+      signal: ctrl.signal,
+    })
+    if (!res.ok) {
+      await throwApiError(res, path)
+    }
+    const ct = res.headers.get("content-type") || ""
+    // `await` (not a bare `return promise`) so the finally below runs only after
+    // the body has downloaded — leaving early would detach the caller's abort
+    // listener while the body is still streaming, making Stop a silent no-op.
+    if (!ct.includes("text/event-stream")) {
+      return await res.json()
+    }
+
+    // Arm stall detection only now that the response is KNOWN to be a heartbeat
+    // stream. Earlier would break the JSON fallback above: a non-streaming
+    // server sends no bytes at all until the turn finishes, which is silence by
+    // design, not a dead connection.
+    armStall()
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buf = ""
+    let result: T | undefined
+    let gotResult = false
+
+    while (!gotResult) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      armStall() // heartbeats land here too — only true silence trips the timer
+      buf += decoder.decode(value, { stream: true })
+      let sep = buf.indexOf("\n\n")
+      while (sep >= 0) {
+        const rawEvent = buf.slice(0, sep)
+        buf = buf.slice(sep + 2)
+        let event = "message"
+        const dataLines: string[] = []
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("event:")) {
+            event = line.slice(6).trim()
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart())
+          }
+          // ":" comment lines (heartbeats) carry no data
+        }
+        if (dataLines.length > 0) {
+          let data: any
+          try {
+            data = JSON.parse(dataLines.join("\n"))
+          } catch {
+            data = undefined
+          }
+          if (data !== undefined) {
+            if (event === "result") {
+              result = data
+              gotResult = true
+            } else if (event === "error") {
+              const err = new ApiError(data.message || data.error || `${path} failed`)
+              err.path = path
+              throw err
+            } else {
+              onEvent?.(event, data)
+            }
+          }
+        }
+        sep = buf.indexOf("\n\n")
+      }
+    }
+    if (!gotResult) {
+      throw new ApiError("Connection lost before the assistant finished — please try again.")
+    }
+    return result as T
+  } catch (e) {
+    if (stalled) {
+      throw new ApiError(
+        `The connection went silent for ${Math.round(stallMs / 1000)}s and was closed — check the network and try again.`,
+      )
+    }
+    throw e
+  } finally {
+    if (stallTimer) {
+      clearTimeout(stallTimer)
+    }
+    if (signal) {
+      signal.removeEventListener("abort", onOuterAbort)
+    }
+  }
+}
+
 // GET an attachment and hand it to the browser as a file download. Must go
 // through fetch (not a plain <a href>): the bearer token lives in localStorage
 // and is only attached by apiHeaders(), so a bare navigation would 401. The

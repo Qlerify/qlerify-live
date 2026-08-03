@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react"
 import { activateConnectorChat, clearChat, lastAssistantAsksConfirmation, sendChat, toggleChat } from "../lib/chatData.ts"
 import { useStore } from "../lib/store.ts"
 import { ChatMessage } from "./ChatMessage.tsx"
+import { ChatProgress } from "./ChatProgress.tsx"
 import { EventLogBody } from "../views/Detail/EventLogBody.tsx"
 import { ConnectorHistoryBody } from "../views/Explorer/ConnectorHistoryBody.tsx"
 
@@ -179,7 +180,7 @@ export const ChatPanel = ({ view }: { view: string }) => {
         ) : (
           chatMessages.map((m, i) => <ChatMessage key={i} msg={m} />)
         )}
-        {chatBusy && <div className="text-stone-500 text-xs italic">thinking…</div>}
+        {chatBusy && <ChatProgress />}
         {chatError && <div className="text-rose-700 text-xs">⚠ {chatError}</div>}
         {!empty && !chatBusy && lastAssistantAsksConfirmation(chatMessages) && (
           <div className="flex flex-wrap gap-2 pt-1">

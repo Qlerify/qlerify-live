@@ -1,4 +1,4 @@
-import { AUTH, api } from "./api.ts"
+import { AUTH, api, apiStream } from "./api.ts"
 import { useStore } from "./store.ts"
 import { loadDashboard } from "./workflowData.ts"
 import { loadDetail } from "./detailData.ts"
@@ -14,6 +14,30 @@ let hydrated = new Set<string>()
 let inConnectorMode = false
 let activeKey: string | null = null
 let activeScope: string | null = null
+
+// Turn-in-flight plumbing. Module-local: nothing renders from these, they only
+// steer the one live request.
+let chatAbort: AbortController | null = null
+let chatStopRequested = false // distinguishes a user Stop from a network abort
+let chatTurnGen = 0 // bumped by disownChatTurn; a stale gen = discard the turn
+
+// User pressed Stop: cancel the request but keep the turn OWNED, so its
+// catch/finally report "Stopped" and clean up state.
+export const stopChat = () => {
+  chatStopRequested = true
+  chatAbort?.abort()
+}
+
+// The active thread was discarded (clear button, logout/reset) while a turn was
+// in flight: cancel it AND disown it — its response must not resurrect the
+// cleared thread, and its error must not pollute the fresh state. sendChat's gen
+// checks make the orphaned continuation a no-op, so busy/progress are cleared
+// here instead of in its finally.
+const disownChatTurn = () => {
+  chatTurnGen++
+  useStore.getState().set({ chatBusy: false, chatProgress: null })
+  chatAbort?.abort()
+}
 
 // Every key is prefixed with the active org + workflow. Switching workflow is
 // SPA-style with no reload, so an unscoped cache would show workflow A's thread
@@ -139,6 +163,7 @@ export const syncChatScope = () => {
 
 // Logout: a different identity may sign in next on this page — drop every thread.
 export const resetChatState = () => {
+  disownChatTurn() // its late continuation must not touch the fresh state
   advisorChats = {}
   connectorChats = {}
   hydrated = new Set()
@@ -163,6 +188,7 @@ const persistConnectorChat = () => {
 }
 
 export const clearChat = () => {
+  disownChatTurn() // an in-flight turn must not resurrect (or re-persist) the cleared thread
   const s = useStore.getState()
   const e = s.exp
   if (inConnectorMode && activeKey && e.system && e.entity) {
@@ -214,6 +240,21 @@ const contextualContent = (text: string): string | ChatBlock[] => {
   return text
 }
 
+// SSE progress events reshape the live indicator under the messages.
+const onChatProgress = (name: string, data: any) => {
+  const p = useStore.getState().chatProgress
+  if (name !== "progress" || !p) {
+    return
+  }
+  if (data.kind === "model_call") {
+    useStore.getState().set({ chatProgress: { ...p, iteration: data.iteration, tool: null } })
+  } else if (data.kind === "tool_start") {
+    useStore.getState().set({ chatProgress: { ...p, tool: data.name } })
+  } else if (data.kind === "tool_end") {
+    useStore.getState().set({ chatProgress: { ...p, toolsDone: p.toolsDone + 1, tool: null } })
+  }
+}
+
 export const sendChat = async (override?: string) => {
   const s = useStore.getState()
   const text = (override ?? s.chatInput).trim()
@@ -222,7 +263,21 @@ export const sendChat = async (override?: string) => {
   }
 
   const messages = [...s.chatMessages, { role: "user", content: contextualContent(text) }]
-  s.set({ chatMessages: messages, chatInput: "", chatBusy: true, chatError: null })
+  s.set({
+    chatMessages: messages,
+    chatInput: "",
+    chatBusy: true,
+    chatError: null,
+    chatProgress: { startedAt: Date.now(), tool: null, iteration: 1, toolsDone: 0 },
+  })
+
+  chatStopRequested = false
+  // Keep this turn's own controller in a local: after a disown a NEWER turn may
+  // already own the module slot, and this turn's finally must tear down only its
+  // own instance, never the successor's.
+  const myAbort = new AbortController()
+  chatAbort = myAbort
+  const genAtSend = chatTurnGen
 
   // Identity of the thread this turn belongs to. If the user switches workflow or
   // table mid-flight, the reply must go to THIS thread's stash rather than
@@ -232,10 +287,16 @@ export const sendChat = async (override?: string) => {
   const keyAtSend = activeKey
 
   try {
-    const resp = await api<{ messages: ChatMessage[] }>("/chat", {
-      method: "POST",
+    const resp = await apiStream<{ messages: ChatMessage[] }>("/chat", {
       body: JSON.stringify({ messages }),
+      signal: myAbort.signal,
+      onEvent: onChatProgress,
     })
+    // Disowned (thread cleared / state reset mid-turn): the user discarded this
+    // conversation — drop the response entirely, unlike a swap which files it.
+    if (chatTurnGen !== genAtSend) {
+      return
+    }
     const swapped = activeScope !== scopeAtSend || inConnectorMode !== wasConnector || activeKey !== keyAtSend
     if (swapped) {
       // File the completed turn where it belongs — in memory only, since a server
@@ -260,9 +321,23 @@ export const sendChat = async (override?: string) => {
       persistConnectorChat()
     }
   } catch (e) {
-    useStore.getState().set({ chatError: (e as Error).message })
+    // A disowned turn reports nothing — the thread it belonged to is gone.
+    if (chatTurnGen === genAtSend) {
+      // "Stopped" only for the user's own Stop (an abort), never for a real
+      // failure that happens to arrive while the flag is set — e.g. the 401
+      // session-expiry path, which resets chat state mid-flight.
+      const stopped = chatStopRequested && (e as Error)?.name === "AbortError"
+      useStore.getState().set({
+        chatError: stopped ? "Stopped — the reply was cancelled before it finished." : (e as Error).message,
+      })
+    }
   } finally {
-    useStore.getState().set({ chatBusy: false })
+    if (chatAbort === myAbort) {
+      chatAbort = null
+    }
+    if (chatTurnGen === genAtSend) {
+      useStore.getState().set({ chatBusy: false, chatProgress: null })
+    }
   }
 }
 

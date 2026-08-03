@@ -5,6 +5,8 @@ import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
 
+export type ChatProgress = { startedAt: number; tool: string | null; iteration: number; toolsDone: number }
+
 type State = {
   me: Me | null
   orgs: NonNullable<Me["organizations"]>
@@ -67,6 +69,8 @@ type State = {
   chatInput: string
   chatBusy: boolean
   chatError: string | null
+  // Live progress of the in-flight turn, fed by the /chat SSE stream. null when idle.
+  chatProgress: ChatProgress | null
   detailPanelMode: string
   expPanelMode: string
 
@@ -137,6 +141,7 @@ export const useStore = create<State>((set) => ({
   chatInput: "",
   chatBusy: false,
   chatError: null,
+  chatProgress: null,
   detailPanelMode: "chat",
   expPanelMode: "history",
 

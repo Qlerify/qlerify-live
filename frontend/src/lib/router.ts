@@ -6,6 +6,7 @@ export type Route = {
   connSel?: string
   expSys?: string
   expEntity?: string
+  ovqs?: string
 }
 
 export const WORKFLOW_SCOPED_VIEWS = new Set([
@@ -20,7 +21,12 @@ export const WORKFLOW_SCOPED_VIEWS = new Set([
 ])
 
 export const parseHash = (): Route => {
-  const h = location.hash || ""
+  const full = location.hash || ""
+  // The Overview tabs carry their query state after a "?" (#list?q=…&s=-createdAt)
+  // — split it off so the route match sees only the path part.
+  const qi = full.indexOf("?")
+  const h = qi >= 0 ? full.slice(0, qi) : full
+  const ovqs = qi >= 0 ? full.slice(qi + 1) : ""
 
   if (h.startsWith("#login")) {
     return { view: "login" }
@@ -38,13 +44,13 @@ export const parseHash = (): Route => {
     return { view: "model" }
   }
   if (h.startsWith("#flow")) {
-    return { view: "flow" }
+    return { view: "flow", ovqs }
   }
   if (h.startsWith("#rows")) {
-    return { view: "rows" }
+    return { view: "rows", ovqs }
   }
   if (h.startsWith("#list")) {
-    return { view: "dashboard" }
+    return { view: "dashboard", ovqs }
   }
 
   const conn = h.match(/^#connectors(?:\/(.+))?$/)
@@ -66,7 +72,7 @@ export const parseHash = (): Route => {
     return { view: "detail", caseId: detail[1] }
   }
 
-  return { view: "overview" }
+  return { view: "overview", ovqs }
 }
 
 // The browser stores the bare hash as "", so normalise before comparing —

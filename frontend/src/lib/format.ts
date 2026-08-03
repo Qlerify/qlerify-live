@@ -104,6 +104,45 @@ export const attrLines = (raw: unknown): string[] => {
   return source.map(attrText).filter((s) => s !== "—")
 }
 
+// Every scalar leaf of a value, flattened to one searchable string — so free
+// text finds a match nested inside an object/array attribute, not just the
+// collapsed scalar attrText shows.
+export const attrSearchText = (raw: unknown): string => {
+  if (raw === undefined || raw === null || raw === "") {
+    return ""
+  }
+  let v: unknown = raw
+  if (typeof raw === "string") {
+    const t = raw.trim()
+    if (t[0] !== "{" && t[0] !== "[") {
+      return raw
+    }
+    try {
+      v = JSON.parse(t)
+    } catch {
+      return raw
+    }
+  }
+  if (typeof v !== "object" || v === null) {
+    return String(v)
+  }
+  const out: string[] = []
+  const walk = (x: unknown) => {
+    if (x === null || x === undefined) {
+      return
+    }
+    if (typeof x === "object") {
+      for (const k of Object.keys(x as Record<string, unknown>)) {
+        walk((x as Record<string, unknown>)[k])
+      }
+      return
+    }
+    out.push(String(x))
+  }
+  walk(v)
+  return out.join(" ")
+}
+
 // List columns derived from the root-aggregate rows of the loaded model.
 export const genericColumns = (rows: Record<string, unknown>[]): string[] => {
   const reserved = new Set([

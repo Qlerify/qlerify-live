@@ -4,14 +4,20 @@ import { EventCard } from "../../components/EventCard.tsx"
 import { FlowEdges } from "../../components/FlowEdges.tsx"
 import { FlowCountBadge } from "../../components/FlowCountBadge.tsx"
 
+type Slice = { counts: Record<string, number>; totalFirings: number; totalCases: number; allCases: number }
+
 type Props = {
   events: EventDef[]
   flow: FlowAggregate | null
   meta: Meta
+  slice?: Slice | null
 }
 
-export const FlowDiagram = ({ events, flow, meta }: Props) => {
-  const counts = flow?.counts || {}
+// An active search/filter recomputes the merged counters over just the matching
+// cases (client-side, from the per-case rows); otherwise the server-side
+// all-cases aggregate is shown untouched.
+export const FlowDiagram = ({ events, flow, meta, slice }: Props) => {
+  const counts = slice ? slice.counts : flow?.counts || {}
   const total = events.length
   const firedRefs = new Set(events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref))
   const firedSteps = firedRefs.size
@@ -20,21 +26,30 @@ export const FlowDiagram = ({ events, flow, meta }: Props) => {
   const layout = computeFlowLayout(events)
   const { laneTop, laneHeight, width, height } = laneMetrics(layout, FLOW)
 
-  const cases = flow?.totalCases ?? 0
+  const cases = slice ? slice.totalCases : (flow?.totalCases ?? 0)
+  const firings = slice ? slice.totalFirings : (flow?.totalFirings ?? 0)
   const pct = total ? (firedSteps / total) * 100 : 0
 
   return (
     <section className="border-b border-stone-200 bg-stone-50">
       <div className="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
+        {slice && (
+          <>
+            <span className="text-amber-700 font-semibold">
+              {cases} of {slice.allCases} case{slice.allCases === 1 ? "" : "s"} match the filter
+            </span>
+            <span className="text-stone-300">·</span>
+          </>
+        )}
         <span className="font-semibold text-stone-600">
-          {flow?.totalFirings ?? 0} firings across {cases} case{cases === 1 ? "" : "s"}
+          {firings} firings across {cases} case{cases === 1 ? "" : "s"}
         </span>
         <span className="text-stone-300">·</span>
         <span>
           {firedSteps} of {total} events triggered
         </span>
         <span className="ml-auto italic text-stone-400">
-          The ×N badge on an event counts its firings across all cases
+          The ×N badge on an event counts its firings {slice ? "across the matching cases" : "across all cases"}
         </span>
       </div>
 

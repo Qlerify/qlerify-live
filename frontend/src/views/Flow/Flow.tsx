@@ -1,38 +1,40 @@
 import { useEffect } from "react"
-import { api } from "../../lib/api.ts"
 import { useStore } from "../../lib/store.ts"
 import { prettyEntity } from "../../lib/format.ts"
-import { loadMeta, loadRegistryStatus } from "../../lib/workflowData.ts"
-import type { EventDef, FlowAggregate } from "../../lib/types.ts"
+import { loadFlow, pollOverview } from "../../lib/workflowData.ts"
+import { parseHash } from "../../lib/router.ts"
+import { caseRecords, ensureOvScope, flowSlice, hydrateOv, syncOvHash } from "../../lib/ovquery.ts"
+import { OvToolbar } from "../../shell/Overview/OvToolbar.tsx"
 import { ViewSwitcher } from "../../shell/ViewSwitcher.tsx"
 import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { FlowDiagram } from "./FlowDiagram.tsx"
 
 const POLL_MS = 5000
 
-const loadFlow = async () => {
-  const [flow, events] = await Promise.all([
-    api<FlowAggregate>("/sim/flow-aggregate"),
-    api<EventDef[]>("/sim/events"),
-    loadRegistryStatus(),
-    loadMeta(),
-  ])
-  useStore.getState().set({ flow, events })
-}
-
 export const Flow = () => {
-  const { flow, events, meta } = useStore()
+  const { flow, events, meta, ov } = useStore()
   const plural = prettyEntity(meta.rootAggregatePlural)
 
   useEffect(() => {
+    ensureOvScope()
+    hydrateOv("flow", parseHash().ovqs || "")
     loadFlow().catch(() => {})
     const t = setInterval(() => {
-      if (!useStore.getState().busy) {
-        loadFlow().catch(() => {})
-      }
+      pollOverview("flow").catch(() => {})
     }, POLL_MS)
     return () => clearInterval(t)
   }, [])
+
+  useEffect(() => {
+    syncOvHash("flow")
+  }, [ov])
+
+  // Search + filters narrow which cases feed the merged counters. Sorting and
+  // paging don't apply to a merged diagram, so the toolbar omits them here. The
+  // record set is EVERY case (matching the flowSlice denominator), not only
+  // those with events, so the toolbar's "N of M" agrees with the banner.
+  const flowRecords = caseRecords()
+  const slice = flowSlice()
 
   return (
     <>
@@ -51,7 +53,13 @@ export const Flow = () => {
         </div>
       </header>
 
-      <FlowDiagram events={events} flow={flow} meta={meta} />
+      <OvToolbar
+        tab="flow"
+        records={flowRecords}
+        res={{ total: slice ? slice.totalCases : flowRecords.length, rows: [], page: 0, pages: 1, from: 0, to: 0 }}
+      />
+
+      <FlowDiagram events={events} flow={flow} meta={meta} slice={slice} />
 
       <main className="flex-1 overflow-auto p-6">
         <p className="text-sm text-stone-500 max-w-3xl">

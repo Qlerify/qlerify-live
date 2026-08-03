@@ -1,11 +1,23 @@
 import { useEffect } from "react"
-import { api } from "../lib/api.ts"
 import { useStore } from "../lib/store.ts"
+import { parseHash } from "../lib/router.ts"
 import { attrText, genericColumns, prettyEntity } from "../lib/format.ts"
 import { EST_TIME_TITLE, bizTimeEstimated, fmtBizDate, fmtGap, minutesBetween, timeAgo } from "../lib/time.ts"
 import { computeFlowLayout, laneMetrics, FLOW } from "../lib/flowLayout.ts"
-import { loadMeta, loadRegistryStatus } from "../lib/workflowData.ts"
-import type { CaseRow, EventDef, FlowCaseRow, FlowRows } from "../lib/types.ts"
+import { loadFlowRows, pollOverview } from "../lib/workflowData.ts"
+import {
+  applyQuery,
+  caseRecords,
+  chosenGutterAttrs,
+  ensureOvScope,
+  hydrateOv,
+  ovActive,
+  resetOvQuery,
+  syncOvHash,
+} from "../lib/ovquery.ts"
+import { OvToolbar } from "../shell/Overview/OvToolbar.tsx"
+import { OvPager } from "../shell/Overview/OvPager.tsx"
+import type { CaseRow, EventDef, FlowCaseRow } from "../lib/types.ts"
 import { EventCard } from "../components/EventCard.tsx"
 import { FlowEdges } from "../components/FlowEdges.tsx"
 import { FlowCountBadge } from "../components/FlowCountBadge.tsx"
@@ -60,24 +72,17 @@ const CardFooter = ({ f }: { f: { label: string; est: boolean; gapMin: number | 
   )
 }
 
-const loadFlowRows = async () => {
-  const q = useStore.getState().flowRowsShowAll ? "?limit=0" : ""
-  const [flowRows, events, cases] = await Promise.all([
-    api<FlowRows>("/sim/flow-by-case" + q),
-    api<EventDef[]>("/sim/events"),
-    api<CaseRow[]>("/sim/cases"),
-    loadRegistryStatus(),
-    loadMeta(),
-  ])
-  useStore.getState().set({ flowRows, events, cases })
-}
-
 const Gutter = ({ row, attrKeys, caseRow }: { row: FlowCaseRow; attrKeys: string[]; caseRow: CaseRow | undefined }) => {
   const id = String(row.caseId)
   const start = row.startAt || row.lastAt
   const active = row.lastAt && row.lastAt !== start
+  const events = useStore((s) => s.events)
 
   const lines = attrKeys.map((k) => ({ label: prettyEntity(k), value: attrText(caseRow?.[k]) }))
+  // The same steps-done/total the List's Progress column shows.
+  const done = caseRow?.progress ?? Object.keys(row.counts || {}).length
+  const tot = caseRow?.total ?? (events.length || 1)
+  const pct = Math.min(100, Math.round((done / (tot || 1)) * 100)) || 0
 
   return (
     <div
@@ -115,52 +120,64 @@ const Gutter = ({ row, attrKeys, caseRow }: { row: FlowCaseRow; attrKeys: string
             )}
           </div>
         )}
+        <div className="flex items-center gap-1.5 mt-1" title={`${pct}% — ${done} of ${tot} steps`}>
+          <div className="flex-1 h-1 bg-stone-200 rounded overflow-hidden">
+            <div className="h-1 bg-amber-400" style={{ width: `${pct}%` }} />
+          </div>
+          <span className="text-[9px] text-stone-500 tabular-nums shrink-0">
+            {done}/{tot}
+          </span>
+        </div>
       </div>
     </div>
   )
 }
 
 export const Rows = () => {
-  const { flowRows, events, cases, meta, set } = useStore()
+  const { events, cases, meta, ov } = useStore()
 
   useEffect(() => {
+    ensureOvScope()
+    hydrateOv("rows", parseHash().ovqs || "")
     loadFlowRows().catch(() => {})
     const t = setInterval(() => {
-      if (!useStore.getState().busy) {
-        loadFlowRows().catch(() => {})
-      }
+      pollOverview("rows").catch(() => {})
     }, POLL_MS)
     return () => clearInterval(t)
   }, [])
 
   const singular = prettyEntity(meta.rootAggregate)
-  const rows = flowRows?.cases || []
   const layout = computeFlowLayout(events)
   const { laneTop, laneHeight, width: gridW, height: rowH } = laneMetrics(layout, FLOW)
 
+  // Cases with a flow row, through the shared query engine: the toolbar and the
+  // timeline read the same slice, so counts, page and rows always agree.
+  const records = caseRecords().filter((r) => r.fr)
+  const res = applyQuery(records, "rows")
+  const pageRecs = res.rows
+
+  useEffect(() => {
+    syncOvHash("rows")
+  }, [ov])
+
   // Heat is comparable across rows: relative to the busiest single (case, step).
   let maxCount = 1
-  for (const c of rows) {
-    for (const ref in c.counts || {}) {
-      maxCount = Math.max(maxCount, c.counts[ref]!)
+  for (const rec of pageRecs) {
+    for (const ref in rec.fr!.counts || {}) {
+      maxCount = Math.max(maxCount, rec.fr!.counts[ref]!)
     }
   }
 
-  const caseById = new Map((cases || []).map((r) => [String(r.id), r]))
-  let attrKeys = meta.rootMandatoryAttributes || []
+  // The gutter shows the user's chosen List columns when customized, else the
+  // model's mandatory attributes, else the first plain columns.
+  let attrKeys = chosenGutterAttrs() || meta.rootMandatoryAttributes || []
   if (!attrKeys.length) {
     attrKeys = genericColumns(cases as Record<string, unknown>[])
   }
   attrKeys = attrKeys.slice(0, 3)
 
-  const total = flowRows?.totalCases ?? rows.length
-  const truncated = total > rows.length
-  const anyEst = rows.some((c) => Object.values(c.times || {}).some((t) => bizTimeEstimated(t)))
-
-  const showAll = () => {
-    set({ flowRowsShowAll: true })
-    loadFlowRows().catch(() => {})
-  }
+  const anyEst = pageRecs.some((rec) => Object.values(rec.fr!.times || {}).some((t) => bizTimeEstimated(t)))
+  const filtered = ovActive()
 
   return (
     <>
@@ -179,7 +196,9 @@ export const Rows = () => {
         </div>
       </header>
 
-      {rows.length === 0 ? (
+      {records.length > 0 && <OvToolbar tab="rows" records={records} res={res} />}
+
+      {records.length === 0 ? (
         <section className="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">
           No cases have fired yet — run a case (or switch to{" "}
           <a href="#list" className="underline">
@@ -187,37 +206,38 @@ export const Rows = () => {
           </a>
           ) to see it appear as a row here.
         </section>
+      ) : res.total === 0 ? (
+        <section className="border-b border-stone-200 bg-stone-50 px-6 py-10 text-center text-sm text-stone-400">
+          No cases match the current search and filters —{" "}
+          <button type="button" onClick={resetOvQuery} className="underline text-stone-600 hover:text-stone-800">
+            clear them
+          </button>{" "}
+          to see all {records.length} again.
+        </section>
       ) : (
         <section className="border-b border-stone-200 bg-white">
           <div className="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200">
             <span className="font-semibold text-stone-600">
-              {rows.length}
-              {truncated ? ` of ${total}` : ""} case{total === 1 ? "" : "s"}
+              {res.from}–{res.to} of {res.total} case{res.total === 1 ? "" : "s"}
+              {filtered && <span className="text-amber-700"> (filtered from {records.length})</span>}
             </span>
             <span className="text-stone-300">·</span>
-            <span>one row per case, most recently active first</span>
+            <span>one row per case</span>
             {anyEst && (
               <span className="flex items-center gap-1" title={EST_TIME_TITLE}>
                 <span className="mono italic text-stone-400">~date</span> = estimated time
               </span>
             )}
-            {truncated ? (
-              <button
-                type="button"
-                onClick={showAll}
-                title="Load every case (may be slow for very large workflows)"
-                className="ml-auto italic text-amber-600 hover:text-amber-700 hover:underline cursor-pointer"
-              >
-                Showing the {rows.length} most recent of {total} — show all
-              </button>
-            ) : (
-              <span className="ml-auto italic text-stone-400">Click a row to follow that case end to end</span>
-            )}
+            <span className="italic text-stone-400">Click a row to follow that case end to end</span>
+            <div className="ml-auto">
+              <OvPager tab="rows" res={res} />
+            </div>
           </div>
 
-          <div className="overflow-x-auto">
+          <div id="timeline-scroll" className="overflow-x-auto">
             <div style={{ minWidth: `${LABEL_W + gridW}px` }}>
-              {rows.map((c) => {
+              {pageRecs.map((rec) => {
+                const c = rec.fr!
                 const counts = c.counts || {}
                 const firedRefs = new Set(events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref))
                 const footers = rowFooters(events, c)
@@ -227,7 +247,7 @@ export const Rows = () => {
                     href={`#case/${encodeURIComponent(String(c.caseId))}`}
                     className="flex items-stretch border-t border-stone-200 hover:bg-stone-50 group"
                   >
-                    <Gutter row={c} attrKeys={attrKeys} caseRow={caseById.get(String(c.caseId))} />
+                    <Gutter row={c} attrKeys={attrKeys} caseRow={rec.row || undefined} />
                     <div className="relative shrink-0 my-2" style={{ width: `${gridW}px`, height: `${rowH}px` }}>
                       <FlowEdges
                         layout={layout}

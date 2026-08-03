@@ -1,5 +1,7 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
+import { createOv } from "./ovquery.ts"
+import type { OvState } from "./ovquery.ts"
 import type { CaseRow, ChatInfo, ChatMessage, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, TestResult, VerifyResult } from "./types.ts"
 import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
@@ -17,7 +19,6 @@ type State = {
   meta: Meta
   flow: FlowAggregate | null
   flowRows: FlowRows | null
-  flowRowsShowAll: boolean
 
   instance: Instance | null
   prevInstance: Instance | null
@@ -54,6 +55,7 @@ type State = {
   projModelErr: string | null
 
   exp: ExpState
+  ov: OvState
 
   connectors: ConnectorsData | null
   connSel: string | null
@@ -89,7 +91,6 @@ export const useStore = create<State>((set) => ({
   meta: DEFAULT_META,
   flow: null,
   flowRows: null,
-  flowRowsShowAll: false,
 
   instance: null,
   prevInstance: null,
@@ -126,6 +127,7 @@ export const useStore = create<State>((set) => ({
   projModelErr: null,
 
   exp: EMPTY_EXP,
+  ov: createOv(),
 
   connectors: null,
   connSel: null,

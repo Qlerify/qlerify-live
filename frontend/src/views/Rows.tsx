@@ -2,7 +2,7 @@ import { useEffect } from "react"
 import { api } from "../lib/api.ts"
 import { useStore } from "../lib/store.ts"
 import { attrText, genericColumns, prettyEntity } from "../lib/format.ts"
-import { timeAgo } from "../lib/time.ts"
+import { EST_TIME_TITLE, bizTimeEstimated, fmtBizDate, fmtGap, minutesBetween, timeAgo } from "../lib/time.ts"
 import { computeFlowLayout, laneMetrics, FLOW } from "../lib/flowLayout.ts"
 import { loadMeta, loadRegistryStatus } from "../lib/workflowData.ts"
 import type { CaseRow, EventDef, FlowCaseRow, FlowRows } from "../lib/types.ts"
@@ -15,6 +15,50 @@ import { AssistantButton } from "../shell/AssistantButton.tsx"
 
 const POLL_MS = 5000
 const LABEL_W = 210
+const LONG_GAP_MIN = 10 * 1440
+
+// Business-date footer per fired card, walking the events in declared order. A
+// KNOWN date also shows the time since the case's previous KNOWN event; an
+// estimated date renders greyed with a ~ and neither shows a gap nor becomes the
+// next gap's baseline — a duration measured against an inferred moment is noise.
+const rowFooters = (events: EventDef[], row: FlowCaseRow) => {
+  const counts = row.counts || {}
+  const times = row.times || {}
+  const out = new Map<string, { label: string; est: boolean; gapMin: number | null }>()
+  let prevKnownIso: string | null = null
+
+  for (const e of events) {
+    const t = (counts[e.ref] || 0) > 0 ? times[e.ref] : null
+    const label = t ? fmtBizDate(t.businessAt) : null
+    if (!label || !t) {
+      continue
+    }
+    const est = bizTimeEstimated(t)
+    let gapMin: number | null = null
+    if (!est) {
+      gapMin = prevKnownIso ? minutesBetween(prevKnownIso, t.businessAt) : null
+      prevKnownIso = t.businessAt
+    }
+    out.set(e.ref, { label, est, gapMin })
+  }
+  return out
+}
+
+const CardFooter = ({ f }: { f: { label: string; est: boolean; gapMin: number | null } }) => {
+  const tone = f.gapMin != null && f.gapMin >= LONG_GAP_MIN ? "text-amber-700 font-semibold" : "text-stone-500"
+  return (
+    <div className="mt-auto pt-1 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
+      {f.est ? (
+        <span className="text-stone-400 italic mono" title={EST_TIME_TITLE}>
+          ~{f.label}
+        </span>
+      ) : (
+        <span className="text-stone-700 font-medium mono">{f.label}</span>
+      )}
+      {f.gapMin != null && f.gapMin > 0 && <span className={tone}>{fmtGap(f.gapMin)}</span>}
+    </div>
+  )
+}
 
 const loadFlowRows = async () => {
   const q = useStore.getState().flowRowsShowAll ? "?limit=0" : ""
@@ -111,6 +155,7 @@ export const Rows = () => {
 
   const total = flowRows?.totalCases ?? rows.length
   const truncated = total > rows.length
+  const anyEst = rows.some((c) => Object.values(c.times || {}).some((t) => bizTimeEstimated(t)))
 
   const showAll = () => {
     set({ flowRowsShowAll: true })
@@ -151,6 +196,11 @@ export const Rows = () => {
             </span>
             <span className="text-stone-300">·</span>
             <span>one row per case, most recently active first</span>
+            {anyEst && (
+              <span className="flex items-center gap-1" title={EST_TIME_TITLE}>
+                <span className="mono italic text-stone-400">~date</span> = estimated time
+              </span>
+            )}
             {truncated ? (
               <button
                 type="button"
@@ -170,6 +220,7 @@ export const Rows = () => {
               {rows.map((c) => {
                 const counts = c.counts || {}
                 const firedRefs = new Set(events.filter((e) => (counts[e.ref] || 0) > 0).map((e) => e.ref))
+                const footers = rowFooters(events, c)
                 return (
                   <a
                     key={c.caseId}
@@ -190,6 +241,7 @@ export const Rows = () => {
                       />
                       {events.map((e, i) => {
                         const pos = layout.place.get(e.ref) || { col: i, lane: 0, idx: i }
+                        const f = footers.get(e.ref)
                         return (
                           <EventCard
                             key={e.ref}
@@ -202,6 +254,7 @@ export const Rows = () => {
                             top={laneTop[pos.lane]!}
                             width={FLOW.cardW}
                             height={FLOW.cardH}
+                            footer={f && <CardFooter f={f} />}
                           />
                         )
                       })}

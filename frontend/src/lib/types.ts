@@ -24,12 +24,19 @@ export type FlowAggregate = {
   totalCases: number
 }
 
+export type EventTime = {
+  businessAt: string
+  businessAtKind?: string | null
+  evidenceKind?: string | null
+}
+
 export type FlowCaseRow = {
   caseId: string
   counts: Record<string, number>
   firings?: number
   startAt?: string | null
   lastAt?: string | null
+  times?: Record<string, EventTime>
 }
 
 export type FlowRows = {
@@ -45,6 +52,7 @@ export type LogEntry = {
   role: string
   occurredAt: string
   businessAt?: string | null
+  businessAtKind?: string | null
   provenance?: ProvMode
   aggregateRoot?: string
   aggregateId?: string
@@ -121,6 +129,7 @@ export type RebuildInfo = {
   inserted?: number
   derived?: { events?: number }
   failures?: unknown[]
+  durationMs?: number
 }
 
 export type TwinTrust = { pct: number; real: number; total: number }
@@ -258,6 +267,8 @@ export type ExpState = {
   valueObjects: ExpTable[]
   entity: string | null
   items: Row[]
+  matched: number
+  total: number
   adapters: ExpAdapter[]
   health: ExpHealth | null
   filters: ExpFilter[]
@@ -277,6 +288,8 @@ export const EMPTY_EXP: ExpState = {
   valueObjects: [],
   entity: null,
   items: [],
+  matched: 0,
+  total: 0,
   adapters: [],
   health: null,
   filters: [],
@@ -289,7 +302,7 @@ export const EMPTY_EXP: ExpState = {
   rowEventsBusy: false,
 }
 
-export type ConnectorNote = { kind: string; text: string; at: string }
+export type ConnectorNote = { kind: string; text: string; at: string; durationMs?: number | null }
 
 export type Connector = {
   id: string
@@ -304,6 +317,7 @@ export type Connector = {
   deps: string[]
   endpoint?: string | null
   lastPullAt?: string | null
+  lastPullDurationMs?: number | null
   owned?: boolean
   summary?: string | null
   notes?: ConnectorNote[]

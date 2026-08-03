@@ -1,5 +1,6 @@
 import { EVIDENCE_KIND, EvidenceChip } from "../../components/EvidenceChip.tsx"
 import { ProvChip } from "../../components/ProvChip.tsx"
+import { EST_TIME_TITLE, bizTimeEstimated } from "../../lib/time.ts"
 import { useStore } from "../../lib/store.ts"
 import type { LogEntry } from "../../lib/types.ts"
 
@@ -30,7 +31,13 @@ const LogRow = ({ e, index }: { e: LogEntry; index: number }) => {
           {biz && (
             <>
               {" · "}
-              <span title="business date">{biz}</span>
+              {bizTimeEstimated(e) ? (
+                <span className="italic text-stone-400" title={EST_TIME_TITLE}>
+                  ~{biz}
+                </span>
+              ) : (
+                <span title="business date">{biz}</span>
+              )}
             </>
           )}
         </div>

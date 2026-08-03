@@ -1,4 +1,5 @@
 import { api } from "./api.ts"
+import { formatDuration } from "./format.ts"
 import { useStore } from "./store.ts"
 import { showOverlay, hideOverlay } from "../components/Overlay.tsx"
 import type { ModelStatus, RebuildInfo } from "./types.ts"
@@ -37,7 +38,8 @@ export const rebuildSummaryText = (rebuild?: RebuildInfo): string => {
   const ev = rebuild.derived ? rebuild.derived.events || 0 : 0
   const failed = (rebuild.failures || []).length
   const tail = failed ? ` — ${failed} connector(s) failed to pull (re-pull from the explorer)` : ""
-  return ` Re-ingested ${rebuild.inserted} row(s) from ${rebuild.connectors} connector(s), derived ${ev} event(s)${tail}.`
+  const took = rebuild.durationMs != null ? ` in ${formatDuration(rebuild.durationMs)}` : ""
+  return ` Re-ingested ${rebuild.inserted} row(s) from ${rebuild.connectors} connector(s), derived ${ev} event(s)${took}${tail}.`
 }
 
 const fetchModel = async () => {

@@ -1,3 +1,27 @@
+// Compact duration label: 850ms, 2.3s, 45s, 3m 20s. Empty string for anything
+// unrenderable so callers can interpolate blindly. Rounds BEFORE choosing the
+// unit so boundaries carry (59.7s → "1m", never "60s").
+export const formatDuration = (ms?: number | null): string => {
+  if (ms == null || !isFinite(ms) || ms < 0) {
+    return ""
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`
+  }
+  const s = ms / 1000
+  const tenths = Math.round(s * 10) / 10
+  if (tenths < 10) {
+    return `${tenths}s`
+  }
+  const totalSec = Math.round(s)
+  if (totalSec < 60) {
+    return `${totalSec}s`
+  }
+  const m = Math.floor(totalSec / 60)
+  const ss = totalSec % 60
+  return ss ? `${m}m ${ss}s` : `${m}m`
+}
+
 // Display label for an entity/aggregate identifier. The raw identifier stays the
 // source of truth everywhere; this is the single hook for prettifying it.
 export const prettyEntity = (name: string) => name

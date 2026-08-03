@@ -2,7 +2,7 @@ import { caseFirings, buildBranchForest, layoutForestRows } from "../../lib/bran
 import type { ForestNode } from "../../lib/branchForest.ts"
 import { SPLIT_FLOW } from "../../lib/flowLayout.ts"
 import type { FlowLayout } from "../../lib/flowLayout.ts"
-import { fmtBizDate } from "../../lib/time.ts"
+import { EST_TIME_TITLE, fmtBizDate } from "../../lib/time.ts"
 import { shortId } from "../../lib/asOf.ts"
 import type { EventDef, LogEntry } from "../../lib/types.ts"
 import { TimelineLegend } from "./TimelineLegend.tsx"
@@ -156,7 +156,7 @@ export const SplitTimeline = ({ events, log, layout, splitRef, firedCounts, onMe
             const f = n.f
             const ev = eventByRef.get(f.ref)
             const label = (f.payload.name as string) || (f.payload.title as string) || shortId(f.aggId)
-            const date = fmtBizDate(f.businessAt) ?? "—"
+            const date = fmtBizDate(f.businessAt)
             return (
               <div
                 key={f.i}
@@ -170,7 +170,17 @@ export const SplitTimeline = ({ events, log, layout, splitRef, firedCounts, onMe
                 >
                   {String(label)}
                 </div>
-                <div className="mt-auto text-[9px] text-stone-500 mono">{date}</div>
+                <div className="mt-auto text-[9px] text-stone-500 mono">
+                  {date == null ? (
+                    "—"
+                  ) : f.est ? (
+                    <span className="italic text-stone-400" title={EST_TIME_TITLE}>
+                      ~{date}
+                    </span>
+                  ) : (
+                    date
+                  )}
+                </div>
               </div>
             )
           })}

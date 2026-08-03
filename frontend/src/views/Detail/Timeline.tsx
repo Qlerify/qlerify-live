@@ -2,7 +2,7 @@ import { useEffect } from "react"
 import { useStore } from "../../lib/store.ts"
 import { computeFlowLayout, flowEdgePath, FLOW, ROUTE_ROW } from "../../lib/flowLayout.ts"
 import { businessByStep, expandedCardHeight, firedCountMap, firedRefSet, firingsByRefMap } from "../../lib/detailData.ts"
-import { fmtBizDate, fmtGap, minutesBetween } from "../../lib/time.ts"
+import { EST_TIME_TITLE, bizTimeEstimated, fmtBizDate, fmtGap, minutesBetween } from "../../lib/time.ts"
 import { provHatch, provModeForBC } from "../../lib/prov.ts"
 import { PHASE_TONE } from "../../lib/tone.ts"
 import { navSelect } from "../../lib/navSelect.ts"
@@ -118,16 +118,20 @@ export const Timeline = () => {
   }
 
   // Business-date gaps accumulate in declared order, so this runs outside the map.
+  // A gap read off an estimated endpoint is itself an estimate.
   let prevBizIso: string | null = null
-  const gapByRef = new Map<string, number | null>()
+  let prevBizEst = false
+  const gapByRef = new Map<string, { min: number | null; est: boolean }>()
   for (const e of events) {
     if (!firedRefs.has(e.ref)) {
       continue
     }
-    const bizIso = biz.get(e.ref) || null
-    gapByRef.set(e.ref, prevBizIso && bizIso ? minutesBetween(prevBizIso, bizIso) : null)
-    if (bizIso) {
-      prevBizIso = bizIso
+    const bz = biz.get(e.ref)
+    const min = prevBizIso && bz ? minutesBetween(prevBizIso, bz.iso) : null
+    gapByRef.set(e.ref, { min, est: min != null && (!!bz?.est || prevBizEst) })
+    if (bz) {
+      prevBizIso = bz.iso
+      prevBizEst = bz.est
     }
   }
 
@@ -182,11 +186,19 @@ export const Timeline = () => {
               const open = isExpanded(e.ref)
               // Selection (sky) wins over the amber "latest fired" ring.
               const ring = isSelected ? "ring-2 ring-sky-500" : isCurrent ? "ring-2 ring-amber-400" : ""
-              const bizLabel = fired ? fmtBizDate(biz.get(e.ref)) : null
-              const gapMin = gapByRef.get(e.ref) ?? null
-              const gapTone = gapMin != null && gapMin >= LONG_GAP_MIN ? "text-amber-700 font-semibold" : "text-stone-500"
+              const bz = biz.get(e.ref)
+              const bizLabel = fired ? fmtBizDate(bz?.iso) : null
+              const gap = gapByRef.get(e.ref)
+              const gapMin = gap?.min ?? null
+              // An alarm colour on an inferred number would signal false
+              // confidence, so estimated gaps stay muted and ~-prefixed.
+              const gapTone =
+                gapMin != null && gapMin >= LONG_GAP_MIN && !gap?.est
+                  ? "text-amber-700 font-semibold"
+                  : "text-stone-500"
 
               let prevIso: string | null = null
+              let prevEst = false
 
               return (
                 <div
@@ -216,19 +228,34 @@ export const Timeline = () => {
                   {open && (
                     <div className="mt-1.5 pt-1.5 border-t border-stone-100 flex-1 min-h-0 overflow-y-auto text-[10px]">
                       {(firingsByRef.get(e.ref) || []).map((f, k) => {
+                        const est = bizTimeEstimated(f)
                         const d = fmtBizDate(f.businessAt) ?? "—"
                         const g = prevIso && f.businessAt ? minutesBetween(prevIso, f.businessAt) : null
+                        const ge = g != null && (est || prevEst)
                         if (f.businessAt) {
                           prevIso = f.businessAt
+                          prevEst = est
                         }
-                        const gt = g != null && g >= LONG_GAP_MIN ? "text-amber-700 font-semibold" : "text-stone-500"
+                        const gt =
+                          g != null && g >= LONG_GAP_MIN && !ge ? "text-amber-700 font-semibold" : "text-stone-500"
                         return (
                           <div key={k} className="flex items-baseline justify-between gap-1 leading-none py-0.5">
                             <span className="text-stone-700">
                               <span className="text-stone-400 tabular-nums mr-1">{k + 1}.</span>
-                              <span className="mono font-medium">{d}</span>
+                              {est ? (
+                                <span className="mono italic text-stone-400" title={EST_TIME_TITLE}>
+                                  ~{d}
+                                </span>
+                              ) : (
+                                <span className="mono font-medium">{d}</span>
+                              )}
                             </span>
-                            {g != null && g > 0 && <span className={gt}>{fmtGap(g)}</span>}
+                            {g != null && g > 0 && (
+                              <span className={gt}>
+                                {ge ? "~" : ""}
+                                {fmtGap(g)}
+                              </span>
+                            )}
                           </div>
                         )
                       })}
@@ -250,8 +277,21 @@ export const Timeline = () => {
 
                   {!open && fired && (
                     <div className="mt-auto pt-1.5 border-t border-stone-100 flex items-baseline justify-between text-[10px]">
-                      <span className="text-stone-700 font-medium mono">{bizLabel ?? "—"}</span>
-                      {gapMin != null && gapMin > 0 && <span className={gapTone}>{fmtGap(gapMin)}</span>}
+                      {bizLabel == null ? (
+                        <span className="text-stone-700 font-medium mono">—</span>
+                      ) : bz?.est ? (
+                        <span className="text-stone-400 italic mono" title={EST_TIME_TITLE}>
+                          ~{bizLabel}
+                        </span>
+                      ) : (
+                        <span className="text-stone-700 font-medium mono">{bizLabel}</span>
+                      )}
+                      {gapMin != null && gapMin > 0 && (
+                        <span className={gapTone}>
+                          {gap?.est ? "~" : ""}
+                          {fmtGap(gapMin)}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

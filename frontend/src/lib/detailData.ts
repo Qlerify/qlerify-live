@@ -1,6 +1,7 @@
 import { api } from "./api.ts"
 import { useStore } from "./store.ts"
 import { loadMeta, loadRegistryStatus } from "./workflowData.ts"
+import { bizTimeEstimated } from "./time.ts"
 import type { EventDef, Instance, LogEntry } from "./types.ts"
 
 export const loadDetail = async (caseId: string) => {
@@ -104,11 +105,13 @@ export const firingsByRefMap = (log: LogEntry[]) => {
   return m
 }
 
+// eventRef → the businessAt recorded when the step fired, plus whether that time
+// is estimated rather than witnessed.
 export const businessByStep = (log: LogEntry[]) => {
-  const m = new Map<string, string>()
+  const m = new Map<string, { iso: string; est: boolean }>()
   for (const entry of log) {
     if (entry.businessAt && !m.has(entry.eventRef)) {
-      m.set(entry.eventRef, entry.businessAt)
+      m.set(entry.eventRef, { iso: entry.businessAt, est: bizTimeEstimated(entry) })
     }
   }
   return m

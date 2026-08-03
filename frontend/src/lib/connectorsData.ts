@@ -1,4 +1,4 @@
-import { api } from "./api.ts"
+import { api, apiDownload } from "./api.ts"
 import { useStore } from "./store.ts"
 import type { Connector, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
 
@@ -179,6 +179,89 @@ export const connDelete = async () => {
     alert(`Connector "${name}" deleted.\n\nRemoved ${r.deletedRows} row(s) and ${r.deletedEvents} event(s).`)
   } catch (e) {
     alert("Delete failed: " + (e as Error).message)
+  } finally {
+    useStore.getState().set({ connBusy: false })
+  }
+}
+
+// Download a portable JSON backup (config + code + credential FIELD NAMES —
+// never secret values). Non-destructive, so no confirm.
+export const connExport = async () => {
+  const s = useStore.getState()
+  const id = s.connSel
+  if (!id || s.connBusy) {
+    return
+  }
+  s.set({ connBusy: true })
+  try {
+    await apiDownload(`/api/connectors/${encodeURIComponent(id)}/export`, `qlerify-connector-${id}.json`)
+  } catch (e) {
+    alert("Export failed: " + (e as Error).message)
+  } finally {
+    useStore.getState().set({ connBusy: false })
+  }
+}
+
+export const connExportAll = async () => {
+  const s = useStore.getState()
+  if (s.connBusy) {
+    return
+  }
+  s.set({ connBusy: true })
+  try {
+    await apiDownload("/api/connectors/export", "qlerify-connectors.json")
+  } catch (e) {
+    alert("Export failed: " + (e as Error).message)
+  } finally {
+    useStore.getState().set({ connBusy: false })
+  }
+}
+
+type ImportResult = {
+  imported: { id: string; originalId?: string; credentialKeys?: string[]; install?: { ok: boolean } }[]
+  skipped: { id: string; message: string }[]
+}
+
+// Restore connectors from an exported envelope. The server decides per entry
+// (imported / skipped with a reason) and NEVER overwrites — feeding it a backup
+// twice is safe. Secrets aren't in the file; the summary says which connectors
+// need credentials re-entered.
+export const connImportFile = async (file: File) => {
+  if (useStore.getState().connBusy) {
+    return
+  }
+  // Busy BEFORE the first await (file.text() can stall on a cloud-placeholder
+  // file) — the same mutual exclusion every other handler here uses.
+  useStore.getState().set({ connBusy: true })
+  try {
+    let text: string
+    try {
+      text = await file.text()
+      JSON.parse(text) // fail fast on a non-JSON pick, before any request
+    } catch {
+      alert(`"${file.name}" is not a valid JSON file.`)
+      return
+    }
+    const r = await api<ImportResult>("/api/connectors/import", { method: "POST", body: text })
+    await loadConnectors()
+
+    const okLine = r.imported.length
+      ? `Imported ${r.imported.length} connector(s): ${r.imported.map((c) => c.id + (c.originalId ? ` (renamed from ${c.originalId})` : "")).join(", ")}.`
+      : "Nothing imported."
+    const skipLine = r.skipped.length
+      ? `\n\nSkipped ${r.skipped.length}:\n${r.skipped.map((s) => `• ${s.id} — ${s.message}`).join("\n")}`
+      : ""
+    const badInstall = r.imported.filter((c) => c.install && c.install.ok === false)
+    const installLine = badInstall.length
+      ? `\n\n⚠ Package install failed for: ${badInstall.map((c) => c.id).join(", ")} — open the connector's Code tab and Save to retry, or Test to see the error.`
+      : ""
+    const needCreds = r.imported.filter((c) => (c.credentialKeys || []).length)
+    const credLine = needCreds.length
+      ? `\n\n⚠ Secrets are never included in a backup. Re-enter credentials for: ${needCreds.map((c) => `${c.id} (${c.credentialKeys!.join(", ")})`).join("; ")} — ask the chat to set them.`
+      : ""
+    alert(okLine + skipLine + installLine + credLine)
+  } catch (e) {
+    alert("Import failed: " + (e as Error).message)
   } finally {
     useStore.getState().set({ connBusy: false })
   }

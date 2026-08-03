@@ -3,10 +3,13 @@ import { useRoute } from "../../lib/router.ts"
 import { useStore } from "../../lib/store.ts"
 import {
   adaptersForEntity,
-  applyFilters,
   clearRows,
   expColumns,
   fetchRows,
+  EXP_PAGE,
+  runExpFilters,
+  resetExpFilters,
+  setExpPage,
   loadExplorer,
   reimportAll,
   selectEntity,
@@ -19,7 +22,6 @@ import { TableGlyph } from "./TableGlyph.tsx"
 import { RowEventsCell } from "./RowEvents.tsx"
 import { FiltersPanel } from "./FiltersPanel.tsx"
 
-const PAGE = 25
 
 const COL_STYLE: Record<ColState, { text: string; dot: string; title: string }> = {
   green: { text: "text-emerald-700", dot: "bg-emerald-500", title: "In the model and the data" },
@@ -90,13 +92,15 @@ export const Explorer = () => {
   const entity = (e.entities || []).find((t) => t.name === e.entity) || (e.valueObjects || []).find((t) => t.name === e.entity)
   const cols = expColumns(e.items, entity)
   const hasModel = !!entity?.fields?.length
-  const rows = applyFilters(e.items, e.filters)
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE))
+  const rows = e.items // already the current page window, filtered server-side
+  const matched = e.matched ?? rows.length
+  const total = e.total ?? matched
+  // "120 of 1,234" when filters hide rows; just "1,234" otherwise.
+  const countLabel = matched < total ? `${matched.toLocaleString()} of ${total.toLocaleString()}` : total.toLocaleString()
+  const pages = Math.max(1, Math.ceil(matched / EXP_PAGE))
   const page = Math.min(e.page, pages - 1)
-  const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE)
   const tableAdapters = adaptersForEntity(e)
 
-  const setPage = (p: number) => set({ exp: { ...e, page: p } })
 
   const clickTable = (systemName: string, tableName: string) => {
     if (systemName !== e.system) {
@@ -279,16 +283,16 @@ export const Explorer = () => {
           </div>
 
           <div className="px-6 py-3 border-b border-stone-200">
-            <FiltersPanel filters={e.filters} columns={cols} onApply={() => setPage(0)} />
+            <FiltersPanel filters={e.filters} columns={cols} onApply={runExpFilters} onReset={resetExpFilters} />
           </div>
 
           <div className="px-6 pt-3 pb-1 flex items-center justify-between">
             <div className="text-sm font-semibold text-stone-800">
-              Table: {e.entity} — Items returned <span className="text-stone-400 font-normal">({rows.length})</span>
+              Table: {e.entity} — Items <span className="text-stone-400 font-normal">({countLabel})</span>
             </div>
             <div className="flex items-center gap-2 text-sm text-stone-500">
               <button
-                onClick={() => setPage(Math.max(0, page - 1))}
+                onClick={() => setExpPage(Math.max(0, page - 1))}
                 className={`px-2 py-0.5 rounded hover:bg-stone-100 ${page <= 0 ? "opacity-40" : ""}`}
               >
                 ‹
@@ -297,7 +301,7 @@ export const Explorer = () => {
                 {page + 1} / {pages}
               </span>
               <button
-                onClick={() => setPage(Math.min(pages - 1, page + 1))}
+                onClick={() => setExpPage(Math.min(pages - 1, page + 1))}
                 className={`px-2 py-0.5 rounded hover:bg-stone-100 ${page >= pages - 1 ? "opacity-40" : ""}`}
               >
                 ›
@@ -358,7 +362,7 @@ export const Explorer = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {pageRows.map((r, ri) => (
+                    {rows.map((r, ri) => (
                       <tr key={String(r.id ?? ri)} className="hover:bg-stone-50 border-b border-stone-100">
                         <td className="px-3 py-2 align-top">
                           <input type="checkbox" className="rounded border-stone-300" />

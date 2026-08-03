@@ -1,9 +1,11 @@
 import { useState } from "react"
 import { useStore } from "../../lib/store.ts"
 import { formatVersionDate } from "../../lib/modelData.ts"
+import { formatDuration } from "../../lib/format.ts"
 import {
   NOTE_BADGE,
   connDelete,
+  connExport,
   connRepoint,
   connSaveDateRoles,
   connTest,
@@ -115,7 +117,15 @@ const DetailsBody = ({ c }: { c: Connector }) => {
         <Chip label="Credentials" value={c.credentialKeys.length ? c.credentialKeys.join(", ") : "none"} />
         <Chip label="Packages" value={c.deps.length ? c.deps.join(", ") : "none"} />
         <Chip label="Endpoint" value={c.endpoint || "—"} />
-        <Chip label="Last pull" value={c.lastPullAt ? formatVersionDate(c.lastPullAt) : "never"} />
+        <Chip
+          label="Last pull"
+          value={
+            c.lastPullAt
+              ? formatVersionDate(c.lastPullAt) +
+                (c.lastPullDurationMs != null ? ` · ${formatDuration(c.lastPullDurationMs)}` : "")
+              : "never"
+          }
+        />
         {!c.owned && <Chip label="Owner" value="legacy (unassigned)" />}
       </div>
 
@@ -213,6 +223,9 @@ const DetailsBody = ({ c }: { c: Connector }) => {
               <div key={i} className="flex items-baseline gap-1.5 text-[11px] py-0.5">
                 <span className={`px-1 py-0.5 rounded shrink-0 ${NOTE_BADGE[n.kind] || NOTE_BADGE.note}`}>{n.kind}</span>
                 <span className="flex-1 text-stone-600">{n.text}</span>
+                {n.durationMs != null && (
+                  <span className="text-stone-400 shrink-0 tabular-nums">{formatDuration(n.durationMs)}</span>
+                )}
                 <span className="text-stone-400 shrink-0">{formatVersionDate(n.at)}</span>
               </div>
             ))
@@ -241,7 +254,7 @@ const DetailsBody = ({ c }: { c: Connector }) => {
 }
 
 export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
-  const { connTab, set } = useStore()
+  const { connTab, connBusy, set } = useStore()
 
   if (!c) {
     return <div className="p-8 text-sm text-stone-400">Select a connector to see its details.</div>
@@ -304,6 +317,14 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
         <div className="flex items-center gap-1 mt-4">
           <TabBtn id="details" label="Details" />
           <TabBtn id="code" label="Code" />
+          <button
+            onClick={connExport}
+            disabled={connBusy}
+            title="Download this connector as a portable JSON backup — config, code, and credential field names (never secret values)"
+            className="ml-auto px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium"
+          >
+            ⬇ Export
+          </button>
         </div>
       </div>
 

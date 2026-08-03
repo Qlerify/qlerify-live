@@ -1,7 +1,7 @@
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import { useRoute } from "../../lib/router.ts"
 import { useStore } from "../../lib/store.ts"
-import { connectorName, loadConnectors } from "../../lib/connectorsData.ts"
+import { connExportAll, connImportFile, connectorName, loadConnectors } from "../../lib/connectorsData.ts"
 import type { Connector } from "../../lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { ConnectorDetail } from "./ConnectorDetail.tsx"
@@ -22,9 +22,38 @@ const ListRow = ({ c, selected, onSelect }: { c: Connector; selected: boolean; o
   </button>
 )
 
+// Hidden file input + the button that triggers it — the picker is styled as a
+// normal button rather than a bare <input type=file>.
+const ImportButton = ({ className }: { className: string }) => {
+  const connBusy = useStore((s) => s.connBusy)
+  const ref = useRef<HTMLInputElement>(null)
+
+  const pick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = "" // allow re-picking the same file after a fix
+    if (f) {
+      connImportFile(f)
+    }
+  }
+
+  return (
+    <>
+      <button
+        onClick={() => ref.current?.click()}
+        disabled={connBusy}
+        title="Import connectors from a previously exported JSON backup — conflicts are skipped, never overwritten"
+        className={className}
+      >
+        ⬆ Import
+      </button>
+      <input ref={ref} type="file" accept=".json,application/json" className="hidden" onChange={pick} />
+    </>
+  )
+}
+
 export const Connectors = () => {
   const route = useRoute()
-  const { connectors, connSel, connError, set } = useStore()
+  const { connectors, connSel, connError, connBusy, set } = useStore()
 
   useEffect(() => {
     // Deep link: #connectors/<id> preselects it.
@@ -58,6 +87,9 @@ export const Connectors = () => {
             : pick a table and choose “Build connector with AI”. Connectors show up here for management and
             re-pointing.
           </div>
+          <div className="mt-4">
+            <ImportButton className="px-4 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" />
+          </div>
         </div>
       </main>
     )
@@ -86,6 +118,17 @@ export const Connectors = () => {
   return (
     <main className="flex-1 flex min-h-0">
       <div className="w-[340px] border-r border-stone-200 overflow-y-auto bg-white">
+        <div className="flex items-center justify-end gap-2 px-3 py-2 border-b border-stone-200 bg-stone-50">
+          <ImportButton className="px-3 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium" />
+          <button
+            onClick={connExportAll}
+            disabled={connBusy}
+            title="Download every connector in this workflow as one portable JSON backup — config, code, and credential field names (never secret values)"
+            className="px-3 py-1 text-xs rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium"
+          >
+            ⬇ Export all ({list.length})
+          </button>
+        </div>
         <Section title="Needs attention" items={orphaned} tone="text-rose-600 font-semibold" />
         <Section title="Active" items={active} tone="text-stone-500" />
       </div>

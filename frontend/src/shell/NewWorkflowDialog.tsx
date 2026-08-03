@@ -17,11 +17,9 @@ export const NewWorkflowDialog = () => {
     if (newWfBusy) {
       return
     }
+    // The name is OPTIONAL: left blank, the server takes it from the loaded
+    // model (the modeller's workflow name, else its title/boundedContext).
     const n = name.trim()
-    if (!n) {
-      set({ newWfErr: "Workflow name is required" })
-      return
-    }
 
     let modelPayload: Record<string, string>
     if (url.trim()) {
@@ -50,7 +48,7 @@ export const NewWorkflowDialog = () => {
       }
       const wf = await api<{ id: string }>("/v1/workflows", {
         method: "POST",
-        body: JSON.stringify({ name: n, workspaceId, ...modelPayload }),
+        body: JSON.stringify({ ...(n ? { name: n } : {}), workspaceId, ...modelPayload }),
       })
       AUTH.setWorkflow(wf.id)
       set({ newWfOpen: false, newWfBusy: false, me: null })
@@ -79,26 +77,15 @@ export const NewWorkflowDialog = () => {
         <div className="px-5 py-4 border-b border-stone-200">
           <div className="text-lg font-semibold">Create workflow</div>
           <div className="text-sm text-stone-500 mt-0.5">
-            Name it and point it at a Qlerify model — they're created together.
+            Point it at a Qlerify model — the workflow and its model are created together, and the name is taken from
+            the loaded workflow unless you type one.
           </div>
         </div>
         <div className="p-5 overflow-auto flex-1">
           {newWfErr && <div className="text-sm text-rose-600 mb-3">{newWfErr}</div>}
-          <label className="block text-sm font-medium text-stone-700 mb-1">Workflow name</label>
+          <label className="block text-sm font-medium text-stone-700 mb-1">Qlerify model link</label>
           <input
             autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                create()
-              }
-            }}
-            className="w-full rounded-md border border-stone-300 px-3 py-2 text-sm"
-            placeholder="Q3 Forecast"
-          />
-          <label className="block text-sm font-medium text-stone-700 mb-1 mt-4">Qlerify model link</label>
-          <input
             type="url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
@@ -113,6 +100,20 @@ export const NewWorkflowDialog = () => {
           <div className="text-xs text-stone-500 mt-1">
             Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.
           </div>
+          <label className="block text-sm font-medium text-stone-700 mb-1 mt-4">
+            Workflow name <span className="font-normal text-stone-400">(optional)</span>
+          </label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                create()
+              }
+            }}
+            className="w-full rounded-md border border-stone-300 px-3 py-2 text-sm"
+            placeholder="Defaults to the loaded workflow's name"
+          />
           <details className="mt-4">
             <summary className="text-sm text-stone-600 cursor-pointer select-none hover:text-stone-900">
               Advanced — upload or paste a workflow.json instead

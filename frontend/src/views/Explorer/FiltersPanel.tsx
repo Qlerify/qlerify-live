@@ -8,9 +8,10 @@ type Props = {
   filters: ExpFilter[]
   columns: { name: string }[]
   onApply: () => void
+  onReset: () => void
 }
 
-export const FiltersPanel = ({ filters, columns, onApply }: Props) => {
+export const FiltersPanel = ({ filters, columns, onApply, onReset }: Props) => {
   const { exp, set } = useStore()
 
   const update = (i: number, field: keyof ExpFilter, value: string) => {
@@ -24,10 +25,6 @@ export const FiltersPanel = ({ filters, columns, onApply }: Props) => {
 
   const add = () => {
     set({ exp: { ...exp, filters: [...filters, { attr: "", cond: "Equal to", type: "String", value: "" }] } })
-  }
-
-  const reset = () => {
-    set({ exp: { ...exp, filters: [], page: 0 } })
   }
 
   return (
@@ -105,7 +102,7 @@ export const FiltersPanel = ({ filters, columns, onApply }: Props) => {
         >
           Run
         </button>
-        <button onClick={reset} className="text-sm text-sky-700 hover:underline">
+        <button onClick={onReset} className="text-sm text-sky-700 hover:underline">
           Reset
         </button>
       </div>

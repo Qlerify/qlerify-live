@@ -109,8 +109,10 @@ export const CodeEditor = ({ connector }: { connector: Connector }) => {
     }
   }
 
+  // "Saving…" keys off the local save flag only — other busy ops (export,
+  // verify) can run while the Code tab is mounted and must not look like a save.
   const connBusy = useStore((s) => s.connBusy)
-  const statusText = busy || connBusy ? "Saving…" : dirty ? "● Unsaved changes" : "Saved"
+  const statusText = busy ? "Saving…" : dirty ? "● Unsaved changes" : "Saved"
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -124,14 +126,14 @@ export const CodeEditor = ({ connector }: { connector: Connector }) => {
         </span>
         <button
           onClick={revert}
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || connBusy}
           className="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium shrink-0"
         >
           Revert
         </button>
         <button
           onClick={save}
-          disabled={!dirty || busy}
+          disabled={!dirty || busy || connBusy}
           className="px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium shrink-0"
         >
           Save

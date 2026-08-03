@@ -8,14 +8,21 @@ const DOT: Record<string, string> = {
 }
 const LABEL: Record<string, string> = { live: "Live", recorded: "Recorded", simulated: "Simulated" }
 
+// A null businessAt means the moment is UNKNOWN (no source anchor) — the chip
+// shows no time rather than passing off occurredAt (derivation/ingestion
+// wall-clock) as when the event happened; the tooltip still cites it, labelled.
 const EventChip = ({ ev }: { ev: ExpRowEvent }) => {
   const prov = ev.provenance || "simulated"
-  const when = ev.businessAt || ev.occurredAt
+  const when = ev.businessAt
   const tip = [
     `${LABEL[prov] || prov} event`,
     ev.role ? `Role: ${ev.role}` : "",
     ev.evidence ? `Evidence: ${ev.evidence}` : "",
-    when ? `When: ${formatVersionDate(when)}` : "",
+    when
+      ? `When: ${formatVersionDate(when)}`
+      : ev.occurredAt
+        ? `Recorded: ${formatVersionDate(ev.occurredAt)} (business time unknown)`
+        : "",
   ]
     .filter(Boolean)
     .join(" · ")

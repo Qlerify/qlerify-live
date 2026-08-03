@@ -1,7 +1,8 @@
 import { api } from "./api.ts"
+import { formatDuration } from "./format.ts"
 import { useStore } from "./store.ts"
 import { showOverlay, hideOverlay } from "../components/Overlay.tsx"
-import type { ExpAdapter, ExpFilter, ExpHealth, ExpRowEvent, ExpState, ExpTable, Row } from "./types.ts"
+import type { ExpAdapter, ExpHealth, ExpRowEvent, ExpState, ExpTable, Row } from "./types.ts"
 
 const exp = () => useStore.getState().exp
 const patch = (p: Partial<ExpState>) => useStore.getState().set({ exp: { ...useStore.getState().exp, ...p } })
@@ -26,6 +27,72 @@ const fetchRowEvents = async (system: string, entity: string): Promise<Record<st
   }
 }
 
+// Rows come one pager window at a time: EXP_PAGE rows for the current page, plus
+// `matched` (rows passing the filters — sizes the pager) and `total` (the whole
+// table — the "of N"). Filtering/paging happen in SQL, so every row is reachable.
+export const EXP_PAGE = 25
+
+type RawPage = { rows?: Row[]; matched?: number; total?: number; tableMissing?: boolean }
+
+const fetchExpRows = async (): Promise<void> => {
+  const e = exp()
+  if (!e.system || !e.entity) {
+    return
+  }
+  const filters = (e.filters || []).filter((f) => f.attr && f.value !== "")
+  const qs = new URLSearchParams({
+    entity: e.entity,
+    limit: String(EXP_PAGE),
+    offset: String(e.page * EXP_PAGE),
+  })
+  if (filters.length) {
+    qs.set("filters", JSON.stringify(filters))
+  }
+  const d = await api<RawPage>(`/api/bc/${encodeURIComponent(e.system)}/raw?${qs}`)
+  const items = d.rows || []
+  const matched = d.matched ?? items.length
+  patch({ items, matched, total: d.total ?? matched, tableMissing: !!d.tableMissing })
+
+  // Filtering/deleting can strand the page past the end — snap to the last page.
+  if (e.page > 0 && !items.length && matched > 0) {
+    patch({ page: Math.max(0, Math.ceil(matched / EXP_PAGE) - 1) })
+    return fetchExpRows()
+  }
+}
+
+// Page/filter change on the current table: re-pull the window. Lighter than
+// selectEntity — no overlay, and the row-events map (keyed by row id, fetched
+// table-wide) stays valid.
+export const refetchExpRows = async () => {
+  const e = exp()
+  if (!e.system || !e.entity) {
+    return
+  }
+  patch({ busy: true })
+  try {
+    await fetchExpRows()
+  } catch {
+    // keep prior rows
+  } finally {
+    patch({ busy: false })
+  }
+}
+
+export const setExpPage = (page: number) => {
+  patch({ page })
+  refetchExpRows()
+}
+
+export const runExpFilters = () => {
+  patch({ page: 0 })
+  refetchExpRows()
+}
+
+export const resetExpFilters = () => {
+  patch({ filters: [], page: 0 })
+  refetchExpRows()
+}
+
 export const selectEntity = async (name: string) => {
   const e = exp()
   const system = e.system
@@ -36,12 +103,9 @@ export const selectEntity = async (name: string) => {
   showOverlay("Loading data…")
   try {
     try {
-      const d = await api<{ rows?: Row[]; tableMissing?: boolean }>(
-        `/api/bc/${encodeURIComponent(system)}/raw?entity=${encodeURIComponent(name)}&limit=300`,
-      )
-      patch({ items: d.rows || [], tableMissing: !!d.tableMissing })
+      await fetchExpRows()
     } catch {
-      patch({ items: [], tableMissing: true })
+      patch({ items: [], matched: 0, total: 0, tableMissing: true })
     }
     patch({ rowEvents: await fetchRowEvents(system, name) })
   } finally {
@@ -51,7 +115,7 @@ export const selectEntity = async (name: string) => {
 }
 
 export const selectSystem = async (name: string, targetEntity?: string | null) => {
-  patch({ system: name, entity: null, items: [], filters: [], page: 0 })
+  patch({ system: name, entity: null, items: [], matched: 0, total: 0, filters: [], page: 0 })
   try {
     const d = await api<{
       entities?: ExpTable[]
@@ -111,10 +175,7 @@ export const refreshExplorer = async () => {
   const cur = exp()
   if (cur.entity) {
     try {
-      const d = await api<{ rows?: Row[]; tableMissing?: boolean }>(
-        `/api/bc/${encodeURIComponent(cur.system!)}/raw?entity=${encodeURIComponent(cur.entity)}&limit=300`,
-      )
-      patch({ items: d.rows || [], tableMissing: !!d.tableMissing })
+      await fetchExpRows()
     } catch {
       // keep prior
     }
@@ -146,14 +207,27 @@ export const fetchRows = async () => {
   patch({ busy: true })
   showOverlay("Refreshing data…")
   try {
-    const r = await api<{ inserted: number; skipped: number; derived?: { events: number; instances: number } }>(
+    const r = await api<{
+      inserted: number
+      skipped: number
+      durationMs?: number
+      fetchMs?: number
+      derived?: { events: number; instances: number; durationMs?: number }
+    }>(
       `/api/adapters/${encodeURIComponent(adapter.id)}/pull`,
       { method: "POST", body: JSON.stringify({ limit: null }) }, // null = uncapped: pull ALL rows from the source
     )
     await refreshExplorer()
     hideOverlay()
-    const ev = r.derived?.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : ""
-    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}`)
+    const derivedTook = r.derived?.durationMs != null ? `, ${formatDuration(r.derived.durationMs)}` : ""
+    const ev = r.derived?.events
+      ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s)${derivedTook})`
+      : ""
+    const took =
+      r.durationMs != null
+        ? `\nTook: ${formatDuration(r.durationMs)}${r.fetchMs != null ? ` (fetch ${formatDuration(r.fetchMs)})` : ""}`
+        : ""
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}${took}`)
   } catch (err) {
     hideOverlay()
     alert("Fetch failed: " + (err as Error).message)
@@ -213,6 +287,7 @@ export const reimportAll = async () => {
       inserted: number
       derived?: { events: number; instances: number }
       failures?: { id: string }[]
+      durationMs?: number
       // no limit = uncapped: a full restore re-pulls everything
     }>("/api/data/reimport-all", { method: "POST", body: "{}" })
     await refreshExplorer()
@@ -221,49 +296,16 @@ export const reimportAll = async () => {
     const failed = r.failures?.length
       ? `\nConnectors that failed: ${r.failures.length} (${r.failures.map((f) => f.id).join(", ")})`
       : ""
-    alert(`Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}`)
+    const took = r.durationMs != null ? `\nTook: ${formatDuration(r.durationMs)}` : ""
+    alert(
+      `Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}${took}`,
+    )
   } catch (err) {
     hideOverlay()
     alert("Reset & reimport failed: " + (err as Error).message)
   } finally {
     patch({ busy: false })
   }
-}
-
-export const applyFilters = (items: Row[], filters: ExpFilter[]): Row[] => {
-  const active = (filters || []).filter((f) => f.attr && f.value !== "")
-  if (!active.length) {
-    return items
-  }
-  return items.filter((row) =>
-    active.every((f) => {
-      let v: unknown = row[f.attr]
-      let t: unknown = f.value
-      if (f.type === "Number") {
-        v = Number(v)
-        t = Number(t)
-      } else {
-        v = String(v == null ? "" : v).toLowerCase()
-        t = String(t).toLowerCase()
-      }
-      switch (f.cond) {
-        case "Equal to":
-          return v == t
-        case "Not equal to":
-          return v != t
-        case "Contains":
-          return String(v).includes(String(t))
-        case "Begins with":
-          return String(v).startsWith(String(t))
-        case "Greater than":
-          return (v as number) > (t as number)
-        case "Less than":
-          return (v as number) < (t as number)
-        default:
-          return true
-      }
-    }),
-  )
 }
 
 export const kindOf = (e: ExpState, name: string | null) => {

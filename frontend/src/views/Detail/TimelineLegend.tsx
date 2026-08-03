@@ -1,4 +1,5 @@
 import { useStore } from "../../lib/store.ts"
+import { EST_TIME_TITLE, bizTimeEstimated } from "../../lib/time.ts"
 import { ProvChip } from "../../components/ProvChip.tsx"
 
 const LastEvent = () => {
@@ -28,9 +29,13 @@ const LastEvent = () => {
   )
 }
 
+// When any step's business time is an estimate, explain the ~date styling so a
+// greyed timestamp is self-describing.
 export const TimelineLegend = () => {
   const meta = useStore((s) => s.meta)
+  const log = useStore((s) => s.log)
   const prov = meta.provenance
+  const hasEst = (log || []).some((e) => bizTimeEstimated(e))
 
   return (
     <div className="px-6 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 border-b border-stone-200 bg-white">
@@ -49,6 +54,11 @@ export const TimelineLegend = () => {
             <ProvChip mode="simulated" /> simulated
           </span>
         </>
+      )}
+      {hasEst && (
+        <span className="flex items-center gap-1" title={EST_TIME_TITLE}>
+          <span className="mono italic text-stone-400">~date</span> = estimated time
+        </span>
       )}
       <LastEvent />
     </div>

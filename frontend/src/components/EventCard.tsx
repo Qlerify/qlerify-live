@@ -13,9 +13,10 @@ type Props = {
   top: number
   width: number
   height: number
+  footer?: React.ReactNode
 }
 
-export const EventCard = ({ event, index, count, maxCount, meta, left, top, width, height }: Props) => {
+export const EventCard = ({ event, index, count, maxCount, meta, left, top, width, height, footer }: Props) => {
   const fired = count > 0
   const provMode = provModeForBC(meta, event.boundedContext)
   // Heat: relative volume → emerald tint. The floor keeps low-volume fired cards
@@ -42,6 +43,7 @@ export const EventCard = ({ event, index, count, maxCount, meta, left, top, widt
       </div>
       <div className="text-[12px] font-medium leading-tight text-stone-800">{event.name}</div>
       <div className="text-[10px] text-stone-500 mt-1">{event.role}</div>
+      {footer}
     </div>
   )
 }

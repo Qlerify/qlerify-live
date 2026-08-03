@@ -7,6 +7,26 @@ export const fmtBizDate = (iso?: string | null): string | null => {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })
 }
 
+// Timestamp trust: is this entry's business time an ESTIMATE rather than a
+// witnessed source timestamp? The server stamps businessAtKind at derivation;
+// rows predating that stamp fall back to the evidence kind — only a create
+// event's time is witnessed by the source, every other derived event's time is
+// inferred from last-modified/heuristics. No evidence at all (simulator steps,
+// live commands) needs no qualifier, and neither does a null businessAt: the
+// moment is UNKNOWN, not estimated. Estimated times render greyed with a ~.
+export const EST_TIME_TITLE =
+  "Estimated — the source records that this step happened, but not exactly when. The date shown is inferred from the record's timestamps."
+
+export const bizTimeEstimated = (entry?: { businessAt?: string | null; businessAtKind?: string | null; evidenceKind?: string | null } | null) => {
+  if (!entry || entry.businessAt == null) {
+    return false
+  }
+  if (entry.businessAtKind) {
+    return entry.businessAtKind === "estimated"
+  }
+  return entry.evidenceKind != null && entry.evidenceKind !== "create"
+}
+
 export const minutesBetween = (isoA?: string | null, isoB?: string | null): number | null => {
   if (!isoA || !isoB) {
     return null

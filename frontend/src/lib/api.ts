@@ -59,12 +59,12 @@ export const setUnauthorizedHandler = (fn: () => void) => {
   onUnauthorized = fn
 }
 
-export const api = async <T = any>(path: string, opts: RequestInit = {}): Promise<T> => {
+const apiHeaders = (extra?: HeadersInit, hasBody = false): Record<string, string> => {
   const headers: Record<string, string> = {
     "x-role": ROLE,
-    ...((opts.headers as Record<string, string>) || {}),
+    ...((extra as Record<string, string>) || {}),
   }
-  if (opts.body != null) {
+  if (hasBody) {
     headers["Content-Type"] = "application/json"
   }
   const token = AUTH.token()
@@ -79,31 +79,66 @@ export const api = async <T = any>(path: string, opts: RequestInit = {}): Promis
   if (workflow) {
     headers["X-Workflow-Id"] = workflow
   }
+  return headers
+}
 
-  const res = await fetch(path, { cache: "no-store", ...opts, headers })
+const throwApiError = async (res: Response, path: string): Promise<never> => {
   if (res.status === 401 && !path.startsWith("/v1/auth/")) {
     AUTH.clear()
     onUnauthorized()
     throw new ApiError(`401 ${path}: session expired — please sign in`)
   }
-  if (!res.ok) {
-    const text = await res.text()
-    // Prefer the backend's {message} — it's already a clean sentence.
-    let msg = `${res.status} ${path}: ${text}`
-    try {
-      const j = JSON.parse(text)
-      if (j && typeof j.message === "string" && j.message) {
-        msg = j.message
-      }
-    } catch {
-      /* not JSON */
+  const text = await res.text()
+  // Prefer the backend's {message} — it's already a clean sentence.
+  let msg = `${res.status} ${path}: ${text}`
+  try {
+    const j = JSON.parse(text)
+    if (j && typeof j.message === "string" && j.message) {
+      msg = j.message
     }
-    const err = new ApiError(msg)
-    err.status = res.status
-    err.path = path
-    throw err
+  } catch {
+    /* not JSON */
+  }
+  const err = new ApiError(msg)
+  err.status = res.status
+  err.path = path
+  throw err
+}
+
+export const api = async <T = any>(path: string, opts: RequestInit = {}): Promise<T> => {
+  const res = await fetch(path, {
+    cache: "no-store",
+    ...opts,
+    headers: apiHeaders(opts.headers, opts.body != null),
+  })
+  if (!res.ok) {
+    await throwApiError(res, path)
   }
   return res.json()
+}
+
+// GET an attachment and hand it to the browser as a file download. Must go
+// through fetch (not a plain <a href>): the bearer token lives in localStorage
+// and is only attached by apiHeaders(), so a bare navigation would 401. The
+// server names the file via Content-Disposition; fallbackName covers a missing
+// or unparsable header.
+export const apiDownload = async (path: string, fallbackName: string) => {
+  const res = await fetch(path, { cache: "no-store", headers: apiHeaders() })
+  if (!res.ok) {
+    await throwApiError(res, path)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get("content-disposition") || ""
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] || fallbackName
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // Deferred: revoking synchronously can cancel the still-starting download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 export const isNoModelErr = (e: unknown): boolean => {

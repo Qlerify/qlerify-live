@@ -1,4 +1,5 @@
 import { parsePayload } from "./asOf.ts"
+import { bizTimeEstimated } from "./time.ts"
 import type { FlowLayout } from "./flowLayout.ts"
 import type { LogEntry, Row } from "./types.ts"
 
@@ -8,6 +9,7 @@ export type Firing = {
   aggId: string
   payload: Row
   businessAt?: string | null
+  est?: boolean
   col: number
   parentAggs: string[]
 }
@@ -25,6 +27,7 @@ export const caseFirings = (log: LogEntry[], layout: FlowLayout): Firing[] => {
     aggId: e.aggregateId || "",
     payload: parsePayload(e.payload),
     businessAt: e.businessAt,
+    est: bizTimeEstimated(e),
     col: layout.place.get(e.eventRef)?.col ?? 0,
     parentAggs: [],
   }))

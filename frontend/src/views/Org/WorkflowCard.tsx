@@ -30,7 +30,7 @@ export const WorkflowCard = ({ w, onOpen }: { w: OrgWorkflowCard; onOpen: () => 
 
   const role = w.topRoleQueue
   const oldest = w.oldestActive
-  const hasChips = w.atRisk || w.reworkCount || w.softFailCount
+  const hasChips = !!(w.atRisk || w.reworkCount || w.softFailCount)
 
   return (
     <button

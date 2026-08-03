@@ -1379,22 +1379,26 @@ export function eventRefIndex() {
   return m;
 }
 
-// id → { agg, row } over the LIVE instance, for static-field carry-over.
+// "agg#id" → { agg, row } over the LIVE instance, for static-field carry-over.
+// Keyed by (aggregate, id) — not id alone — because different aggregates in one
+// case can share an id (the simulator correlates by reusing the case id as the
+// aggregateId across aggregates), and an id-only key would let one aggregate's
+// row shadow another's.
 export function liveRowsById(inst) {
   const m = new Map();
-  if (inst.root && inst.root.id != null) m.set(String(inst.root.id), { agg: inst.rootAggregate, row: inst.root });
+  if (inst.root && inst.root.id != null) m.set(inst.rootAggregate + "#" + String(inst.root.id), { agg: inst.rootAggregate, row: inst.root });
   for (const [agg, rows] of Object.entries(inst.entities || {})) {
-    for (const row of rows || []) if (row.id != null) m.set(String(row.id), { agg, row });
+    for (const row of rows || []) if (row.id != null) m.set(agg + "#" + String(row.id), { agg, row });
   }
   return m;
 }
 
 // Reconstruct the whole instance from the event log, folding only the entries
-// the predicate accepts (by declared step index). `everCarried` (per-aggregate
+// the predicate accepts (by declared step index). `everCarried` (per-"agg#id"-row
 // set of fields any command ever carried, full-log) lets us blank a column that
 // only a LATER command sets vs. carry a time-invariant column from the live row.
 export function reconstructInstance(includeIdx, everCarried, live, refIdx, chrono) {
-  const folded = new Map(); // id → { agg, row }
+  const folded = new Map(); // "agg#id" → { agg, id, row } — see liveRowsById for why not id alone
   for (const ev of chrono) {
     if (!ev.aggregateId) continue;            // skip markers (empty aggregateId)
     const idx = refIdx.get(ev.eventRef);
@@ -1402,15 +1406,16 @@ export function reconstructInstance(includeIdx, everCarried, live, refIdx, chron
     const p = parsePayload(ev.payload);
     if (!p || Object.keys(p).length === 0) continue; // empty/bad payload folds to nothing
     const id = String(ev.aggregateId);
-    let cur = folded.get(id);
-    if (!cur) folded.set(id, (cur = { agg: ev.aggregateRoot, row: {} }));
+    const key = ev.aggregateRoot + "#" + id;
+    let cur = folded.get(key);
+    if (!cur) folded.set(key, (cur = { agg: ev.aggregateRoot, id, row: {} }));
     Object.assign(cur.row, p);              // later (chronological) values win
   }
   const entities = {};
   let root = null;
-  for (const [id, { agg, row: asOf }] of folded) {
-    const liveRow = live.get(id)?.row || {};
-    const carried = everCarried.get(id) || new Set();
+  for (const [key, { agg, id, row: asOf }] of folded) {
+    const liveRow = live.get(key)?.row || {};
+    const carried = everCarried.get(key) || new Set();
     const out = { id };
     const cols = new Set([...Object.keys(liveRow), ...Object.keys(asOf)]);
     for (const c of cols) {
@@ -1437,16 +1442,19 @@ export function activeDetailInstance() {
   const refIdx = eventRefIndex();
   const chrono = (state.log || []).slice().reverse(); // state.log is newest-first
 
-  // Fields any command EVER carried, per aggregate (full log) — lets us tell a
-  // time-varying column (blank until its command fires) from a static one.
+  // Fields any command EVER carried, per "agg#id" row (full log) — lets us tell
+  // a time-varying column (blank until its command fires) from a static one.
+  // Keyed like liveRowsById: aggregates sharing an id must not pool their
+  // carried-field sets, or one aggregate's later command would blank a column
+  // that belongs to another.
   const everCarried = new Map();
   for (const ev of chrono) {
     if (!ev.aggregateId) continue;
     const p = parsePayload(ev.payload);
     if (!p) continue;
-    const id = String(ev.aggregateId);
-    let set = everCarried.get(id);
-    if (!set) everCarried.set(id, (set = new Set()));
+    const key = ev.aggregateRoot + "#" + String(ev.aggregateId);
+    let set = everCarried.get(key);
+    if (!set) everCarried.set(key, (set = new Set()));
     for (const k of Object.keys(p)) set.add(k);
   }
 

@@ -58,3 +58,40 @@ describe("buildConnectorPrompt related schemas", () => {
     expect(prompt).toContain('status: string — e.g. "NEW", "ASSESSED"');
   });
 });
+
+// Cycle guidance is model-conditional: the builder AI is told about recurring
+// cycles ONLY when the target is (or links into) a period-scoped aggregate —
+// it never judges cycle-ness itself, and non-cycle prompts carry none of it.
+describe("buildConnectorPrompt cycle guidance", () => {
+  const base = () => demandInput([]);
+
+  it("a period-scoped target gets the recurring-cycle rules (verbatim subject, engine-owned id, exact period format)", () => {
+    const prompt = buildConnectorPrompt({
+      ...base(),
+      cycle: { subjectFields: ["hubspotCompanyId"], periodField: "quarter", granularity: "quarter", periodExample: "2026Q3" },
+    });
+    expect(prompt).toContain("## Recurring-cycle table (period-scoped)");
+    expect(prompt).toContain("ONE ROW PER SUBJECT PER PERIOD");
+    expect(prompt).toContain("hubspotCompanyId + quarter (quarter)");
+    expect(prompt).toContain('formatted EXACTLY like "2026Q3"');
+    expect(prompt).toContain("Do NOT compose the row id");
+    // The generic "derive a deterministic id" rule is replaced for cycle targets.
+    expect(prompt).not.toContain("derive a deterministic one");
+  });
+
+  it("a cycle CHILD target gets the membership rules (byte-for-byte subject values, no period filtering)", () => {
+    const prompt = buildConnectorPrompt({
+      ...base(),
+      cycleChild: [{ target: "Quarter", pairs: [{ child: "companyId", subject: "hubspotCompanyId" }], granularity: "quarter" }],
+    });
+    expect(prompt).toContain("## Cycle membership");
+    expect(prompt).toContain('"companyId": must carry the Quarter table\'s hubspotCompanyId value VERBATIM');
+    expect(prompt).toContain("do NOT filter rows to the current quarter");
+  });
+
+  it("a plain target gets no cycle guidance at all", () => {
+    const prompt = buildConnectorPrompt(base());
+    expect(prompt).not.toContain("Recurring-cycle table");
+    expect(prompt).not.toContain("Cycle membership");
+  });
+});

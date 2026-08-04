@@ -463,6 +463,7 @@ export function caseFirings(layout) {
     col: layout.place.get(e.eventRef)?.col ?? 0,
   }));
   const aggIds = new Set(firings.map((f) => f.aggId).filter(Boolean));
+  const aggIdList = [...aggIds];
   for (const f of firings) {
     // ALL payload fields (other than own id) whose value is another firing's
     // aggregateId — the candidate FK parents. *Id-suffixed fields are listed
@@ -478,9 +479,15 @@ export function caseFirings(layout) {
       .sort((a, b) => (b.endsWith("Id") ? 1 : 0) - (a.endsWith("Id") ? 1 : 0));
     for (const k of keys) {
       const v = f.payload[k];
-      if (typeof v === "string" && v && v !== f.aggId && aggIds.has(v) && !seen.has(v)) {
+      if (typeof v !== "string" || !v || v === f.aggId || seen.has(v)) continue;
+      // Exact id match, else the engine-composed cycle row id "<subject>@<period>"
+      // (twin/period.ts cycleId): a cycle's child carries only the subject part,
+      // so the subject value prefix-matches its cycle firing's aggregateId.
+      const hit = aggIds.has(v) ? v : aggIdList.find((a) => a !== f.aggId && a.startsWith(v + "@"));
+      if (hit && !seen.has(hit)) {
         seen.add(v);
-        f.parentAggs.push(v);
+        seen.add(hit);
+        f.parentAggs.push(hit);
       }
     }
   }

@@ -153,12 +153,14 @@ function eventRow(
 
 export async function emit(ev: EmittedEvent): Promise<void> {
   const def = findEvent(ev.ref);
+  // Business time resolves BEFORE the case: cycle correlation buckets it into a
+  // period (quarterOf(scheduledAt) → which Quarter case this event belongs to).
+  const businessAt = getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date();
   // The case this event belongs to: the simulator's explicit run scope when set,
   // otherwise model-driven correlation that links an aggregate the workflow moved
   // into back to the case its FK references (instead of starting a new case).
-  const caseId = scopeOverride ?? (await correlateCaseId(def.aggregateRoot, ev.aggregateId, ev.payload));
+  const caseId = scopeOverride ?? (await correlateCaseId(def.aggregateRoot, ev.aggregateId, ev.payload, businessAt));
   const provenance = ev.provenance ?? (await provenanceFor(def.boundedContext));
-  const businessAt = getBusinessClock() ?? businessDateFromPayload(def, ev.payload) ?? new Date();
   await prisma.eventLog.create({ data: eventRow(ev, def, caseId, provenance, businessAt) });
 }
 

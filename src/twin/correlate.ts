@@ -26,6 +26,8 @@
 import { prisma } from "../db.js";
 import { getOntology, type Ontology } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { periodKeyOf, periodOf, type PeriodGranularity } from "./period.js";
+import * as store from "./projection-store.js";
 
 /** The entity an `<name>Id` field points at (the FK-by-name heuristic, shared
  * with the simulator's arg-linking). Matched case-insensitively so acronym
@@ -65,6 +67,86 @@ export function foreignKeyFields(aggregateRoot: string, ont: Ontology): Array<{ 
   return out;
 }
 
+// --- Period-scoped cycle links ----------------------------------------------
+// A cycle aggregate (twin/period.ts) is identified by subject × period. A child
+// row does NOT carry the cycle row's id — it carries the cycle's SUBJECT key
+// (e.g. Meeting.companyId ↔ Quarter.hubspotCompanyId) and its own business date
+// supplies the period. The link below is resolved from the model alone; the
+// VALUE resolution (which cycle row those coordinates name) is the caller's.
+
+/** A model-declared path from a child aggregate into a period-scoped cycle. */
+export interface CycleLink {
+  /** The period-scoped target entity (e.g. "Quarter"). */
+  target: string;
+  /** Child payload field ↔ target subject key field, one pair per subject field. */
+  subjectFields: Array<{ child: string; subject: string }>;
+  /** The target's period key field (e.g. "quarter"). */
+  periodField: string;
+  granularity: PeriodGranularity;
+}
+
+const normField = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Does a child field NAME reference a cycle's subject key field? Exact match,
+ * or an id-shaped suffix relation in either direction — "companyId" matches
+ * subject "hubspotCompanyId" (and vice versa), so renaming the cycle ENTITY
+ * (the break that motivated all this) can never sever the link: the match is
+ * against the subject FIELD, not the entity name. */
+function subjectFieldMatch(childField: string, subjectField: string): boolean {
+  const c = normField(childField);
+  const s = normField(subjectField);
+  if (c === s) return true;
+  if (!c.endsWith("id") || !s.endsWith("id")) return false;
+  return c.endsWith(s) || s.endsWith(c);
+}
+
+/** Cycle links from `aggregateRoot` into every period-scoped entity whose FULL
+ * subject key its fields cover (a partial subject match is no link — half a
+ * composite key must never correlate). Links into the case ROOT aggregate come
+ * first, mirroring foreignKeyFields' spine-first ordering. Self-links are
+ * meaningless (the cycle row IS its own case anchor) and excluded. */
+export function cycleLinkFields(aggregateRoot: string, ont: Ontology): CycleLink[] {
+  const entity = ont.entity(aggregateRoot);
+  if (!entity) return [];
+  const out: CycleLink[] = [];
+  for (const target of ont.entities) {
+    if (target.name === aggregateRoot) continue;
+    const pk = periodKeyOf(target);
+    if (!pk) continue;
+    const pairs: Array<{ child: string; subject: string }> = [];
+    for (const subject of pk.subjectFields) {
+      const child = entity.fields.find((f) => f.name !== "id" && subjectFieldMatch(f.name, subject));
+      if (!child) break;
+      pairs.push({ child: child.name, subject });
+    }
+    if (pairs.length !== pk.subjectFields.length) continue;
+    out.push({ target: target.name, subjectFields: pairs, periodField: pk.periodField, granularity: pk.granularity });
+  }
+  out.sort((a, b) => Number(b.target === ont.rootAggregate) - Number(a.target === ont.rootAggregate));
+  return out;
+}
+
+/** The child-side subject key values a payload carries for a link, or null when
+ * any is missing/blank (a partial subject must never resolve). */
+export function subjectValues(link: CycleLink, payload: Record<string, unknown>): string[] | null {
+  const out: string[] = [];
+  for (const pair of link.subjectFields) {
+    const v = payload[pair.child];
+    if (typeof v !== "string" || !v.trim()) return null;
+    out.push(v);
+  }
+  return out;
+}
+
+/** Optional cycle-resolution context for decideCaseId. `businessAt` is the
+ * event's business date (the period source); `cycleCase` resolves the case of
+ * the cycle row at (target, subject values, period) — null when no such row is
+ * known. Injected so the pure core stays I/O-free. */
+export interface CycleResolution {
+  businessAt: Date | null;
+  cycleCase: (link: CycleLink, values: string[], period: string) => string | null;
+}
+
 /** PURE correlation decision. Given the model, the aggregate being scoped, its
  * payload, and `caseOf` (an instance-id → caseId resolver over already-recorded
  * events), decide the caseId:
@@ -75,7 +157,10 @@ export function foreignKeyFields(aggregateRoot: string, ont: Ontology): Array<{ 
  *     re-derive; a later event on an aggregate whose create already correlated).
  *  4. Otherwise follow a foreign-key reference back to a parent aggregate already
  *     in a case, and inherit it.
- *  5. With no resolvable link, start a fresh case (its own id).
+ *  5. Otherwise follow a CYCLE link: the payload's subject key values + the
+ *     event's business date bucketed to a period name a period-scoped cycle row
+ *     (Meeting.companyId + quarterOf(scheduledAt) → the Quarter case).
+ *  6. With no resolvable link, start a fresh case (its own id).
  *
  * No DB or I/O — that's correlateCaseId()'s job. */
 export function decideCaseId(
@@ -84,6 +169,7 @@ export function decideCaseId(
   aggregateId: string,
   payload: Record<string, unknown>,
   caseOf: (instanceId: string) => string | null,
+  cycle?: CycleResolution,
 ): string | null {
   if (typeof payload.caseId === "string" && payload.caseId) return payload.caseId;
   if (!aggregateId) return null;
@@ -99,17 +185,36 @@ export function decideCaseId(
     if (parentCase) return parentCase;
   }
 
+  if (cycle?.businessAt) {
+    for (const link of cycleLinkFields(aggregateRoot, ont)) {
+      const values = subjectValues(link, payload);
+      if (!values) continue;
+      const c = cycle.cycleCase(link, values, periodOf(cycle.businessAt, link.granularity));
+      if (c) return c;
+    }
+  }
+
   return aggregateId;
 }
+
+/** Stable lookup key for a pre-resolved cycle coordinate. */
+const cycleCoordKey = (target: string, values: string[], period: string): string =>
+  [target, ...values, period].join("\u0000");
 
 /** The caseId an aggregate instance belongs to (the thin I/O wrapper around
  * decideCaseId). Resolves `caseOf` with ONE tenant-scoped EventLog lookup over
  * the candidate ids — the instance itself plus the FK references its payload
- * carries — so it never correlates across orgs/workflows. */
+ * carries — so it never correlates across orgs/workflows. `businessAt` (the
+ * event's business date, resolved by the caller) enables cycle-link resolution:
+ * each candidate cycle row is looked up by its subject + period COLUMN VALUES in
+ * the projection store (never by id shape), then joins the candidate set. This
+ * path only READS — a missing cycle row falls through; lazy cycle instantiation
+ * lives on the derive path (twin/derive.ts), the data path that owns rows. */
 export async function correlateCaseId(
   aggregateRoot: string,
   aggregateId: string,
   payload: Record<string, unknown>,
+  businessAt?: Date | null,
 ): Promise<string | null> {
   if (typeof payload.caseId === "string" && payload.caseId) return payload.caseId;
   if (!aggregateId) return null;
@@ -130,6 +235,29 @@ export async function correlateCaseId(
     if (typeof ref === "string" && ref) candidates.add(ref);
   }
 
+  // Pre-resolve cycle coordinates → cycle row id (value equality on the target's
+  // subject + period columns), so the pure core can consult them without I/O.
+  // The resolved row ids join the candidate set: the cycle row's own case (if it
+  // has events) wins over anchoring on the bare row id.
+  const cycleRowByCoord = new Map<string, string>();
+  if (businessAt) {
+    for (const link of cycleLinkFields(aggregateRoot, ont)) {
+      const values = subjectValues(link, payload);
+      if (!values || !(await store.tableExists(link.target))) continue;
+      const period = periodOf(businessAt, link.granularity);
+      const filters = [
+        ...link.subjectFields.map((sf, i) => ({ attr: sf.subject, cond: "Equal to", value: values[i]! })),
+        { attr: link.periodField, cond: "Equal to", value: period },
+      ];
+      const row = (await store.findMany(link.target, 1, 0, filters))[0];
+      if (row?.id != null) {
+        const rowId = String(row.id);
+        cycleRowByCoord.set(cycleCoordKey(link.target, values, period), rowId);
+        candidates.add(rowId);
+      }
+    }
+  }
+
   const rows = await prisma.eventLog.findMany({
     where: { aggregateId: { in: [...candidates] }, caseId: { not: null }, ...eventLogOrgWhere() },
     orderBy: { occurredAt: "asc" },
@@ -140,5 +268,11 @@ export async function correlateCaseId(
     if (r.aggregateId && r.caseId && !caseByInstance.has(r.aggregateId)) caseByInstance.set(r.aggregateId, r.caseId);
   }
 
-  return decideCaseId(ont, aggregateRoot, aggregateId, payload, (id) => caseByInstance.get(id) ?? null);
+  return decideCaseId(ont, aggregateRoot, aggregateId, payload, (id) => caseByInstance.get(id) ?? null, {
+    businessAt: businessAt ?? null,
+    cycleCase: (link, values, period) => {
+      const rowId = cycleRowByCoord.get(cycleCoordKey(link.target, values, period));
+      return rowId ? caseByInstance.get(rowId) ?? rowId : null;
+    },
+  });
 }

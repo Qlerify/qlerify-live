@@ -13,6 +13,7 @@ import { currentWorkflowId } from "../platform/tenancy/context.js";
 import { newId } from "../util/ids.js";
 import { setAdapterMode, type ProvMode } from "../twin/provenance.js";
 import { deriveFromData } from "../twin/derive.js";
+import { periodKeyOf, periodOf, cycleId } from "../twin/period.js";
 import * as store from "../twin/projection-store.js";
 import { getAdapter } from "./registry.js";
 import { connectorsInWorkflow } from "./connector/orchestrate.js";
@@ -26,6 +27,12 @@ export interface IngestSummary {
   entity: string;
   inserted: number;
   skipped: number;
+  /** Rows merged into a provisional cycle row the engine had opened lazily
+   * (twin/derive.ts) — the pull enriched the placeholder instead of skipping. */
+  merged: number;
+  /** Cycle-hygiene findings for a period-scoped target (id recomposed, subject
+   * key values missing, period defaulted) — also journaled as notes. */
+  warnings?: string[];
   mode: ProvMode;
   /** Wall-clock ms of the ingest itself (table + pull + insert loop), EXCLUDING
    * derivation — the derive pass reports its own durationMs below, so the two
@@ -75,6 +82,8 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
   let fetchMs = 0;
   let inserted = 0;
   let skipped = 0;
+  let merged = 0;
+  const warnings: string[] = [];
   try {
     // The target may be an entity OR a value object (a value object populated
     // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
@@ -83,6 +92,15 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
     if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
 
     await store.ensureTable(entity);
+    // Period-scoped cycle target (twin/period.ts): the ENGINE owns the row id —
+    // canonical subject@period — so connectors never hand-compose composite keys
+    // and a next-period pull creates the next cycle instead of skipping on a
+    // period-less id. Divergence from a connector-supplied id is reported, not
+    // silent.
+    const pk = periodKeyOf(entity);
+    let idRecomposed = 0;
+    let missingSubject = 0;
+    let periodDefaulted = 0;
     const fieldMap = await adapter.mapping();
     const tFetch = Date.now();
     const { rows } = await adapter.pull({ limit: opts.limit });
@@ -99,15 +117,49 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
       // (derive's known=true). Unknown stays unknown; only rows created live by
       // commands stamp real wall-clock time.
       for (const c of PLATFORM_TIMESTAMP_COLS) if (!hasValue(mapped[c])) mapped[c] = null;
-      const id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
+      let id = String(mapped.id ?? newId(adapter.targetEntity.toLowerCase()));
+      if (pk) {
+        // A cycle pull is a snapshot OF a period: a row without a period value
+        // belongs to the period it was pulled in.
+        if (!hasValue(mapped[pk.periodField])) {
+          mapped[pk.periodField] = periodOf(new Date(), pk.granularity);
+          periodDefaulted++;
+        }
+        const values = pk.subjectFields.map((f) => (hasValue(mapped[f]) ? String(mapped[f]) : null));
+        if (values.some((v) => v === null)) {
+          missingSubject++;
+        } else {
+          const canonical = cycleId(values as string[], String(mapped[pk.periodField]));
+          if (hasValue(mapped.id) && String(mapped.id) !== canonical) idRecomposed++;
+          id = canonical;
+        }
+      }
       mapped.id = id;
       mapped._provenance = adapter.mode; // current-state provenance on the row
-      if (await store.findById(adapter.targetEntity, id)) {
-        skipped++; // idempotent: a row with this id already ingested
+      const existing = await store.findById(adapter.targetEntity, id);
+      if (existing) {
+        if (existing._provisional) {
+          // A cycle row the engine opened lazily before this pull: ENRICH it
+          // with the source's real values instead of skipping on the id.
+          // updatedAt is left to store.update's own stamp — passing it too
+          // would assign the column twice in one UPDATE.
+          const changes = Object.fromEntries(Object.entries(mapped).filter(([k]) => k !== "id" && k !== "updatedAt"));
+          changes._provisional = null;
+          await store.update(adapter.targetEntity, id, changes, Number(existing.version ?? 0));
+          merged++;
+        } else {
+          skipped++; // idempotent: a row with this id already ingested
+        }
         continue;
       }
       await store.insert(adapter.targetEntity, mapped);
       inserted++;
+    }
+
+    if (pk) {
+      if (idRecomposed) warnings.push(`${idRecomposed} row(s): connector-supplied id replaced with the canonical cycle id (${pk.subjectFields.join("+")}@${pk.periodField})`);
+      if (missingSubject) warnings.push(`${missingSubject} row(s) missing subject key value(s) (${pk.subjectFields.join(", ")}) — kept the connector's id; these rows cannot anchor cycle correlation`);
+      if (periodDefaulted) warnings.push(`${periodDefaulted} row(s) had no ${pk.periodField} — defaulted to the current period`);
     }
 
     // The bounded context's data now comes from this adapter; the mode reflects the
@@ -134,7 +186,9 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
     // Journal the pull onto the connector's history so it shows in the builder's
     // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
     // rows" button (every ingestPull caller is covered here — the single place).
-    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present) into ${adapter.targetEntity}.`, { durationMs });
+    const mergedNote = merged ? `, ${merged} provisional cycle row(s) enriched` : "";
+    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present${mergedNote}) into ${adapter.targetEntity}.`, { durationMs });
+    for (const w of warnings) appendNote(adapter.id, "note", `Cycle check: ${w}`);
   } catch { /* ignore bookkeeping errors */ }
 
   // Ingested rows imply domain events — derive them right here so the event log
@@ -169,7 +223,18 @@ export async function ingestPull(adapterId: string, opts: { limit?: number | nul
       } catch { /* ignore journaling errors */ }
     }
   }
-  return { adapterId: adapter.id, entity: adapter.targetEntity, inserted, skipped, mode: adapter.mode, derived, durationMs, fetchMs };
+  return {
+    adapterId: adapter.id,
+    entity: adapter.targetEntity,
+    inserted,
+    skipped,
+    merged,
+    ...(warnings.length ? { warnings } : {}),
+    mode: adapter.mode,
+    derived,
+    durationMs,
+    fetchMs,
+  };
 }
 
 export interface ReingestSummary {

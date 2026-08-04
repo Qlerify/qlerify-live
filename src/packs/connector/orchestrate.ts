@@ -5,6 +5,8 @@
 // a normal registry entry), so they live in tools.ts / ingest.ts unchanged.
 
 import { getOntology } from "../../ontology/model.js";
+import { periodKeyOf, periodFormatExample } from "../../twin/period.js";
+import { cycleLinkFields } from "../../twin/correlate.js";
 import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.js";
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
@@ -200,10 +202,34 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   const targetKind: "entity" | "valueObject" = cfg.targetKind ?? (getOntology().entity(cfg.targetEntity) ? "entity" : "valueObject");
   const instr = (instructions ?? cfg.instructions ?? "").trim();
 
+  // Cycle facts from the model (twin/period.ts): the author AI is told about
+  // recurring cycles ONLY when the model declares them — as the cycle table
+  // itself (a period-named composite key) or as a child linked into one.
+  const pk = targetKind === "entity" ? periodKeyOf(target) : null;
+  const childLinks = targetKind === "entity" ? cycleLinkFields(target.name, getOntology()) : [];
   const gen = await generateConnectorModule({
     target, targetKind, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
+    ...(pk
+      ? {
+          cycle: {
+            subjectFields: pk.subjectFields,
+            periodField: pk.periodField,
+            granularity: pk.granularity,
+            periodExample: periodFormatExample(pk.granularity),
+          },
+        }
+      : {}),
+    ...(childLinks.length
+      ? {
+          cycleChild: childLinks.map((l) => ({
+            target: l.target,
+            pairs: l.subjectFields,
+            granularity: l.granularity,
+          })),
+        }
+      : {}),
   });
   // Install first so a missing-dep failure is reported here, not as a cryptic
   // "Cannot find package" at run time. The module is written regardless so the

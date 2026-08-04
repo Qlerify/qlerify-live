@@ -120,6 +120,10 @@ function createTableSql(entity: EntitySchema): string {
   // falls back to the bounded context's mode at read time. Written by adapters
   // when they pull real data; synthesized rows leave it null (= simulated).
   if (!declared.has("_provenance")) cols.push(`${ident("_provenance")} TEXT`);
+  // Truthy on a cycle row the engine opened lazily (twin/derive.ts) before any
+  // connector pulled it: a placeholder the next ingest MERGES into (instead of
+  // skipping on the existing id) and then clears.
+  if (!declared.has("_provisional")) cols.push(`${ident("_provisional")} INTEGER`);
   // Multi-tenant owner. Snake-cased so it never collides with a model field
   // named `organizationId`; stamped on insert, filtered on read.
   if (!declared.has("organization_id")) cols.push(`${ident("organization_id")} TEXT`);
@@ -207,6 +211,14 @@ export async function tableExists(logical: string): Promise<boolean> {
 export async function tableColumns(logical: string): Promise<Set<string>> {
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(`PRAGMA table_info(${phys(logical)})`);
   return new Set(rows.map((r) => r.name));
+}
+
+/** Add a column to a projection table if it's missing (additive, never drops).
+ * For platform columns introduced after a table was created (e.g. `_provisional`
+ * on a table predating cycle support) — the alternative is a full rebuild. */
+export async function ensureColumn(logical: string, name: string, type = "TEXT"): Promise<void> {
+  if ((await tableColumns(logical)).has(name)) return;
+  await prisma.$executeRawUnsafe(`ALTER TABLE ${phys(logical)} ADD COLUMN ${ident(name)} ${type}`);
 }
 
 // ---------------------------------------------------------------------------

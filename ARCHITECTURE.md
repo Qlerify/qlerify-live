@@ -672,3 +672,31 @@ is the next increment (zero call-site change).
 **Raw + raw-as-events (viewer; real Part 5 split deferred).** Raw panel = `gen_<Entity>` rows. Raw-as-events
 = each row through the codegen `detect()` predicate (read-only, emits nothing), with a model required-field
 heuristic fallback (clearly labeled) for non-codegen BCs.
+
+## Increment — STATUS: DONE (2026-08-04) — period-scoped cycles (recurring processes)
+
+Recurring cycles (quarterly reviews, monthly closes) as a first-class engine concept — see **CYCLES.md**
+for the full contract + operator checklist. A **cycle aggregate** is a root whose identity is
+subject × period, declared by the entity's composite `key` in the Qlerify export (which the loader
+previously discarded): key fields named `quarter`/`month`/`week`/`year` are the PERIOD, the rest the
+SUBJECT. Children carry only the subject FK; their period derives from their own business date
+(`src/twin/period.ts` — UTC bucketing, canonical formats, `cycleId()` = `<subject>@<period>`).
+
+- **Correlation** `twin/correlate.ts` — `cycleLinkFields()` matches child fields to the cycle's subject
+  KEY FIELD names (rename-proof, unlike the `<Entity>Id` heuristic that the Company→Quarter rename broke);
+  `decideCaseId` step 5 resolves (subject values, periodOf(businessAt)) → cycle row → case. Resolution is
+  by COLUMN VALUES, never id shape, so legacy row ids keep working. `emit()` resolves businessAt BEFORE
+  the case so the live path buckets too.
+- **Derive** `twin/derive.ts` — in-memory cycle indexes; **lazy cycle opening** (a child of a period with
+  no row yet opens it: canonical id, `_provisional` mark, fields copied from the latest same-subject row,
+  create event at period start, estimated) — the data-driven "time trigger". Diagnostics on
+  `DeriveResult.cycles`: opened / noBusinessDate / unknownSubjects (connector value-shape drift).
+- **Ingest** `packs/ingest.ts` — the ENGINE composes the canonical cycle row id (connector-supplied ids
+  replaced + journaled), defaults a missing period to the pull-time period, and MERGES pulls into
+  provisional rows instead of skipping on the id (`IngestSummary.merged`/`warnings`).
+- **Connector-builder guidance** `packs/connector/codegen.ts` — cycle rules injected into the authoring
+  prompt ONLY when the model declares a cycle (subject values verbatim, no composite keys, no
+  current-period filtering); resolved by `orchestrate.buildConnector` from the model. Enforcement stays
+  in the engine; the prompt is guidance for the consultant-driven builder AI.
+- **UI** `web/detail.js` — the branch-forest FK heuristic also prefix-matches the engine-composed
+  `<subject>@<period>` ids. Clock-driven cycle creation (cron) deliberately out of scope.

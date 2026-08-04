@@ -48,13 +48,14 @@ import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } fro
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { withActorKind } from "../platform/tenancy/actor.js";
 import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
-import { decideCaseId, foreignKeyFields } from "./correlate.js";
+import { decideCaseId, foreignKeyFields, cycleLinkFields, subjectValues, type CycleLink } from "./correlate.js";
+import { periodOf, periodStart, cycleId, periodKeyOf } from "./period.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
 // Platform / internal columns that are never business evidence and never part of
 // a derived event's payload.
-const PLATFORM_COLS = new Set(["version", "createdAt", "updatedAt", "_provenance", "organization_id"]);
+const PLATFORM_COLS = new Set(["version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id"]);
 
 type EvidenceKind = "create" | "status" | "fields" | "none";
 
@@ -352,6 +353,11 @@ function buildPayload(
     for (const fk of foreignKeyFields(entity.name, ont)) {
       if (!later.has(fk.name)) put(fk.name);
     }
+    // Cycle subject FKs ride the create payload the same way (correlation reads
+    // the subject key values off the child's first event).
+    for (const link of cycleLinkFields(entity.name, ont)) {
+      for (const pair of link.subjectFields) if (!later.has(pair.child)) put(pair.child);
+    }
     if (ladder.length > 0) out.status = ladder[0];
   } else if (kind === "status") {
     const tgt = statusTargetIndex(event, entity);
@@ -478,12 +484,28 @@ interface DerivedEventSummary {
   sample?: string;
 }
 
+/** Cycle-correlation outcome of one derive pass — the diagnostics that make an
+ * AI-built connector's mistakes visible instead of silently orphaning events. */
+interface CycleReport {
+  /** Cycle rows the engine opened lazily (a child's period had no row yet). */
+  opened: number;
+  /** Child events with a cycle subject key but NO business date — their period
+   * is uncomputable, so they could not join a cycle. Points at dateRoles. */
+  noBusinessDate: number;
+  /** Subject key values matching NO cycle row of any period — shape drift
+   * between the parent and child connectors (e.g. "hubspot-company-X" vs "X"). */
+  unknownSubjects: Array<{ target: string; value: string; events: number }>;
+}
+
 interface DeriveResult {
   preview: boolean;
   totalEmitted: number;
   /** Distinct aggregate instances that gained at least one event. */
   instances: number;
   events: DerivedEventSummary[];
+  /** Cycle-correlation outcome; only present when the model declares a
+   * period-scoped aggregate. */
+  cycles?: CycleReport;
   /** Wall-clock ms the derivation pass took. */
   durationMs: number;
   /** Event-log rows deleted before re-deriving. Only set by rebuildFromData(). */
@@ -545,10 +567,110 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
   const batch: BatchEvent[] = [];
   let totalEmitted = 0;
 
+  // --- Cycle support (period-scoped aggregates, twin/period.ts) --------------
+  // In-memory indexes over each period-scoped entity's rows, matching on the
+  // subject + period COLUMN VALUES (never id shape, so legacy row ids resolve):
+  //   coord (subject values + period) → row  — cycle resolution for decideCaseId
+  //   subject values → latest row            — the template a lazy open copies
+  // Keys are lowercased to match the live path's case-insensitive store filters.
+  const coordKey = (values: string[], period: string): string =>
+    [...values, period].map((v) => v.toLowerCase()).join("\u0000");
+  const subjKey = (values: string[]): string => values.map((v) => v.toLowerCase()).join("\u0000");
+  const cycleRows = new Map<string, Map<string, Record<string, unknown>>>();
+  const cycleTemplates = new Map<string, Map<string, Record<string, unknown>>>();
+  const periodScoped = ont.entities.filter((e) => periodKeyOf(e) !== null);
+  for (const entity of periodScoped) {
+    const pk = periodKeyOf(entity)!;
+    const byCoord = new Map<string, Record<string, unknown>>();
+    const bySubject = new Map<string, Record<string, unknown>>();
+    for (const row of rowsByEntity.get(entity.name) ?? []) {
+      const values = pk.subjectFields.map((f) => String(row[f] ?? ""));
+      const period = String(row[pk.periodField] ?? "");
+      if (values.some((v) => !v.trim()) || !period.trim()) continue;
+      byCoord.set(coordKey(values, period), row);
+      // Latest period wins as the template (canonical period formats sort
+      // lexicographically within a granularity).
+      const prev = bySubject.get(subjKey(values));
+      if (!prev || String(prev[pk.periodField] ?? "") < period) bySubject.set(subjKey(values), row);
+    }
+    cycleRows.set(entity.name, byCoord);
+    cycleTemplates.set(entity.name, bySubject);
+  }
+  const cycleReport: CycleReport = { opened: 0, noBusinessDate: 0, unknownSubjects: [] };
+  const unknownSubjectCounts = new Map<string, { target: string; value: string; events: number }>();
+
+  /** Lazily open the cycle row a child's (subject, period) coordinates name —
+   * the data-driven "time-triggered event". Only for a KNOWN subject (some row
+   * of any period carries these exact values): an unknown subject is far more
+   * likely connector value-shape drift than a real new cycle, so it is reported
+   * instead of materialized. The new row copies the template's fields, gets the
+   * engine-composed canonical id, and is marked _provisional so the connector's
+   * next pull enriches it (packs/ingest.ts merges into provisional rows). Its
+   * create event is emitted at the period's start, estimated. */
+  const ensureCycleRow = async (link: CycleLink, values: string[], period: string, childEventName: string): Promise<void> => {
+    const byCoord = cycleRows.get(link.target);
+    if (!byCoord || byCoord.has(coordKey(values, period))) return;
+    const template = cycleTemplates.get(link.target)?.get(subjKey(values));
+    if (!template) {
+      const k = `${link.target}\u0000${values.join(", ")}`;
+      const cur = unknownSubjectCounts.get(k);
+      if (cur) cur.events++;
+      else unknownSubjectCounts.set(k, { target: link.target, value: values.join(", "), events: 1 });
+      return;
+    }
+    const entity = ont.entity(link.target);
+    if (!entity) return;
+    const rowId = cycleId(values, period);
+    const row: Record<string, unknown> = {};
+    for (const f of entity.fields) {
+      if (f.name === "id" || PLATFORM_COLS.has(f.name)) continue;
+      if (template[f.name] !== undefined) row[f.name] = template[f.name];
+    }
+    row.id = rowId;
+    row[link.periodField] = period;
+    row._provenance = template._provenance ?? null;
+    row._provisional = 1;
+    // No fabricated timestamps: the row wasn't pulled from a source (see
+    // packs/ingest.ts) — it exists because the period does.
+    row.createdAt = null;
+    row.updatedAt = null;
+    await store.ensureColumn(link.target, "_provisional", "INTEGER");
+    await store.insert(link.target, row);
+    byCoord.set(coordKey(values, period), row);
+    const prevTemplate = cycleTemplates.get(link.target)?.get(subjKey(values));
+    if (!prevTemplate || String(prevTemplate[link.periodField] ?? "") < period) {
+      cycleTemplates.get(link.target)?.set(subjKey(values), row);
+    }
+    cycleReport.opened++;
+    // The cycle's create event, so the new case has an honest start-of-period
+    // anchor. A model whose cycle entity has no create event still gets the row.
+    const createEvent = ont.events.find(
+      (ev) => ev.aggregateRoot === link.target && ev.commandName && isCreateEvent(ev, ont),
+    );
+    if (!createEvent || seen.has(pairKey(createEvent.ref, rowId))) return;
+    seen.add(pairKey(createEvent.ref, rowId));
+    caseByInstance.set(rowId, rowId);
+    batch.push({
+      ref: createEvent.ref,
+      aggregateId: rowId,
+      role: createEvent.role,
+      payload: buildPayload("create", createEvent, row, entity, ont),
+      provenance: rowProvenance(row),
+      evidenceKind: "create",
+      evidence: `cycle ${period} opened by ${childEventName}`,
+      businessAt: periodStart(period, link.granularity),
+      businessAtKind: "estimated",
+      caseId: rowId,
+    });
+    totalEmitted++;
+    touched.add(`${link.target}:${rowId}`);
+  };
+
   for (const plan of plans) {
     let emitted = 0;
     let already = 0;
     const sample: string | undefined = plan.fired[0]?.evidence;
+    const links = cycleLinkFields(plan.aggregateRoot, ont);
 
     for (const e of plan.fired) {
       if (seen.has(pairKey(e.ref, e.aggregateId))) {
@@ -556,13 +678,35 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
         continue;
       }
       seen.add(pairKey(e.ref, e.aggregateId));
+      // A child of a cycle whose period has no row yet opens it here (the
+      // data-driven time trigger) BEFORE correlation, so the resolver below
+      // finds it. Preview must not write; a dateless child can't be bucketed
+      // into a period at all — reported, not guessed.
+      if (links.length > 0) {
+        if (!e.businessAt) {
+          if (links.some((l) => subjectValues(l, e.payload))) cycleReport.noBusinessDate++;
+        } else if (!preview) {
+          for (const link of links) {
+            const values = subjectValues(link, e.payload);
+            if (values) await ensureCycleRow(link, values, periodOf(e.businessAt, link.granularity), plan.name);
+          }
+        }
+      }
       // No withScope here: the case is correlated per event, so an aggregate the
       // workflow moved into (an Order carrying its accountId, say) inherits the
       // case of the aggregate it references instead of starting a new one. The
       // row's FK columns ride on its create event's payload (buildPayload keeps
       // them there), and the plans' linear order guarantees the referenced
       // parent's case is in the map by the time we reach the child.
-      const caseId = decideCaseId(ont, plan.aggregateRoot, e.aggregateId, e.payload, (id) => caseByInstance.get(id) ?? null);
+      const caseId = decideCaseId(ont, plan.aggregateRoot, e.aggregateId, e.payload, (id) => caseByInstance.get(id) ?? null, {
+        businessAt: e.businessAt,
+        cycleCase: (link, values, period) => {
+          const row = cycleRows.get(link.target)?.get(coordKey(values, period));
+          if (row?.id == null) return null;
+          const rowId = String(row.id);
+          return caseByInstance.get(rowId) ?? rowId;
+        },
+      });
       if (caseId && !caseByInstance.has(e.aggregateId)) caseByInstance.set(e.aggregateId, caseId);
       if (!preview) {
         batch.push({
@@ -602,7 +746,15 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
   // attribute them to the adapter origin.
   if (batch.length > 0) await withActorKind("adapter", () => emitMany(batch));
 
-  return { preview, totalEmitted, instances: touched.size, events: summaries, durationMs: Date.now() - t0 };
+  cycleReport.unknownSubjects = [...unknownSubjectCounts.values()].slice(0, 20);
+  return {
+    preview,
+    totalEmitted,
+    instances: touched.size,
+    events: summaries,
+    ...(periodScoped.length > 0 ? { cycles: cycleReport } : {}),
+    durationMs: Date.now() - t0,
+  };
 }
 
 /** Clear the active workflow's EventLog, then re-derive from the ingested rows

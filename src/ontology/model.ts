@@ -66,6 +66,11 @@ export interface EntitySchema {
   description?: string;
   required: string[];
   fields: SchemaField[];
+  /** The entity's natural key (field names), verbatim from the export. A bare
+   * ["id"] (the export's default) means "the surrogate id". A COMPOSITE key
+   * whose fields include a period-named one (e.g. ["hubspotCompanyId",
+   * "quarter"]) declares a period-scoped cycle aggregate — see twin/period.ts. */
+  key?: string[];
 }
 
 export interface QuerySchema {
@@ -184,6 +189,8 @@ interface RawSchema {
   description?: string;
   required?: string[];
   fields?: RawSchemaField[];
+  /** Natural-key field names (newer Qlerify exports emit this per entity). */
+  key?: string[];
 }
 
 interface RawSchemas {
@@ -295,6 +302,7 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
     description: raw.description,
     required: raw.required ?? [],
     fields: (raw.fields ?? []).map(normalizeField),
+    ...(raw.key?.length ? { key: raw.key.filter((k): k is string => typeof k === "string") } : {}),
   }));
   // Value objects share the entity shape (id-less, embedded). They back object
   // fields via `relatedEntity` (e.g. Campaign.targetAudience → TargetAudience).

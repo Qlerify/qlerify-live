@@ -35,6 +35,22 @@ interface ConnectorGenInput {
   /** Schemas of the kinds the target's fields hold via `relatedEntity` (resolved
    * by the caller — this module never reads the ontology). */
   related?: RelatedSchema[];
+  /** Set when the target is a period-scoped CYCLE table (one row per subject per
+   * period — twin/period.ts); resolved by the caller from the model's entity key. */
+  cycle?: {
+    subjectFields: string[];
+    periodField: string;
+    granularity: string;
+    /** The exact period format, e.g. "2026Q3". */
+    periodExample: string;
+  };
+  /** Set when the target's rows belong to period-scoped cycle table(s) — the
+   * child side. Resolved by the caller (twin/correlate.ts cycleLinkFields). */
+  cycleChild?: Array<{
+    target: string;
+    pairs: Array<{ child: string; subject: string }>;
+    granularity: string;
+  }>;
 }
 
 interface ConnectorGenResult {
@@ -60,7 +76,7 @@ function exampleVocab(f: SchemaField, max = 10): string[] {
 
 /** Exported for unit tests — pure (no I/O, no ontology reads). */
 export function buildConnectorPrompt(input: ConnectorGenInput): string {
-  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related } = input;
+  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, cycle, cycleChild } = input;
   const fields = target.fields
     .map((f) => {
       const req = (target.required ?? []).includes(f.name) ? " (required)" : "";
@@ -88,6 +104,31 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
       ]
     : [];
 
+  // Cycle guidance is CONDITIONAL on the model's declaration (a period-named
+  // composite entity key) — the author AI never judges whether a process is a
+  // recurring cycle, and non-cycle workflows get none of this.
+  const cycleSection = cycle
+    ? [
+        ``,
+        `## Recurring-cycle table (period-scoped)`,
+        `"${target.name}" holds ONE ROW PER SUBJECT PER PERIOD — its natural key is ${cycle.subjectFields.join(" + ")} + ${cycle.periodField} (${cycle.granularity}). Rules:`,
+        `- Emit the subject key field(s) (${cycle.subjectFields.join(", ")}) VERBATIM from the source's natural key — byte-for-byte the same string every other connector in this workflow uses for that subject (no added prefixes, no stripped ids).`,
+        `- Set ${cycle.periodField} to the period the row belongs to, formatted EXACTLY like "${cycle.periodExample}". If the source doesn't know the period, omit the field — the platform fills in the current period at pull time.`,
+        `- Do NOT compose the row id from subject + period — the platform composes the canonical cycle id itself (a connector-supplied id is replaced). You may omit "id" entirely.`,
+      ]
+    : [];
+  const cycleChildSection = (cycleChild ?? []).length
+    ? [
+        ``,
+        `## Cycle membership — this table's rows belong to recurring cycles`,
+        `The platform assigns each ${target.name} row to its cycle case automatically; this connector's ONLY job is faithful values:`,
+        ...(cycleChild ?? []).flatMap((c) => [
+          `- ${c.pairs.map((p) => `"${p.child}"`).join(", ")}: must carry the ${c.target} table's ${c.pairs.map((p) => p.subject).join(" / ")} value VERBATIM — byte-for-byte the same string that table's connector emits (no added prefixes, no stripped ids).`,
+          `- Do NOT compose composite keys, and do NOT filter rows to the current ${c.granularity} — return every row in scope with its REAL dates; the platform buckets each row into its ${c.target} cycle by its business date.`,
+        ]),
+      ]
+    : [];
+
   const creds = credentialKeys.length
     ? `The operator has configured these credential fields (available at ctx.credentials.<name>; values are secret and not shown here): ${credentialKeys.map((k) => `\`${k}\``).join(", ")}.`
     : `No credentials are configured yet. If the source needs auth, read it from ctx.credentials.<name> and tell the operator which fields to set — do NOT hardcode secrets.`;
@@ -101,9 +142,13 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     `## Target shape — your returned objects MUST be keyed by THESE field names`,
     fields || "  (no fields declared)",
     targetKind === "entity"
-      ? `\nEach row should have a stable unique "id" (use the source's natural key; if there is none, derive a deterministic one).`
+      ? cycle
+        ? `\nDo not derive an "id" for these rows — the platform composes the canonical cycle row id (see the Recurring-cycle table rules below).`
+        : `\nEach row should have a stable unique "id" (use the source's natural key; if there is none, derive a deterministic one).`
       : `\nThis is a value object (no identity of its own). Return the field values; the platform assigns an id when landing it as its own table.`,
     ...relatedSection,
+    ...cycleSection,
+    ...cycleChildSection,
     ``,
     `## How to reach the source — you have FULL power`,
     `You MAY import ANY npm package (e.g. @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, pg, mysql2, mongodb, googleapis, soap, ldapjs, snowflake-sdk) and use ANY protocol. Just \`import\` what you need with ESM syntax — the runtime detects your imports and installs them automatically before running. Plain HTTP/REST: use the global \`fetch\` (also available as ctx.fetch).`,

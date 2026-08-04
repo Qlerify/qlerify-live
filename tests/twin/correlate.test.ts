@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import { loadOntologyFromStrings } from "../../src/ontology/model.js";
-import { decideCaseId, fkTargetEntity, foreignKeyFields } from "../../src/twin/correlate.js";
+import { decideCaseId, fkTargetEntity, foreignKeyFields, cycleLinkFields, subjectValues } from "../../src/twin/correlate.js";
 
 const WORKFLOW = JSON.stringify({
   version: 1,
@@ -178,5 +178,125 @@ describe("case correlation — acronym entity names (GPR, SoA)", () => {
     const caseOf = resolver({ "GPR-013": "MCR-013" });
     const c = decideCaseId(acronymOnt, "SoA", "SOA-013", { gprId: "GPR-013", id: "SOA-013" }, caseOf);
     expect(c).toBe("MCR-013"); // NOT "SOA-013" — that was the bug
+  });
+});
+
+// Period-scoped cycles: the Quarter aggregate is one Company × one quarter
+// (declared by the entity's composite key), and a Meeting joins the RIGHT
+// quarter's case via its companyId + its own business date — no quarter field on
+// the Meeting, no entity-name coupling. This is the "Quarterly Cycle Dashboard"
+// break: renaming Company → Quarter severed the *Id name heuristic, and even
+// with it fixed a single-field FK could never say WHICH quarter.
+const CYCLE_WORKFLOW = JSON.stringify({
+  version: 1,
+  boundedContext: "Hubspot",
+  roles: ["Sales"],
+  domainEvents: {
+    CycleStarted: {
+      event: "Cycle Started",
+      role: "Sales",
+      command: { $ref: "#/schemas/commands/StartCycle" },
+      aggregateRoot: { $ref: "#/schemas/entities/Quarter" },
+    },
+    MeetingHeld: {
+      event: "Meeting Held",
+      role: "Sales",
+      follows: [{ $ref: "#/domainEvents/CycleStarted" }],
+      command: { $ref: "#/schemas/commands/RecordMeeting" },
+      aggregateRoot: { $ref: "#/schemas/entities/Meeting" },
+    },
+  },
+  schemas: {
+    entities: {
+      Quarter: {
+        required: ["id"],
+        key: ["hubspotCompanyId", "quarter"], // subject × period — the cycle declaration
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "quarter", dataType: "string" },
+          { name: "hubspotCompanyId", dataType: "string" },
+          { name: "name", dataType: "string" },
+        ],
+      },
+      Meeting: {
+        required: ["id"],
+        fields: [
+          { name: "id", dataType: "string" },
+          { name: "companyId", dataType: "string" }, // subject FK — note: NO entity named Company exists
+          { name: "scheduledAt", dataType: "string" },
+        ],
+      },
+    },
+    commands: {
+      StartCycle: { required: [], fields: [{ name: "quarter" }] },
+      RecordMeeting: { required: ["companyId"], fields: [{ name: "companyId" }, { name: "scheduledAt" }] },
+    },
+  },
+});
+
+const cycleOnt = loadOntologyFromStrings(CYCLE_WORKFLOW, null);
+
+describe("case correlation — period-scoped cycles (subject × period)", () => {
+  it("the plain *Id heuristic stays inert (no Company entity) — the original break", () => {
+    expect(foreignKeyFields("Meeting", cycleOnt)).toEqual([]);
+  });
+
+  it("derives the cycle link from the model: companyId ↔ Quarter.hubspotCompanyId + quarter", () => {
+    expect(cycleLinkFields("Meeting", cycleOnt)).toEqual([
+      {
+        target: "Quarter",
+        subjectFields: [{ child: "companyId", subject: "hubspotCompanyId" }],
+        periodField: "quarter",
+        granularity: "quarter",
+      },
+    ]);
+    // The cycle aggregate itself links to nothing.
+    expect(cycleLinkFields("Quarter", cycleOnt)).toEqual([]);
+  });
+
+  it("reads the subject values off a payload, refusing partial subjects", () => {
+    const link = cycleLinkFields("Meeting", cycleOnt)[0]!;
+    expect(subjectValues(link, { companyId: "hubspot-company-1" })).toEqual(["hubspot-company-1"]);
+    expect(subjectValues(link, { companyId: "" })).toBeNull();
+    expect(subjectValues(link, {})).toBeNull();
+  });
+
+  it("correlates a Meeting into the cycle case its date names — companyId + quarterOf(scheduledAt)", () => {
+    const cycle = {
+      businessAt: new Date("2026-08-14T10:00:00Z"), // → 2026Q3
+      cycleCase: (_link: unknown, values: string[], period: string) =>
+        values[0] === "hubspot-company-1" && period === "2026Q3" ? "hubspot-company-1@2026Q3" : null,
+    };
+    const c = decideCaseId(
+      cycleOnt, "Meeting", "hubspot-meeting-9",
+      { companyId: "hubspot-company-1", id: "hubspot-meeting-9" },
+      resolver({}), cycle,
+    );
+    expect(c).toBe("hubspot-company-1@2026Q3");
+  });
+
+  it("a different business date lands in a DIFFERENT quarter's case", () => {
+    const cases: Record<string, string> = { "2026Q3": "c1@2026Q3", "2026Q4": "c1@2026Q4" };
+    const cycleAt = (iso: string) => ({
+      businessAt: new Date(iso),
+      cycleCase: (_l: unknown, _v: string[], period: string) => cases[period] ?? null,
+    });
+    const payload = { companyId: "c1", id: "m1" };
+    expect(decideCaseId(cycleOnt, "Meeting", "m1", payload, resolver({}), cycleAt("2026-08-14T00:00:00Z"))).toBe("c1@2026Q3");
+    expect(decideCaseId(cycleOnt, "Meeting", "m2", payload, resolver({}), cycleAt("2026-10-05T00:00:00Z"))).toBe("c1@2026Q4");
+  });
+
+  it("falls back to its own case with no business date or no resolvable cycle row", () => {
+    const payload = { companyId: "hubspot-company-1", id: "m1" };
+    // No business date → the period is uncomputable; never guessed.
+    expect(decideCaseId(cycleOnt, "Meeting", "m1", payload, resolver({}), { businessAt: null, cycleCase: () => "x" })).toBe("m1");
+    // Unknown subject/period coordinates → resolver misses → own case.
+    expect(decideCaseId(cycleOnt, "Meeting", "m1", payload, resolver({}), { businessAt: new Date(), cycleCase: () => null })).toBe("m1");
+  });
+
+  it("keeps a later Meeting event attached via the self lookup, before any cycle logic", () => {
+    const caseOf = resolver({ m1: "hubspot-company-1@2026Q3" });
+    const c = decideCaseId(cycleOnt, "Meeting", "m1", { id: "m1" }, caseOf, { businessAt: new Date(), cycleCase: () => null });
+    expect(c).toBe("hubspot-company-1@2026Q3");
   });
 });

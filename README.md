@@ -144,7 +144,7 @@ The default model is **`claude-sonnet-4-6`** (override with `CHAT_MODEL`; effort
 | Persistence  | **Prisma 5 + SQLite** for the control plane + `EventLog`; **raw SQL** `gen_` tables for model-derived projections |
 | AI           | **`@anthropic-ai/sdk`** (Claude) |
 | Editor       | self-hosted **Monaco** (served same-origin under a strict CSP) |
-| Frontend     | dependency-free **vanilla JS** SPA + Tailwind (Play CDN) — no framework, no bundler |
+| Frontend     | **React + TypeScript** SPA built with Vite, Tailwind self-hosted (the one build step in the repo) |
 | Tests        | **Vitest 4** |
 
 ---
@@ -356,7 +356,13 @@ The surface splits cleanly into two planes. Every route is **deny-by-default**; 
 
 ## The web UI
 
-The entire frontend is **two static files** — `web/index.html` (a ~50-line shell) and `web/app.js` (a single vanilla-JS ES module) — with **zero build step**. Tailwind comes from the Play CDN; the backend serves both files directly. Routing is hash-based, and every request carries a bearer token plus `X-Org-Id` / `X-Workflow-Id` headers, so the app is a multi-tenant console.
+The frontend is a **React + TypeScript SPA** in `frontend/`, bundled by Vite into `frontend/dist` and served as static files by the backend. Tailwind is self-hosted (no CDN), so the CSP stays at `script-src 'self'`.
+
+This is the **only part of the repo with a build step** — the backend still runs under `tsx` straight from `src/`. `npm run build:web` produces the bundle and is wired into `predev`/`prestart`, so a normal `npm run dev` or `npm start` always builds first. If `frontend/dist/index.html` is missing the server exits rather than silently serving a different UI.
+
+The pre-migration vanilla-JS app is still in `web/` for reference; `QLERIFY_WEB_UI=legacy npm run dev` serves it.
+
+Routing is hash-based (the Overview tabs carry their search/filter/sort state after a `?`, so any slice is shareable), and every request carries a bearer token plus `X-Org-Id` / `X-Workflow-Id` headers, so the app is a multi-tenant console.
 
 The mental model is three nested tiers reflected in the breadcrumb: **Organization → Workflow → Section**.
 

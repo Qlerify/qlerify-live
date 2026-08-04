@@ -20,7 +20,24 @@ import { ensureSchemaUpgrades } from "./platform/db/schema-upgrade.js";
 import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const webRoot = join(here, "..", "web");
+
+// The React bundle is the frontend. QLERIFY_WEB_UI=legacy opts back to the
+// pre-migration vanilla-JS app in web/, kept as a reference and an escape hatch.
+// A MISSING bundle is fatal rather than a silent fall back to legacy: a deploy
+// that skipped `npm run build:web` must fail loudly, not quietly serve the old
+// UI while looking healthy.
+const legacyWebRoot = join(here, "..", "web");
+const reactWebRoot = join(here, "..", "frontend", "dist");
+const legacyUiRequested = (process.env.QLERIFY_WEB_UI ?? "").toLowerCase() === "legacy";
+if (!legacyUiRequested && !existsSync(join(reactWebRoot, "index.html"))) {
+  console.error(
+    "FATAL: frontend/dist/index.html is missing — run `npm run build:web` before starting.\n" +
+      "       (Set QLERIFY_WEB_UI=legacy to serve the old vanilla-JS UI in web/ instead.)",
+  );
+  process.exit(1);
+}
+const serveReactUi = !legacyUiRequested;
+const webRoot = serveReactUi ? reactWebRoot : legacyWebRoot;
 
 // Self-hosted Monaco editor (the connector "Code" tab). CSP forbids foreign script
 // origins, so we serve Monaco's prebuilt AMD bundle from node_modules over the same
@@ -38,15 +55,15 @@ function monacoMinDir(): string | null {
 }
 
 // Content-Security-Policy — defense-in-depth behind output escaping. script-src
-// has NO 'unsafe-inline', so injected <script> and inline event handlers
-// (onerror=, onclick=) cannot run even if an escaping sink is ever missed; foreign
-// script origins are blocked. 'unsafe-eval' + the Tailwind Play CDN are required
-// by its in-browser JIT; Google Fonts + the page's inline <style> need the style
-// allowances. All data fetches are same-origin (connect-src 'self').
+// has NO 'unsafe-inline', so injected <script> and inline event handlers cannot
+// run even if an escaping sink is ever missed. The legacy variant additionally
+// needs 'unsafe-eval' + the CDN origin for the Tailwind Play CDN's in-browser
+// JIT; the React build compiles Tailwind ahead of time and needs neither.
+const styleSrcCdn = serveReactUi ? "" : " https://cdn.tailwindcss.com";
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com",
+  serveReactUi ? "script-src 'self'" : "script-src 'self' 'unsafe-eval' https://cdn.tailwindcss.com",
+  `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com${styleSrcCdn}`,
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
   "connect-src 'self'",
@@ -78,6 +95,10 @@ export async function buildServer() {
 
   if (existsSync(webRoot)) {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
+    app.log.info(`serving the ${serveReactUi ? "react" : "legacy"} frontend from ${webRoot}`);
+  }
+  if (legacyUiRequested) {
+    app.log.warn("QLERIFY_WEB_UI=legacy — serving the pre-migration vanilla-JS UI from web/.");
   }
 
   // Monaco editor assets (loader, language modes, workers) on the same origin.

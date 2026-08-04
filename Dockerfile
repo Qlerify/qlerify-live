@@ -21,6 +21,9 @@ RUN npm ci
 COPY . .
 RUN npx prisma generate
 
+# Frontend only — the backend still runs from source under tsx.
+RUN npm run build:web
+
 # Production mode is intrinsic to the image, not just the Fly runtime [env]: this
 # is the security boundary that DISABLES the forgeable raw-subject / X-Identity
 # auth shim (src/platform/authn — in prod only a real session token authenticates).

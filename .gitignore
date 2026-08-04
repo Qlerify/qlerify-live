@@ -10,7 +10,6 @@ web/node_modules/
 
 # IDE / local-only files
 .idea/
-CLAUDE.md
 
 # Runtime model version history (created by the in-app "Fetch model" button)
 .qlerify/history/
@@ -32,3 +31,6 @@ src/packs/*/generated/
 .qlerify/orgs/
 # Seeded superuser credentials (printed for the operator; never commit).
 .qlerify/superadmin.local.txt
+
+# Vite build output (frontend/ is compiled; the backend is not)
+frontend/dist

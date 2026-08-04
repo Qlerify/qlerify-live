@@ -21,12 +21,22 @@ import { isHandledError } from "./errors.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// QLERIFY_WEB_UI=react serves the built React bundle; anything else keeps the
-// legacy app. Falls back to legacy if the bundle was never built.
+// The React bundle is the frontend. QLERIFY_WEB_UI=legacy opts back to the
+// pre-migration vanilla-JS app in web/, kept as a reference and an escape hatch.
+// A MISSING bundle is fatal rather than a silent fall back to legacy: a deploy
+// that skipped `npm run build:web` must fail loudly, not quietly serve the old
+// UI while looking healthy.
 const legacyWebRoot = join(here, "..", "web");
 const reactWebRoot = join(here, "..", "frontend", "dist");
-const reactUiRequested = (process.env.QLERIFY_WEB_UI ?? "").toLowerCase() === "react";
-const serveReactUi = reactUiRequested && existsSync(join(reactWebRoot, "index.html"));
+const legacyUiRequested = (process.env.QLERIFY_WEB_UI ?? "").toLowerCase() === "legacy";
+if (!legacyUiRequested && !existsSync(join(reactWebRoot, "index.html"))) {
+  console.error(
+    "FATAL: frontend/dist/index.html is missing — run `npm run build:web` before starting.\n" +
+      "       (Set QLERIFY_WEB_UI=legacy to serve the old vanilla-JS UI in web/ instead.)",
+  );
+  process.exit(1);
+}
+const serveReactUi = !legacyUiRequested;
 const webRoot = serveReactUi ? reactWebRoot : legacyWebRoot;
 
 // Self-hosted Monaco editor (the connector "Code" tab). CSP forbids foreign script
@@ -87,10 +97,8 @@ export async function buildServer() {
     await app.register(fastifyStatic, { root: webRoot, prefix: "/" });
     app.log.info(`serving the ${serveReactUi ? "react" : "legacy"} frontend from ${webRoot}`);
   }
-  if (reactUiRequested && !serveReactUi) {
-    app.log.warn(
-      "QLERIFY_WEB_UI=react but frontend/dist/index.html is missing — run `npm run build:web`. Falling back to the legacy UI.",
-    );
+  if (legacyUiRequested) {
+    app.log.warn("QLERIFY_WEB_UI=legacy — serving the pre-migration vanilla-JS UI from web/.");
   }
 
   // Monaco editor assets (loader, language modes, workers) on the same origin.

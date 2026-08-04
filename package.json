@@ -7,11 +7,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "setup": "tsx scripts/setup.ts",
-    "predev": "tsx scripts/setup.ts --if-needed",
+    "predev": "tsx scripts/setup.ts --if-needed && npm run build:web",
     "dev": "tsx watch src/server.ts",
     "build:web": "vite build frontend",
     "dev:web": "vite frontend",
-    "prestart": "tsx scripts/setup.ts --if-needed",
+    "prestart": "tsx scripts/setup.ts --if-needed && npm run build:web",
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",

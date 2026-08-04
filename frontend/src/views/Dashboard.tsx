@@ -38,7 +38,7 @@ const createCase = async () => {
   try {
     const d = await api<{ id: string }>("/sim/cases", { method: "POST", body: "{}" })
     await loadDashboard()
-    navigate(`#case/${d.id}`)
+    navigate(`#case/${encodeURIComponent(d.id)}`)
   } catch (e) {
     alert((e as Error).message)
   } finally {

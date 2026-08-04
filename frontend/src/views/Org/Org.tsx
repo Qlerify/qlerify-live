@@ -146,7 +146,7 @@ export const Org = () => {
           <TimelinessPanel
             o={org}
             onOpenMap={() => setMapOpen(true)}
-            onGoCase={(wf, caseId) => goWorkflow(wf, `#case/${caseId}`)}
+            onGoCase={(wf, caseId) => goWorkflow(wf, `#case/${encodeURIComponent(caseId)}`)}
           />
           <ValueAtRiskPanel
             valueAtRisk={valueAtRisk}
@@ -175,7 +175,7 @@ export const Org = () => {
                 {exceptions.map((x) => (
                   <button
                     key={`${x.workflowId}-${x.caseId}-${x.kind}`}
-                    onClick={() => goWorkflow(x.workflowId, `#case/${x.caseId}`)}
+                    onClick={() => goWorkflow(x.workflowId, `#case/${encodeURIComponent(x.caseId)}`)}
                     className="w-full text-left flex items-center gap-3 px-3 py-2 hover:bg-amber-50"
                   >
                     <span

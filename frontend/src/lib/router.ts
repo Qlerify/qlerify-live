@@ -67,9 +67,9 @@ export const parseHash = (): Route => {
     }
   }
 
-  const detail = h.match(/^#case\/([\w-]+)/)
+  const detail = h.match(/^#case\/(.+)/)
   if (detail) {
-    return { view: "detail", caseId: detail[1] }
+    return { view: "detail", caseId: decodeURIComponent(detail[1]!) }
   }
 
   return { view: "overview", ovqs }

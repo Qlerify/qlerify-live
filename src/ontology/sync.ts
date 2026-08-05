@@ -123,8 +123,9 @@ function overlayBelongsToModel(overlay: any, spec: any): boolean {
 }
 
 /** Best-effort workflow name from the MODEL ITSELF (upload/paste, or a link whose
- * payload names nothing): the overlay's title — honored only when the overlay
- * belongs to this model, same as the ontology's display title — else the primary
+ * payload names nothing): the overlay's title — honored only when the overlay belongs
+ * to this model, same as the ontology's display title — then the export's own `name`
+ * (v1 carries the modeller's workflow name; older exports omit it), else the primary
  * bounded context. Null when the model names nothing (or doesn't parse). */
 export function deriveNameFromModel(workflowJson: string, overlayJson: string | null): string | null {
   let spec: any = null;
@@ -134,8 +135,10 @@ export function deriveNameFromModel(workflowJson: string, overlayJson: string | 
     const title = overlay?.title;
     if (typeof title === "string" && title.trim() && overlayBelongsToModel(overlay, spec)) return title.trim();
   } catch { /* a bad overlay never blocks name derivation */ }
-  const bc = spec?.boundedContext;
-  return typeof bc === "string" && bc.trim() ? bc.trim() : null;
+  for (const candidate of [spec?.name, spec?.boundedContext]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return null;
 }
 
 /** Normalize a candidate workflow name before it is stored: strip control and

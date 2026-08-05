@@ -146,6 +146,21 @@ describe("deriveNameFromModel (upload/paste fallback)", () => {
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), JSON.stringify({ title: "  " }))).toBe("Orders");
   });
 
+  // v1's `name` — the only workflow name an uploaded/pasted workflow.json carries,
+  // since there is no modeller payload to probe on that path.
+  it("prefers the export's name over the bounded context", () => {
+    const named = (name: unknown) => JSON.stringify({ name, boundedContext: "Orders" });
+    expect(deriveNameFromModel(named("Order Fulfilment"), null)).toBe("Order Fulfilment");
+    expect(deriveNameFromModel(named("  Padded  "), null)).toBe("Padded");
+    expect(deriveNameFromModel(named("   "), null)).toBe("Orders"); // blank → falls through
+    expect(deriveNameFromModel(named(7), null)).toBe("Orders"); // non-string → falls through
+  });
+
+  it("still lets the overlay title outrank the export's name", () => {
+    const wf = JSON.stringify({ name: "Order Fulfilment", boundedContext: "Orders" });
+    expect(deriveNameFromModel(wf, JSON.stringify({ title: "Renamed In Live" }))).toBe("Renamed In Live");
+  });
+
   it("a bad overlay never blocks derivation", () => {
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), "not json")).toBe("Orders");
   });

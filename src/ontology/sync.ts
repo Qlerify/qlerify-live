@@ -14,24 +14,36 @@ import { DomainError } from "../errors.js";
 import { resolveQlerifyCreds } from "../llm/qlerify.js";
 
 const QLERIFY_APP = "https://app.qlerify.com";
-const QLERIFY_HOST = new URL(QLERIFY_APP).host; // "app.qlerify.com"
 
-/** Pull the project/workflow ids out of a modeller URL. The host is pinned to the
- * Qlerify modeller so a caller-supplied sourceUrl can never aim the server's fetch
- * at an arbitrary host (SSRF) or at a foreign service. Exported for tests. */
+/** The modeller that model links must be on: QLERIFY_APP_URL when set — a locally-run
+ * or white-labelled Modeller, the link-side twin of QLERIFY_MCP_URL — else the hosted
+ * one. It replaces the default rather than adding to it. Read per call so a dev server
+ * or test can repoint it; a malformed value falls back instead of rejecting every link. */
+function modeller(): URL {
+  try {
+    return new URL(process.env.QLERIFY_APP_URL || QLERIFY_APP);
+  } catch {
+    return new URL(QLERIFY_APP);
+  }
+}
+
+/** Pull the project/workflow ids out of a modeller URL, pinning the host to modeller()
+ * so a mistyped or foreign link is refused up front. The URL itself is never fetched —
+ * only its ids are, against the MCP endpoint from resolveQlerifyCreds. For tests. */
 export function parseWorkflowUrl(url: string): { projectId: string; workflowId: string } {
+  const app = modeller();
   let parsed: URL;
   try {
     parsed = new URL((url ?? "").trim());
   } catch {
-    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
+    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
   }
-  if (parsed.host !== QLERIFY_HOST) {
-    throw new Error(`Model link must be on ${QLERIFY_HOST} (got "${parsed.host}")`);
+  if (parsed.host !== app.host) {
+    throw new Error(`Model link must be on ${app.host} (got "${parsed.host}")`);
   }
   const m = parsed.pathname.match(/^\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})(?:\/|$)/);
   if (!m) {
-    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
+    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
   }
   return { projectId: m[1], workflowId: m[2] };
 }

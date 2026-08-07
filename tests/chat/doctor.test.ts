@@ -78,11 +78,13 @@ describe("Connection Doctor tools", () => {
     expect(r.content).toMatch(/confirmed=false/);
   });
 
-  it("regenerate_adapter_body (confirmed) reports the missing API key", async () => {
+  it("regenerate_adapter_body (confirmed) reports the unconfigured AI provider", async () => {
     if (process.env.ANTHROPIC_API_KEY) return; // a key would actually generate — skip
     const r = await asAdmin(() => runTool("regenerate_adapter_body", { adapterId: ID, confirmed: true }));
     expect(r.isError).toBe(true);
-    expect(r.content).toMatch(/ANTHROPIC_API_KEY/);
+    // Points at where to fix it. Matches the message text, not the env var — BYOK
+    // made Org Admin the primary route and .env only the platform-default fallback.
+    expect(r.content).toMatch(/No AI provider configured/i);
   });
 
   it("a write tool is refused for an unauthorized caller (PDP denies before confirmation)", async () => {

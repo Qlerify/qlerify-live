@@ -61,6 +61,12 @@ const SHOP_MODEL = JSON.stringify({
 // fails the totals below.
 const N = 1200;
 
+// 2×N sequential SQLite inserts plus three derive passes run ~20s on a slower dev
+// box — over the suite's 15s default. Scale IS the regression being pinned, so give
+// these room rather than shrinking N. (The inner tripwire on genericInstanceDetail
+// still holds the actual performance assertion at 3s.)
+const SCALE_TIMEOUT_MS = 60_000;
+
 const model = modelHarness(SHOP_MODEL);
 
 afterAll(async () => {
@@ -102,7 +108,7 @@ describe("deriveFromData at scale (batched, uncapped)", () => {
       const again = await deriveFromData();
       expect(again.totalEmitted).toBe(0);
       expect(again.events.reduce((n, s) => n + s.alreadyPresent, 0)).toBe(2 * N);
-    }));
+    }), SCALE_TIMEOUT_MS);
 
   it("opens a hub-shaped case (one parent, N children) fast — batched row lookups, not one query per instance", () =>
     model.run(async () => {
@@ -126,5 +132,5 @@ describe("deriveFromData at scale (batched, uncapped)", () => {
       // (seconds); batched IN lookups keep this comfortably in the low hundreds
       // of ms even on a slow machine.
       expect(ms).toBeLessThan(3000);
-    }));
+    }), SCALE_TIMEOUT_MS);
 });

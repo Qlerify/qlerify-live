@@ -14,24 +14,36 @@ import { DomainError } from "../errors.js";
 import { resolveQlerifyCreds } from "../llm/qlerify.js";
 
 const QLERIFY_APP = "https://app.qlerify.com";
-const QLERIFY_HOST = new URL(QLERIFY_APP).host; // "app.qlerify.com"
 
-/** Pull the project/workflow ids out of a modeller URL. The host is pinned to the
- * Qlerify modeller so a caller-supplied sourceUrl can never aim the server's fetch
- * at an arbitrary host (SSRF) or at a foreign service. Exported for tests. */
+/** The modeller that model links must be on: QLERIFY_APP_URL when set — a locally-run
+ * or white-labelled Modeller, the link-side twin of QLERIFY_MCP_URL — else the hosted
+ * one. It replaces the default rather than adding to it. Read per call so a dev server
+ * or test can repoint it; a malformed value falls back instead of rejecting every link. */
+function modeller(): URL {
+  try {
+    return new URL(process.env.QLERIFY_APP_URL || QLERIFY_APP);
+  } catch {
+    return new URL(QLERIFY_APP);
+  }
+}
+
+/** Pull the project/workflow ids out of a modeller URL, pinning the host to modeller()
+ * so a mistyped or foreign link is refused up front. The URL itself is never fetched —
+ * only its ids are, against the MCP endpoint from resolveQlerifyCreds. For tests. */
 export function parseWorkflowUrl(url: string): { projectId: string; workflowId: string } {
+  const app = modeller();
   let parsed: URL;
   try {
     parsed = new URL((url ?? "").trim());
   } catch {
-    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
+    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
   }
-  if (parsed.host !== QLERIFY_HOST) {
-    throw new Error(`Model link must be on ${QLERIFY_HOST} (got "${parsed.host}")`);
+  if (parsed.host !== app.host) {
+    throw new Error(`Model link must be on ${app.host} (got "${parsed.host}")`);
   }
   const m = parsed.pathname.match(/^\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})(?:\/|$)/);
   if (!m) {
-    throw new Error(`URL must look like ${QLERIFY_APP}/workflow/<projectId>/<workflowId>`);
+    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
   }
   return { projectId: m[1], workflowId: m[2] };
 }
@@ -111,8 +123,9 @@ function overlayBelongsToModel(overlay: any, spec: any): boolean {
 }
 
 /** Best-effort workflow name from the MODEL ITSELF (upload/paste, or a link whose
- * payload names nothing): the overlay's title — honored only when the overlay
- * belongs to this model, same as the ontology's display title — else the primary
+ * payload names nothing): the overlay's title — honored only when the overlay belongs
+ * to this model, same as the ontology's display title — then the export's own `name`
+ * (v1 carries the modeller's workflow name; older exports omit it), else the primary
  * bounded context. Null when the model names nothing (or doesn't parse). */
 export function deriveNameFromModel(workflowJson: string, overlayJson: string | null): string | null {
   let spec: any = null;
@@ -122,8 +135,10 @@ export function deriveNameFromModel(workflowJson: string, overlayJson: string | 
     const title = overlay?.title;
     if (typeof title === "string" && title.trim() && overlayBelongsToModel(overlay, spec)) return title.trim();
   } catch { /* a bad overlay never blocks name derivation */ }
-  const bc = spec?.boundedContext;
-  return typeof bc === "string" && bc.trim() ? bc.trim() : null;
+  for (const candidate of [spec?.name, spec?.boundedContext]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return null;
 }
 
 /** Normalize a candidate workflow name before it is stored: strip control and

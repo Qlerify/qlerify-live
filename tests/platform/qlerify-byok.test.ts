@@ -8,7 +8,7 @@
 //     no org key, and the org's own (decrypted) key when one is configured
 //   - invalidateQlerifyCache lets a freshly-rotated key take effect
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "../../src/db.js";
 import { newId } from "../../src/platform/ids.js";
 import { runWithTenant } from "../../src/platform/tenancy/context.js";
@@ -68,6 +68,11 @@ afterAll(async () => {
 });
 
 describe("parseWorkflowUrl host-pinning", () => {
+  // Assert the DEFAULT modeller, so a QLERIFY_APP_URL in the developer's .env
+  // (running against a local Modeller) can't turn these red.
+  beforeAll(() => vi.stubEnv("QLERIFY_APP_URL", ""));
+  afterAll(() => vi.unstubAllEnvs());
+
   it("parses a real app.qlerify.com modeller link", () => {
     const p = parseWorkflowUrl("https://app.qlerify.com/workflow/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222");
     expect(p.projectId).toBe("11111111-1111-1111-1111-111111111111");
@@ -84,6 +89,25 @@ describe("parseWorkflowUrl host-pinning", () => {
 
   it("rejects a non-URL string", () => {
     expect(() => parseWorkflowUrl("not a url")).toThrow();
+  });
+});
+
+// QLERIFY_APP_URL repoints the pin at a locally-run or white-labelled modeller.
+describe("parseWorkflowUrl modeller override (QLERIFY_APP_URL)", () => {
+  const PATH = "/workflow/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222";
+  afterEach(() => vi.unstubAllEnvs());
+
+  // Stubbing AFTER import also proves the env is read per call, not at load.
+  it("accepts the overridden host (port included) and refuses every other", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "http://localhost:8080");
+    expect(parseWorkflowUrl(`http://localhost:8080${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(() => parseWorkflowUrl(`https://app.qlerify.com${PATH}`)).toThrow(/localhost:8080/); // replaces, not adds
+    expect(() => parseWorkflowUrl(`https://evil.example.com${PATH}`)).toThrow(/localhost:8080/);
+  });
+
+  it("ignores a malformed override instead of breaking every link", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "http://[not a url");
+    expect(parseWorkflowUrl(`https://app.qlerify.com${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
   });
 });
 
@@ -120,6 +144,21 @@ describe("deriveNameFromModel (upload/paste fallback)", () => {
   it("falls back to the primary bounded context", () => {
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), null)).toBe("Orders");
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), JSON.stringify({ title: "  " }))).toBe("Orders");
+  });
+
+  // v1's `name` — the only workflow name an uploaded/pasted workflow.json carries,
+  // since there is no modeller payload to probe on that path.
+  it("prefers the export's name over the bounded context", () => {
+    const named = (name: unknown) => JSON.stringify({ name, boundedContext: "Orders" });
+    expect(deriveNameFromModel(named("Order Fulfilment"), null)).toBe("Order Fulfilment");
+    expect(deriveNameFromModel(named("  Padded  "), null)).toBe("Padded");
+    expect(deriveNameFromModel(named("   "), null)).toBe("Orders"); // blank → falls through
+    expect(deriveNameFromModel(named(7), null)).toBe("Orders"); // non-string → falls through
+  });
+
+  it("still lets the overlay title outrank the export's name", () => {
+    const wf = JSON.stringify({ name: "Order Fulfilment", boundedContext: "Orders" });
+    expect(deriveNameFromModel(wf, JSON.stringify({ title: "Renamed In Live" }))).toBe("Renamed In Live");
   });
 
   it("a bad overlay never blocks derivation", () => {

@@ -7,6 +7,7 @@
 import { AUTH } from "./api.ts"
 import { useStore } from "./store.ts"
 import { attrSearchText, attrText, prettyEntity } from "./format.ts"
+import { furthestIndex, multiFiredCount, parsePeriodToken, skippedEdgeCount } from "./cohort.ts"
 import type { CaseRow, EventDef, FlowCaseRow, Row } from "./types.ts"
 
 export type OvTab = "list" | "rows" | "flow"
@@ -212,11 +213,23 @@ export const caseRecords = (): CaseRecord[] => {
   return out
 }
 
+// Steps done = CURRENT-model events this case fired (same rule cohortStats
+// uses), so the flow view's counters and their drilled worklists agree. The
+// server's row.progress counts ALL fired refs — including ones removed from the
+// model — and is kept only as the fallback for cases with no flow row (which,
+// with ?limit=0 loads, means cases with no events at all).
 const stepsDone = (r: CaseRecord) => {
-  if (r.row && typeof r.row.progress === "number") {
-    return r.row.progress
+  if (r.fr) {
+    const counts = r.fr.counts || {}
+    let n = 0
+    for (const e of useStore.getState().events || []) {
+      if ((counts[e.ref] || 0) > 0) {
+        n++
+      }
+    }
+    return n
   }
-  return r.fr ? Object.keys(r.fr.counts || {}).length : 0
+  return r.row && typeof r.row.progress === "number" ? r.row.progress : 0
 }
 
 const stepsTotal = (r: CaseRecord) => {
@@ -264,7 +277,58 @@ const SYS_FIELDS: Record<string, FieldDef> = {
     type: "date",
     get: (r) => r.fr?.lastAt || (r.row?.lastEvent as { occurredAt?: string } | undefined)?.occurredAt || null,
   },
+  // Conformance/coverage fields (numeric so drill-downs can filter ≥1 / =0 with
+  // the stock operator set). All are derived client-side from the flow row.
+  furthestStep: {
+    label: "Furthest step #",
+    type: "number",
+    get: (r) => furthestIndex(useStore.getState().events || [], r.fr) + 1,
+  },
+  skippedSteps: {
+    label: "Skipped steps (out of order)",
+    type: "number",
+    get: (r) => skippedEdgeCount(useStore.getState().events || [], r.fr),
+  },
+  multiFiredSteps: {
+    label: "Multi-fired steps",
+    type: "number",
+    get: (r) => multiFiredCount(r.fr),
+  },
+  uncorrelated: {
+    label: "Uncorrelated (no case row)",
+    type: "number",
+    get: (r) => (r.fr && !r.row ? 1 : 0),
+  },
+  // The exact period token from a cycle case id ("…@2026Q3" → "2026Q3"), empty
+  // for non-cycle ids. An exact-match filter here narrows to ONE cycle — unlike
+  // free-text search, which would substring-match date attributes too.
+  cycle: {
+    label: "Cycle",
+    type: "string",
+    get: (r) => {
+      const at = r.id.lastIndexOf("@")
+      if (at <= 0) {
+        return ""
+      }
+      const tok = r.id.slice(at + 1)
+      return parsePeriodToken(tok) ? tok : ""
+    },
+  },
 }
+
+export const cycleFilter = (label: string): OvFilter => ({ field: "cycle", op: "eq", value: label })
+
+// Per-step coverage fields ("e:<ref>" → that step's firing count for the case,
+// 0 when never fired — never null, so `= 0` means "not through this step yet").
+const stepFieldKey = (ref: string) => "e:" + ref
+export const stepNotFiredFilter = (ref: string): OvFilter => ({ field: stepFieldKey(ref), op: "eq", value: "0" })
+export const stepFiredFilter = (ref: string): OvFilter => ({ field: stepFieldKey(ref), op: "gte", value: "1" })
+
+// Drill-downs land worst-first: least progressed, then stalest activity.
+export const TRIAGE_SORT: OvSort[] = [
+  { key: "progress", dir: 1 },
+  { key: "lastAt", dir: 1 },
+]
 
 // Attribute columns: union of row keys across (up to) the first 100 records,
 // minus reserved/platform keys — the candidate set for columns and filters.
@@ -341,6 +405,16 @@ export const ensureFields = (records: CaseRecord[]) => {
       type: sniffType(records, k),
       attr: k,
       get: (r) => (r.row ? r.row[k] : null),
+    }
+  }
+  // One numeric field per model step, so any step's coverage gap is filterable
+  // (and lands in the URL hash — a drill-down is a shareable link).
+  for (const e of useStore.getState().events || []) {
+    const ref = e.ref
+    next[stepFieldKey(ref)] = {
+      label: `Fired: ${e.name}`,
+      type: "number",
+      get: (r) => r.fr?.counts?.[ref] ?? 0,
     }
   }
   fields = next
@@ -435,6 +509,13 @@ const matchFilter = (r: CaseRecord, f: OvFilter): boolean => {
   }
 
   if (def.type === "date") {
+    // Exact (in)equality compares the collapsed value as a string — the matrix
+    // drills with the same value its segment grouped by, which may be full-ISO
+    // and would NaN out of the day-window parse below.
+    if (f.op === "eq" || f.op === "neq") {
+      const sv = raw == null ? "" : String(attrTextIfNeeded(def, raw))
+      return f.op === "eq" ? sv === String(f.value) : sv !== String(f.value)
+    }
     // f.value is a calendar day (yyyy-mm-dd) from <input type=date>; parse it as
     // LOCAL midnight. Row values that are themselves date-only must parse on the
     // SAME local basis, or Date.parse("2020-01-21") (UTC midnight) lands a day
@@ -587,31 +668,10 @@ export const applyQuery = (records: CaseRecord[], tab: OvTab): QueryResult => {
   }
 }
 
-// Merged counts for the Workflow tab honouring the active query. null = no query
-// active (the caller falls back to the server aggregate) or data not loaded.
-export const flowSlice = () => {
-  if (!ovActive() || !useStore.getState().flowRows) {
-    return null
-  }
-  // Query over EVERY case so the match count and the "of N" denominator share
-  // one universe: a case matching the search but with no events yet still counts
-  // as a match; it simply contributes nothing to the merged counters.
-  const recs = caseRecords()
-  const res = applyQuery(recs, "flow")
-  const counts: Record<string, number> = {}
-  let totalFirings = 0
-  for (const r of res.rows) {
-    if (!r.fr) {
-      continue
-    }
-    const c = r.fr.counts || {}
-    for (const ref in c) {
-      counts[ref] = (counts[ref] || 0) + c[ref]!
-      totalFirings += c[ref]!
-    }
-  }
-  return { counts, totalFirings, totalCases: res.total, allCases: recs.length }
-}
+// (The old firings-only flowSlice is gone: the Workflow tab now derives ALL its
+// counters — coverage, pace partition, edge stats, anomalies — from cohortStats
+// over the applyQuery result, so every overlay recomputes under an active
+// filter and the whole view shares one denominator.)
 
 // --- URL hash sync — #list?q=…&f=…&s=…&p=…&pg=…&n= (replaceState: no reload) ---
 
@@ -709,6 +769,15 @@ export const syncOvHash = (tab: OvTab) => {
   if (!base) {
     return
   }
+  // Never rewrite another tab's hash: a drill-down patches the query state and
+  // navigates in one go, and the still-mounted origin view's sync effect must
+  // not clobber the destination hash before the hashchange lands. The bare home
+  // hash is owned by whichever tab Overview mounted there — normalize it.
+  const cur = location.hash
+  const atHome = cur === "" || cur === "#" || cur.startsWith("#?")
+  if (!atHome && !cur.startsWith(base)) {
+    return
+  }
   const qs = serializeOv(tab)
   history.replaceState(null, "", location.pathname + location.search + base + (qs ? "?" + qs : ""))
 }
@@ -795,15 +864,17 @@ export const defaultOp = (type: string) => (type === "number" ? "gte" : type ===
 
 // Sortable fields offered in the Sort menu (system first, then attributes).
 export const sortMenuFields = () => {
-  const sys = ["progress", "steps", "lastAt", "startedAt", "createdAt", "updatedAt", "status", "firings", "id"]
+  const sys = ["progress", "steps", "furthestStep", "lastAt", "startedAt", "createdAt", "updatedAt", "status", "firings", "id"]
   return [...sys, ...attrKeys.map((k) => "a:" + k)]
 }
 
 // Filterable fields for the field <select>, grouped.
 export const filterFieldGroups = (): [string, string[]][] => [
-  ["Progress & status", ["progress", "steps", "total", "firings", "status"]],
+  ["Progress & status", ["progress", "steps", "total", "furthestStep", "firings", "status"]],
+  ["Steps (firing count)", (useStore.getState().events || []).map((e) => stepFieldKey(e.ref))],
+  ["Conformance", ["skippedSteps", "multiFiredSteps", "uncorrelated"]],
   ["Timestamps", ["createdAt", "updatedAt", "startedAt", "lastAt"]],
-  ["Identity & activity", ["id", "lastEvent"]],
+  ["Identity & activity", ["id", "cycle", "lastEvent"]],
   ["Attributes", attrKeys.map((k) => "a:" + k)],
 ]
 

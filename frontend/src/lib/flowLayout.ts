@@ -236,6 +236,28 @@ export const flowEdgePath = (
   return `M${sx},${sy} C${sx + k},${sy} ${x1 - k},${ry} ${x1},${ry} L${x2},${ry} C${x2 + k},${ry} ${ex - k},${ey} ${ex},${ey}`
 }
 
+// Midpoint of an edge's drawn path — where an annotation pill can sit without
+// covering either card. Mirrors flowEdgePath: a plain S-curve annotates at its
+// centre; a routed edge annotates on its flat waypoint run.
+export const flowEdgeMid = (
+  a: Placement,
+  b: Placement,
+  wp: Waypoint | undefined,
+  laneTop: number[],
+  laneHeight: number[],
+  geom: Geom,
+): { x: number; y: number } => {
+  const { cardW, cardH, colPitch } = geom
+  const sx = a.col * colPitch + cardW
+  const sy = laneTop[a.lane]! + cardH / 2
+  const ex = b.col * colPitch
+  const ey = laneTop[b.lane]! + cardH / 2
+  if (!wp) {
+    return { x: (sx + ex) / 2, y: (sy + ey) / 2 }
+  }
+  return { x: (sx + 28 + (ex - 28)) / 2, y: laneTop[wp.lane]! + laneHeight[wp.lane]! / 2 }
+}
+
 // Per-lane heights and offsets. Lanes carrying only a routed edge get a short row;
 // card lanes keep the full card height.
 export const laneMetrics = (layout: FlowLayout, geom: Geom) => {
@@ -248,7 +270,7 @@ export const laneMetrics = (layout: FlowLayout, geom: Geom) => {
     laneTop[L] = acc
     acc += laneHeight[L]! + laneGap
   }
-  const width = (layout.cols - 1) * geom.colPitch + geom.cardW
+  const width = layout.cols > 0 ? (layout.cols - 1) * geom.colPitch + geom.cardW : 0
   const height = layout.lanes ? laneTop[layout.lanes - 1]! + laneHeight[layout.lanes - 1]! : geom.cardH
   return { laneTop, laneHeight, width, height }
 }

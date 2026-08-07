@@ -14,14 +14,26 @@ type Props = {
   width: number
   height: number
   footer?: React.ReactNode
+  /** Distinct-case coverage 0..1. When given, the tint encodes progress toward
+   * 100%-of-cases (the merged view's goal) instead of relative firing volume —
+   * so a step covered by few cases reads pale even when it multi-fires a lot. */
+  coverage?: number
 }
 
-export const EventCard = ({ event, index, count, maxCount, meta, left, top, width, height, footer }: Props) => {
+export const EventCard = ({ event, index, count, maxCount, meta, left, top, width, height, footer, coverage }: Props) => {
   const fired = count > 0
   const provMode = provModeForBC(meta, event.boundedContext)
-  // Heat: relative volume → emerald tint. The floor keeps low-volume fired cards
-  // visibly "on"; the ceiling stays readable.
-  const heat = fired ? (0.1 + 0.45 * (count / maxCount)).toFixed(3) : "0"
+  // Heat: emerald tint. Coverage mode scales with the share of cases through the
+  // step; volume mode (per-case rows) with relative firing count. The floor
+  // keeps low but non-zero cards visibly "on"; the ceiling stays readable.
+  const heat =
+    coverage != null
+      ? coverage > 0
+        ? (0.08 + 0.5 * Math.min(1, coverage)).toFixed(3)
+        : "0"
+      : fired
+        ? (0.1 + 0.45 * (count / maxCount)).toFixed(3)
+        : "0"
 
   return (
     <div

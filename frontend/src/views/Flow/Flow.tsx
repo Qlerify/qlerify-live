@@ -3,16 +3,19 @@ import { useStore } from "../../lib/store.ts"
 import { prettyEntity } from "../../lib/format.ts"
 import { loadFlow, pollOverview } from "../../lib/workflowData.ts"
 import { parseHash } from "../../lib/router.ts"
-import { caseRecords, ensureOvScope, flowSlice, hydrateOv, syncOvHash } from "../../lib/ovquery.ts"
+import { applyQuery, caseRecords, ensureOvScope, hydrateOv, ovActive, progressCat, syncOvHash } from "../../lib/ovquery.ts"
+import { cohortStats, periodCandidates, periodFromRecords } from "../../lib/cohort.ts"
 import { OvToolbar } from "../../shell/Overview/OvToolbar.tsx"
 import { ViewSwitcher } from "../../shell/ViewSwitcher.tsx"
 import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { FlowDiagram } from "./FlowDiagram.tsx"
+import { SegmentStepMatrix } from "./SegmentStepMatrix.tsx"
+import { BurnupStrip } from "./BurnupStrip.tsx"
 
 const POLL_MS = 5000
 
 export const Flow = () => {
-  const { flow, events, meta, ov } = useStore()
+  const { events, meta, ov } = useStore()
   const plural = prettyEntity(meta.rootAggregatePlural)
 
   useEffect(() => {
@@ -29,12 +32,20 @@ export const Flow = () => {
     syncOvHash("flow")
   }, [ov])
 
-  // Search + filters narrow which cases feed the merged counters. Sorting and
-  // paging don't apply to a merged diagram, so the toolbar omits them here. The
-  // record set is EVERY case (matching the flowSlice denominator), not only
-  // those with events, so the toolbar's "N of M" agrees with the banner.
+  // Search + filters narrow which cases feed EVERY merged counter — coverage
+  // badges, pace bar, edge pills, anomaly chips, matrix and burn-ups all
+  // recompute over the same slice (filtering to one region turns the whole view
+  // into that region's funnel). The record set is EVERY case, so a match with no
+  // events still counts in the denominator: coverage is honest about it.
   const flowRecords = caseRecords()
-  const slice = flowSlice()
+  const res = applyQuery(flowRecords, "flow")
+  const stats = cohortStats(events, res.rows)
+  const period = periodFromRecords(res.rows)
+  const mixed = period ? [] : periodCandidates(res.rows)
+  const filtered = ovActive() ? { matching: res.total, all: flowRecords.length } : null
+  // Completion by the product's own rule (branch-aware), not "fired the last
+  // declared event" — the two disagree on branched models.
+  const doneCount = res.rows.filter((r) => progressCat(r) === "done").length
 
   return (
     <>
@@ -53,18 +64,27 @@ export const Flow = () => {
         </div>
       </header>
 
-      <OvToolbar
-        tab="flow"
-        records={flowRecords}
-        res={{ total: slice ? slice.totalCases : flowRecords.length, rows: [], page: 0, pages: 1, from: 0, to: 0 }}
+      <OvToolbar tab="flow" records={flowRecords} res={res} />
+
+      <FlowDiagram
+        events={events}
+        meta={meta}
+        stats={stats}
+        period={period}
+        mixed={mixed}
+        filtered={filtered}
+        done={doneCount}
       />
 
-      <FlowDiagram events={events} flow={flow} meta={meta} slice={slice} />
+      <main className="flex-1 overflow-auto p-6 space-y-6">
+        {period && <BurnupStrip records={res.rows} events={events} period={period} />}
 
-      <main className="flex-1 overflow-auto p-6">
+        <SegmentStepMatrix records={res.rows} events={events} />
+
         <p className="text-sm text-stone-500 max-w-3xl">
-          Every case in this workflow, merged onto the model flow. The ×N badge on an event counts how many times it
-          triggered across all {plural.toLowerCase()}; brighter cards are busier steps. Switch to{" "}
+          Every case in this workflow, merged onto the model flow. Badges count the <b>distinct {plural.toLowerCase()}</b>{" "}
+          through each step — the unit of a 100%-per-step goal — and deeper green means closer to full coverage; raw
+          firing counts (incl. repeats) live in the tooltips. Click any number, pill or cell for its worklist. Switch to{" "}
           <a href="#rows" className="text-stone-800 underline">
             By case
           </a>{" "}

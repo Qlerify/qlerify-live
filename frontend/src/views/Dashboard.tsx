@@ -13,6 +13,7 @@ import {
   hydrateOv,
   listColTokens,
   ovActive,
+  pctOf,
   resetOvQuery,
   syncOvHash,
 } from "../lib/ovquery.ts"
@@ -121,6 +122,27 @@ const Cell = ({ d, tok }: { d: CaseRow; tok: string }) => {
   )
 }
 
+// A flow-row-only case (event-log caseId with no case row): renders as a
+// visibly-uncorrelated line so drills that include orphans land on a list whose
+// total matches the clicked count. No delete action — there is no row to reset.
+const OrphanRow = ({ rec, plan }: { rec: CaseRecord; plan: string[] }) => (
+  <tr
+    className="cursor-pointer hover:bg-amber-50 transition-colors"
+    onClick={() => navigate(`#case/${encodeURIComponent(rec.id)}`)}
+  >
+    <td className="px-4 py-3">
+      <span className="inline-block w-2 h-2 rounded-full bg-rose-300" />
+    </td>
+    <td className="px-4 py-3 mono text-stone-500 text-xs" title={rec.id}>
+      {rec.id.slice(0, 16)}…
+    </td>
+    <td className="px-4 py-3 text-xs text-stone-400 italic" colSpan={plan.length}>
+      uncorrelated — event-log case with no case row · {pctOf(rec)}% of steps fired
+    </td>
+    <td className="px-4 py-3" />
+  </tr>
+)
+
 const Row = ({ row, plan }: { row: CaseRow; plan: string[] }) => {
   const onDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -166,8 +188,10 @@ export const Dashboard = () => {
   }, [])
 
   // Unified records (case rows joined with flow rows) → the shared query engine:
-  // filter → sort → the one page that actually renders.
-  const records = caseRecords().filter((r) => r.row)
+  // filter → sort → the one page that actually renders. Row-less records
+  // (uncorrelated event-log cases) stay IN: the flow view counts them in every
+  // number it drills from, so the landed list must share the denominator.
+  const records = caseRecords()
   const res = applyQuery(records, "list")
   const plan = listColumnPlan(records)
   const empty = records.length === 0
@@ -240,9 +264,9 @@ export const Dashboard = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {res.rows.map((rec) => (
-                  <Row key={rec.id} row={rec.row!} plan={plan} />
-                ))}
+                {res.rows.map((rec) =>
+                  rec.row ? <Row key={rec.id} row={rec.row} plan={plan} /> : <OrphanRow key={rec.id} rec={rec} plan={plan} />,
+                )}
               </tbody>
             </table>
             <div className="px-4 py-2 border-t border-stone-200 bg-stone-50 flex items-center justify-between gap-4">

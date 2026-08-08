@@ -42,6 +42,10 @@ export const ACTION_PERMISSION_MAP: Record<string, Permission> = {
   "connector.build": "administer",         // create connector / author or repair its code
   "connector.edit": "edit",                // repoint / credentials / ingest existing connectors
   "connector.administer": "administer",    // delete / reset
+  // Generating AI next-action recommendations spends the org's LLM tokens and
+  // writes shared per-workflow state → edit (not view); it is not destructive
+  // or config-changing → not administer. Reads stay membership-scoped.
+  "recommendations.generate": "edit",
 
   // Scope administration.
   "organization.administer": "administer",

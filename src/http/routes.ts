@@ -22,6 +22,7 @@ import { registerBcRoutes } from "./bc-routes.js";
 import { registerAdapterCodeRoutes } from "./adapter-routes.js";
 import { registerConnectorRoutes } from "./connector-routes.js";
 import { registerOrgRoutes } from "./org-routes.js";
+import { registerTodoRoutes } from "./todo-routes.js";
 
 import { prisma } from "../db.js";
 import { EVENTS, events, registryError } from "../events/registry.js";
@@ -79,19 +80,27 @@ export function registerRoutes(app: FastifyInstance) {
   app.post("/commands/:bc/:name", async (req: any, reply: any) => {
     const name = (req.params as any).name as string;
     const ont = getOntology();
-    const event = ont.events.find((e) => e.commandName && kebabCase(e.commandName) === name);
+    // Events can share a command (two steps both firing UpdateStatus). An
+    // optional body `eventRef` picks WHICH of them this post records — the same
+    // ref-pinning the simulator uses (twin/sim.ts) — otherwise the first bound
+    // event stands. Without the pin, the later shared-command steps could never
+    // be fired over HTTP, so their todos could never be cleared.
+    const { eventRef: reqRef, ...args } = (req.body ?? {}) as Record<string, unknown>;
+    const byRef = typeof reqRef === "string" ? ont.eventByRef(reqRef) : undefined;
+    const event =
+      (byRef && byRef.commandName && kebabCase(byRef.commandName) === name ? byRef : undefined) ??
+      ont.events.find((e) => e.commandName && kebabCase(e.commandName) === name);
     if (!event) return reply.code(404).send({ error: "NOT_FOUND", message: `no command "${name}" in the loaded model` });
     try {
       const role = roleFromRequest(req);
       await guardData("workflow.command.write");
       assertRole(role, event.role);
-      const args = (req.body ?? {}) as Record<string, unknown>;
       const command = ont.command(event.commandName);
       for (const field of command?.required ?? []) {
         const v = args[field];
         if (v === undefined || v === null || v === "") throw new DomainError(`${field} is required`);
       }
-      const out = await genericApply(event.commandName, { args, role });
+      const out = await genericApply(event.commandName, { args, role, eventRef: event.ref });
       return reply.code(200).send(out);
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
@@ -367,6 +376,10 @@ export function registerRoutes(app: FastifyInstance) {
   // ---------------- Organisation portfolio dashboard ----------------
   // The tier above the per-workflow overview: spans every workflow type in the org.
   registerOrgRoutes(app);
+
+  // ---------------- To do / next actions ----------------
+  // The per-case, per-role frontier ("what can happen next") + AI recommendations.
+  registerTodoRoutes(app);
 
   // ---------------- Chat assistant ----------------
   app.get("/chat/info", async () => {

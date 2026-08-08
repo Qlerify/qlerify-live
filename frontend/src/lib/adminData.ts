@@ -43,6 +43,7 @@ export const ADMIN_TABS: [string, string][] = [
   ["general", "General"],
   ["members", "Members"],
   ["roles", "Roles"],
+  ["domain-roles", "Workflow roles"],
   ["markings", "Markings"],
   ["environments", "Environments"],
   ["workspaces", "Workspaces"],

@@ -11,6 +11,7 @@ import { AssistantButton } from "../../shell/AssistantButton.tsx"
 import { FlowDiagram } from "./FlowDiagram.tsx"
 import { SegmentStepMatrix } from "./SegmentStepMatrix.tsx"
 import { BurnupStrip } from "./BurnupStrip.tsx"
+import { TodoPanel } from "./TodoPanel.tsx"
 
 const POLL_MS = 5000
 
@@ -78,6 +79,8 @@ export const Flow = () => {
 
       <main className="flex-1 overflow-auto p-6 space-y-6">
         {period && <BurnupStrip records={res.rows} events={events} period={period} />}
+
+        <TodoPanel records={res.rows} />
 
         <SegmentStepMatrix records={res.rows} events={events} />
 

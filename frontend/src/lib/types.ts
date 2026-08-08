@@ -359,6 +359,75 @@ export type Environment = { id: string; name: string; region?: string; lifecycle
 export type Workspace = { id: string; name: string; environmentId: string; lifecycleState?: string }
 export type AdminWorkflow = { id: string; name: string; workspaceId: string; lifecycleState?: string }
 
+// One entry of the per-case frontier (GET /sim/next-actions): a step that is
+// unblocked right now, owned by `role` (the candidate group, never a user).
+export type NextAction = {
+  caseId: string
+  eventKey: string
+  eventRef: string
+  eventName: string
+  commandName: string
+  role: string
+  boundedContext: string
+  aggregateRoot: string
+  reason: "start" | "ready"
+  why: string
+  lastAt: string | null
+  dwellDays: number | null
+  stale: boolean
+}
+
+export type NextActionsResult = {
+  actions: NextAction[]
+  totalActions: number
+  totalCases: number
+  byRole: Record<string, number>
+  generatedAt: string
+  watermark: string
+}
+
+// AI ranking of the frontier (GET /sim/recommendations). The LLM only orders
+// and phrases the deterministic candidates — items always reference a real
+// (case, step) pair. status: fresh = matches current model+data; stale = the
+// workflow moved since this ranking; none = never generated.
+export type RecommendationItem = {
+  caseId: string
+  eventRef: string
+  role: string
+  priority: number
+  why: string
+}
+export type StoredRecommendations = {
+  version: 1
+  modelKey: string
+  watermark: string
+  generatedAt: string
+  llmModel: string
+  summary: string
+  items: RecommendationItem[]
+}
+export type RecommendationsView = {
+  status: "none" | "fresh" | "stale"
+  recs: StoredRecommendations | null
+  dropped: number
+}
+
+// Domain-role mapping (GET /v1/domain-roles): which member plays which model
+// lane in a workflow. `inModel: false` = the lane vanished in a model swap.
+export type DomainRoleAssignment = {
+  id: string
+  identityId: string
+  subject: string
+  domainRole: string
+  grantedAt: string
+  inModel: boolean
+}
+export type DomainRoleList = {
+  workflowId: string
+  modelRoles: string[]
+  assignments: DomainRoleAssignment[]
+}
+
 export type AuditEvent = {
   seq: number
   action: string

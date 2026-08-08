@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { prisma } from "../../db.js";
 import { AuthError, DomainError } from "../../errors.js";
 import { QLERIFY_DIR, forgetWorkflowModel } from "../../ontology/model.js";
-import { dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
+import { deleteMetaByPrefix, dropProjectionTablesForWorkflow } from "../../twin/projection-store.js";
+import { RECS_META_PREFIX } from "../../twin/next-actions-ai.js";
 import { generatePassword, hashPassword } from "../authn/sessions.js";
 import { recordAudit } from "../audit/index.js";
 import {
@@ -233,9 +234,18 @@ export async function deleteWorkflow(
     prisma.platResourceMarking.deleteMany({ where: { organizationId, resourceId: { in: resourceIds } } }),
     prisma.platResource.deleteMany({ where: { organizationId, workflowId } }),
     prisma.platRoleAssignment.deleteMany({ where: { organizationId, scopeType: "workflow", scopeId: workflowId } }),
+    prisma.platDomainRoleAssignment.deleteMany({ where: { organizationId, workflowId } }),
     prisma.eventLog.deleteMany({ where: { organizationId, workflowId } }),
     prisma.platWorkflow.deleteMany({ where: { id: workflowId, organizationId } }),
   ]);
+
+  // The workflow's stored AI recommendations live in _app_meta (key convention,
+  // no org/workflow column). Cleaned right after the metadata commit — BEFORE
+  // the table drops below, whose failure must not skip this. (It can't join the
+  // $transaction: deleteMetaByPrefix bootstraps the table via CREATE IF NOT
+  // EXISTS.) Note: OTHER per-workflow meta keys (adapter provenance modes)
+  // predate this cleanup and still leak on delete; that gap is out of scope.
+  await deleteMetaByPrefix(RECS_META_PREFIX + workflowId);
 
   // Drop the physical projection tables AFTER the metadata commit: a failure here
   // can only orphan now-invisible tables, never leave a half-listed workflow.
@@ -591,6 +601,7 @@ export async function deleteOrganization(
     prisma.platMarkingGrant.deleteMany({ where: { organizationId } }),
     prisma.platMarking.deleteMany({ where: { organizationId } }),
     prisma.platRoleAssignment.deleteMany({ where: { organizationId } }),
+    prisma.platDomainRoleAssignment.deleteMany({ where: { organizationId } }), // belt-and-suspenders (deleteWorkflow sweeps per workflow; this catches grant-vs-delete races)
     prisma.platRole.deleteMany({ where: { organizationId } }), // org-scoped custom roles only (builtins have a null org)
     prisma.platGroupMembership.deleteMany({ where: { organizationId } }),
     prisma.platGroup.deleteMany({ where: { organizationId } }),

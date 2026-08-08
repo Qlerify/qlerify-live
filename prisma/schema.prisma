@@ -360,6 +360,29 @@ model PlatRoleAssignment {
   @@map("plat_role_assignments")
 }
 
+// Domain-role mapping: "identity X plays model lane Y in workflow Z". This is
+// NOT authorization (the PDP is) — it personalizes the To do surfaces (whoami
+// returns the caller's lanes; the future digest addresses role → identities).
+// domainRole is a lane name from the workflow model's `roles`; deliberately NOT
+// hard-validated at write time (the model can be swapped under the mapping) —
+// stale roles are surfaced as `inModel: false`, never silently deleted.
+// NOTE: existing populated DBs get this table from ensureSchemaUpgrades (raw
+// CREATE TABLE IF NOT EXISTS) — `db push` must never run against them.
+model PlatDomainRoleAssignment {
+  id             String   @id @default(uuid())
+  organizationId String
+  workflowId     String
+  identityId     String
+  domainRole     String
+  grantedBy      String?
+  grantedAt      DateTime @default(now())
+
+  @@unique([organizationId, workflowId, identityId, domainRole])
+  @@index([organizationId, workflowId])
+  @@index([organizationId, identityId])
+  @@map("plat_domain_role_assignments")
+}
+
 // --- Markings / MAC (§7) ----------------------------------------------------
 model PlatMarking {
   id             String   @id @default(uuid())

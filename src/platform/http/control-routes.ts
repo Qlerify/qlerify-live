@@ -32,6 +32,8 @@ import {
 } from "../provisioning/index.js";
 import { resolveAnthropicStatus } from "../../llm/anthropic.js";
 import { resolveQlerifyStatus } from "../../llm/qlerify.js";
+import { assignDomainRole, domainRolesFor, listDomainRoles, removeDomainRole } from "../domain-roles.js";
+import { loadOntologyFromStrings } from "../../ontology/model.js";
 import { requireIdentity, requireTenant, runWithTenant } from "../tenancy/context.js";
 import { applyWorkflowModel } from "../../twin/apply.js";
 import { deriveNameFromModel, fetchSpecificationFromUrl, fetchWorkflowModelFromUrl, sanitizeWorkflowName } from "../../ontology/sync.js";
@@ -162,6 +164,12 @@ export function registerControlRoutes(app: FastifyInstance) {
           select: { id: true, name: true },
           orderBy: { createdAt: "asc" },
         }),
+        // The model lanes this member plays in the ACTIVE workflow (admin-managed
+        // mapping) — the To do tab defaults its filter to these and the role
+        // picker hides itself when the mapping answers the question.
+        domainRoles: ctx.workflowId && ctx.identityId
+          ? await domainRolesFor(ctx.organizationId, ctx.workflowId, ctx.identityId)
+          : [],
       };
     } catch (err) {
       return fail(reply, err);
@@ -445,6 +453,76 @@ export function registerControlRoutes(app: FastifyInstance) {
         grantedBy: ctx.principal.id,
       });
       return reply.code(201).send({ id: a.id });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  // --- Domain-role mapping (model lanes ↔ members) --------------------------
+  // "Identity X plays lane Y in workflow Z" — personalization for the To do
+  // surfaces, NOT authorization (the PDP stays the boundary). Reads AND writes
+  // are org-admin gated: the listing exposes member identityIds + subjects (the
+  // same directory data as /v1/members); a member's OWN lanes flow through
+  // whoami.domainRoles. Lanes are not hard-validated against the model (it can
+  // be swapped under the mapping) — `inModel: false` flags the stale ones.
+  app.get("/v1/domain-roles", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      await assertOrgAdmin(ctx);
+      const workflowId = (((req.query as any)?.workflowId as string | undefined) || ctx.workflowId) ?? null;
+      if (!workflowId) throw new DomainError("workflowId is required");
+      await inOrgOr404(
+        await prisma.platWorkflow.findFirst({ where: { id: workflowId, organizationId: ctx.organizationId } }),
+        "workflow",
+      );
+      const assignments = await listDomainRoles(ctx.organizationId, workflowId);
+      // The model's lanes, for the Admin grid + the stale-role flag. A workflow
+      // with no model yet (or an unparsable one) just reports [].
+      let modelRoles: string[] = [];
+      try {
+        const ont = await getWorkflowOntology(ctx.organizationId, workflowId);
+        const content = ont ? await currentContent(ctx.organizationId, ont.id) : null;
+        if (content) modelRoles = loadOntologyFromStrings(content.workflow, content.overlay).roles;
+      } catch {
+        // a broken model must not take the mapping admin down with it
+      }
+      return {
+        workflowId,
+        modelRoles,
+        assignments: assignments.map((a) => ({ ...a, inModel: modelRoles.includes(a.domainRole) })),
+      };
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  app.post("/v1/domain-roles", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      const body = (req.body ?? {}) as { workflowId?: string; identityId?: string; domainRole?: string };
+      if (!body.workflowId || !body.identityId || !body.domainRole) {
+        throw new DomainError("workflowId, identityId, domainRole are required");
+      }
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      const a = await assignDomainRole({
+        organizationId: ctx.organizationId,
+        workflowId: body.workflowId,
+        identityId: body.identityId,
+        domainRole: body.domainRole,
+        grantedBy: ctx.principal.id,
+      });
+      return reply.code(201).send({ id: a.id });
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  app.delete("/v1/domain-roles/:id", async (req, reply) => {
+    try {
+      const ctx = requireTenant();
+      await ensureAllowed("organization.administer", { id: ctx.organizationId, organizationId: ctx.organizationId, scopeType: "organization" }, ctx);
+      await removeDomainRole(ctx.organizationId, (req.params as { id: string }).id);
+      return { ok: true };
     } catch (err) {
       return fail(reply, err);
     }

@@ -8,9 +8,11 @@ import { AUTH } from "./api.ts"
 import { useStore } from "./store.ts"
 import { attrSearchText, attrText, prettyEntity } from "./format.ts"
 import { furthestIndex, multiFiredCount, parsePeriodToken, skippedEdgeCount } from "./cohort.ts"
-import type { CaseRow, EventDef, FlowCaseRow, Row } from "./types.ts"
+import type { CaseRow, EventDef, FlowCaseRow, NextAction, NextActionsResult, Row } from "./types.ts"
 
-export type OvTab = "list" | "rows" | "flow"
+// "todo" is a paging-less tab like "flow": it shares search/filter/sort but
+// keeps no page state of its own.
+export type OvTab = "list" | "rows" | "flow" | "todo"
 export type OvFilter = { field: string; op: string; value: string }
 export type OvSort = { key: string; dir: 1 | -1 }
 export type OvActivity = { field: "startedAt" | "lastAt"; within: string }
@@ -34,7 +36,7 @@ const pageSizesFor = (tab: string) => PAGE_SIZES[tab] || PAGE_SIZES.list!
 
 // Default sort when the user hasn't chosen one: the List keeps the server's
 // stable createdAt order; By-case keeps its "most recently active first".
-const DEFAULT_SORT: Record<string, OvSort[]> = { list: [], rows: [{ key: "lastAt", dir: -1 }], flow: [] }
+const DEFAULT_SORT: Record<string, OvSort[]> = { list: [], rows: [{ key: "lastAt", dir: -1 }], flow: [], todo: [] }
 
 // Same reserved set genericColumns/the server use, plus platform columns that
 // must never surface as user-facing attributes.
@@ -178,7 +180,7 @@ export const ovTabForView = (view: string): OvTab | null => {
   if (view === "dashboard") {
     return "list"
   }
-  return view === "flow" || view === "rows" ? view : null
+  return view === "flow" || view === "rows" || view === "todo" ? view : null
 }
 
 // True when the query narrows the case set (sort alone doesn't).
@@ -314,6 +316,35 @@ const SYS_FIELDS: Record<string, FieldDef> = {
       return parsePeriodToken(tok) ? tok : ""
     },
   },
+  // Frontier fields from /sim/next-actions (polled with the rest): the case's
+  // first unblocked step, its owning role, and how many steps are open at once
+  // (0 = done or blocked). Sortable/filterable/URL-shareable like any field.
+  nextStep: { label: "Next step", type: "string", get: (r) => nextActionsByCase().get(r.id)?.[0]?.eventName ?? "" },
+  nextRole: { label: "Next role", type: "string", get: (r) => nextActionsByCase().get(r.id)?.[0]?.role ?? "" },
+  readySteps: { label: "Ready steps", type: "number", get: (r) => nextActionsByCase().get(r.id)?.length ?? 0 },
+}
+
+// caseId → its open actions, memoized per payload reference (the store swaps
+// the whole object on each load). Within one case the global sort degenerates
+// to model order, so [0] is the earliest open step.
+let naSrc: NextActionsResult | null = null
+let naMap = new Map<string, NextAction[]>()
+export const nextActionsByCase = (): Map<string, NextAction[]> => {
+  const na = useStore.getState().nextActions
+  if (na === naSrc) {
+    return naMap
+  }
+  naSrc = na
+  naMap = new Map()
+  for (const a of na?.actions || []) {
+    const arr = naMap.get(a.caseId)
+    if (arr) {
+      arr.push(a)
+    } else {
+      naMap.set(a.caseId, [a])
+    }
+  }
+  return naMap
 }
 
 export const cycleFilter = (label: string): OvFilter => ({ field: "cycle", op: "eq", value: label })
@@ -651,7 +682,7 @@ export const applyQuery = (records: CaseRecord[], tab: OvTab): QueryResult => {
   const total = out.length
   out = stableSort(out, o.sort.length ? o.sort : DEFAULT_SORT[tab] || [])
 
-  const t = tab === "flow" ? null : o.tab[tab]
+  const t = tab === "list" || tab === "rows" ? o.tab[tab] : null
   if (!t) {
     return { rows: out, total, page: 0, pages: 1, from: total ? 1 : 0, to: total }
   }
@@ -707,7 +738,7 @@ export const serializeOv = (tab: OvTab | null): string => {
   if (o.sort.length) {
     p.set("s", o.sort.map((s) => (s.dir === -1 ? "-" : "") + esc(s.key)).join(","))
   }
-  const t = tab && tab !== "flow" ? o.tab[tab] : null
+  const t = tab === "list" || tab === "rows" ? o.tab[tab] : null
   if (t && tab) {
     if (t.page > 0) {
       p.set("pg", String(t.page))
@@ -748,7 +779,7 @@ export const hydrateOv = (tab: OvTab | null, qs: string) => {
       .map((tok) => ({ key: unesc(tok.replace(/^-/, "")), dir: (tok.startsWith("-") ? -1 : 1) as 1 | -1 })),
   }
 
-  if (tab && tab !== "flow") {
+  if (tab === "list" || tab === "rows") {
     const t = o.tab[tab]
     const n = Number(p.get("n"))
     next.tab = {
@@ -762,7 +793,7 @@ export const hydrateOv = (tab: OvTab | null, qs: string) => {
   patchOv(next)
 }
 
-const HASH_BASE: Record<string, string> = { flow: "#flow", rows: "#rows", list: "#list" }
+const HASH_BASE: Record<string, string> = { flow: "#flow", rows: "#rows", list: "#list", todo: "#todo" }
 
 export const syncOvHash = (tab: OvTab) => {
   const base = HASH_BASE[tab]
@@ -864,17 +895,17 @@ export const defaultOp = (type: string) => (type === "number" ? "gte" : type ===
 
 // Sortable fields offered in the Sort menu (system first, then attributes).
 export const sortMenuFields = () => {
-  const sys = ["progress", "steps", "furthestStep", "lastAt", "startedAt", "createdAt", "updatedAt", "status", "firings", "id"]
+  const sys = ["progress", "steps", "furthestStep", "readySteps", "nextStep", "nextRole", "lastAt", "startedAt", "createdAt", "updatedAt", "status", "firings", "id"]
   return [...sys, ...attrKeys.map((k) => "a:" + k)]
 }
 
 // Filterable fields for the field <select>, grouped.
 export const filterFieldGroups = (): [string, string[]][] => [
-  ["Progress & status", ["progress", "steps", "total", "furthestStep", "firings", "status"]],
+  ["Progress & status", ["progress", "steps", "total", "furthestStep", "readySteps", "firings", "status"]],
   ["Steps (firing count)", (useStore.getState().events || []).map((e) => stepFieldKey(e.ref))],
   ["Conformance", ["skippedSteps", "multiFiredSteps", "uncorrelated"]],
   ["Timestamps", ["createdAt", "updatedAt", "startedAt", "lastAt"]],
-  ["Identity & activity", ["id", "cycle", "lastEvent"]],
+  ["Identity & activity", ["id", "cycle", "lastEvent", "nextStep", "nextRole"]],
   ["Attributes", attrKeys.map((k) => "a:" + k)],
 ]
 

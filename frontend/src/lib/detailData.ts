@@ -1,16 +1,21 @@
 import { api } from "./api.ts"
 import { useStore } from "./store.ts"
 import { loadMeta, loadRegistryStatus } from "./workflowData.ts"
+import { loadRecs } from "./todoData.ts"
 import { bizTimeEstimated } from "./time.ts"
-import type { EventDef, Instance, LogEntry } from "./types.ts"
+import type { EventDef, Instance, LogEntry, NextActionsResult } from "./types.ts"
 
 export const loadDetail = async (caseId: string) => {
   await loadMeta()
-  const [instance, events, cur] = await Promise.all([
+  const [instance, events, cur, next] = await Promise.all([
     api<Instance>("/sim/instance/" + encodeURIComponent(caseId)),
     api<EventDef[]>("/sim/events"),
     api<{ index: number }>("/sim/current-step?caseId=" + encodeURIComponent(caseId)),
+    // The case's own frontier — the header "Next" line + ready rings. Non-fatal:
+    // the detail view predates it and must not break if the call fails.
+    api<NextActionsResult>("/sim/next-actions?caseId=" + encodeURIComponent(caseId) + "&limit=0").catch(() => null),
     loadRegistryStatus(),
+    loadRecs(), // the "Recommended action" line, when a fresh AI ranking exists
   ])
 
   const s = useStore.getState()
@@ -26,6 +31,7 @@ export const loadDetail = async (caseId: string) => {
     // newest-first, so "last event" reads the latest first
     log: (instance.events || []).slice().reverse(),
     currentIndex: cur.index,
+    caseNextActions: next ? next.actions : null,
     ...(prevInstance ? {} : { expandedFirings: new Set<string>(), splitRef: null, selectedStep: null }),
   })
 }

@@ -1,4 +1,14 @@
-const ROLE = "Automation"
+// The domain role (model lane) stamped on every request's x-role header. NOT a
+// security boundary — the PDP is; the server only records it on emitted events
+// and matches it against the lane on command routes. Resolved per workflow by
+// lib/role.ts (explicit pick → admin mapping → this legacy fallback).
+let currentRole = "Automation"
+
+export const setDomainRole = (role: string | null) => {
+  currentRole = role || "Automation"
+}
+
+export const getDomainRole = () => currentRole
 
 export class ApiError extends Error {
   status?: number
@@ -61,7 +71,7 @@ export const setUnauthorizedHandler = (fn: () => void) => {
 
 const apiHeaders = (extra?: HeadersInit, hasBody = false): Record<string, string> => {
   const headers: Record<string, string> = {
-    "x-role": ROLE,
+    "x-role": currentRole,
     ...((extra as Record<string, string>) || {}),
   }
   if (hasBody) {
@@ -296,6 +306,9 @@ export type Me = {
   workflowId?: string | null
   isPlatformAdmin?: boolean
   mustChangePassword?: boolean
+  // The model lanes this member plays in the active workflow (admin-managed
+  // mapping) — defaults the To do filter and the domain-role picker.
+  domainRoles?: string[]
 }
 
 export const whoami = async (): Promise<Me | null> => {

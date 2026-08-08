@@ -15,6 +15,7 @@ export const WORKFLOW_SCOPED_VIEWS = new Set([
   "detail",
   "flow",
   "rows",
+  "todo",
   "model",
   "bcs",
   "connectors",
@@ -51,6 +52,9 @@ export const parseHash = (): Route => {
   }
   if (h.startsWith("#list")) {
     return { view: "dashboard", ovqs }
+  }
+  if (h.startsWith("#todo")) {
+    return { view: "todo", ovqs }
   }
 
   const conn = h.match(/^#connectors(?:\/(.+))?$/)

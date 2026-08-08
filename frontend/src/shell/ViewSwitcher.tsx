@@ -5,6 +5,7 @@ const SEGMENTS: [string, string, string][] = [
   ["#flow", "⑂ Workflow", "All cases merged onto one flow, with a counter on each event"],
   ["#rows", "▦ By case", "The same flow split into one row per case"],
   ["#list", "▤ List", "Every case as a list — pick one to follow it end to end"],
+  ["#todo", "✓ To do", "What each role should do next, across every open case"],
 ]
 
 // The active search/filter/sort travels with the tab hop (page resets — it's

@@ -9,8 +9,11 @@
 //   - an existing populated DB gets them in place with zero data loss,
 //   - and a re-run is a no-op (each column is checked for existence first, so we
 //     never raise — and log — SQLite's "duplicate column" error).
-// Keep every change strictly additive (ADD COLUMN / CREATE INDEX IF NOT EXISTS);
-// never DROP or rewrite here.
+// Keep every change strictly additive (ADD COLUMN / CREATE INDEX IF NOT EXISTS /
+// CREATE TABLE IF NOT EXISTS); never DROP or rewrite here. A brand-new table's
+// DDL must mirror what `db push` would create from schema.prisma (same column
+// types, same index names) so a fresh install and an upgraded install converge
+// on the identical schema.
 
 import { prisma } from "../../db.js";
 
@@ -51,6 +54,26 @@ const INDEXES: string[] = [
   `CREATE INDEX IF NOT EXISTS "EventLog_workflowId_actorKind_idx" ON "EventLog"("workflowId", "actorKind")`,
 ];
 
+// Whole new tables (with their indexes), idempotent via IF NOT EXISTS. Mirrors
+// the schema.prisma model exactly — including Prisma's generated index names —
+// so a fresh `db push` install and an upgraded one are indistinguishable.
+const TABLES: string[] = [
+  // Domain-role mapping (PlatDomainRoleAssignment): who plays which model lane
+  // in which workflow. Powers whoami.domainRoles + the To do "my roles" filter.
+  `CREATE TABLE IF NOT EXISTS "plat_domain_role_assignments" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "organizationId" TEXT NOT NULL,
+    "workflowId" TEXT NOT NULL,
+    "identityId" TEXT NOT NULL,
+    "domainRole" TEXT NOT NULL,
+    "grantedBy" TEXT,
+    "grantedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "plat_domain_role_assignments_organizationId_workflowId_identityId_domainRole_key" ON "plat_domain_role_assignments"("organizationId", "workflowId", "identityId", "domainRole")`,
+  `CREATE INDEX IF NOT EXISTS "plat_domain_role_assignments_organizationId_workflowId_idx" ON "plat_domain_role_assignments"("organizationId", "workflowId")`,
+  `CREATE INDEX IF NOT EXISTS "plat_domain_role_assignments_organizationId_identityId_idx" ON "plat_domain_role_assignments"("organizationId", "identityId")`,
+];
+
 async function columnExists(table: string, column: string): Promise<boolean> {
   const rows = await prisma.$queryRawUnsafe<Array<{ name: string }>>(
     `PRAGMA table_info("${table}")`,
@@ -60,6 +83,10 @@ async function columnExists(table: string, column: string): Promise<boolean> {
 
 /** Apply all additive upgrades. Idempotent; safe to call on every boot. */
 export async function ensureSchemaUpgrades(): Promise<void> {
+  // Tables first: a column upgrade may target a table introduced here.
+  for (const sql of TABLES) {
+    await prisma.$executeRawUnsafe(sql);
+  }
   for (const { table, column, type } of COLUMNS) {
     if (await columnExists(table, column)) continue;
     await prisma.$executeRawUnsafe(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${type}`);

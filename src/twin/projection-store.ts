@@ -443,3 +443,11 @@ export async function setMeta(key: string, value: string): Promise<void> {
     value,
   );
 }
+
+/** Delete every meta key under a prefix — the cleanup hook for per-workflow
+ * keys (e.g. `recs:<workflowId>`) when a workflow is deleted. Scoping in this
+ * table is by key convention only, so callers pass the full prefix. */
+export async function deleteMetaByPrefix(prefix: string): Promise<void> {
+  await ensureMetaTable();
+  await prisma.$executeRawUnsafe(`DELETE FROM "_app_meta" WHERE key LIKE ? || '%'`, prefix);
+}

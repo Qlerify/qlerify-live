@@ -14,7 +14,7 @@ import { DataPanel } from "./DataPanel.tsx"
 export const Detail = () => {
   const route = useRoute()
   const caseId = route.caseId || ""
-  const { instance, events, log, meta, busy, currentIndex } = useStore()
+  const { instance, events, log, meta, busy, currentIndex, caseNextActions, recs } = useStore()
 
   useEffect(() => {
     if (!caseId) {
@@ -31,6 +31,21 @@ export const Detail = () => {
   const total = events.length
   const fired = firedRefSet(log).size
   const atEnd = currentIndex >= total
+
+  // The frontier ("what can happen next"), not the simulator's linear cursor —
+  // on a branched model several steps can be open at once, and a skipped step
+  // never lingers here. The Step buttons keep the linear cursor by design.
+  const next = caseNextActions || []
+  const nextShown = next.slice(0, 3)
+  const nextTitle = next.map((a) => `${a.eventName} (${a.role}) — ${a.why}`).join("\n")
+
+  // The AI's top-ranked open step for THIS case — only when the stored ranking
+  // still matches the current model + data (stale advice is worse than none).
+  const rec =
+    recs?.status === "fresh"
+      ? (recs.recs?.items.find((i) => i.caseId === caseId && next.some((a) => a.eventRef === i.eventRef)) ?? null)
+      : null
+  const recEvent = rec ? events.find((e) => e.ref === rec.eventRef) : null
 
   return (
     <>
@@ -51,6 +66,47 @@ export const Detail = () => {
               {prettyEntity(meta.rootAggregate)}
               {root.status ? <Pill text={String(root.status)} status={String(root.status)} /> : null}
             </div>
+            {caseNextActions != null && (
+              <div className="text-[12px] mt-0.5 truncate" title={nextTitle || undefined}>
+                {next.length ? (
+                  <>
+                    <span className="uppercase tracking-widest text-stone-400 font-semibold text-[10px] mr-1.5">
+                      Next
+                    </span>
+                    {nextShown.map((a, i) => (
+                      <span key={a.eventRef} className="text-stone-700">
+                        {i > 0 && <span className="text-stone-300"> · </span>}
+                        <b className="font-medium">{a.eventName}</b>
+                        <span className="text-stone-500"> ({a.role})</span>
+                      </span>
+                    ))}
+                    {next.length > nextShown.length && (
+                      <span className="text-stone-400"> · +{next.length - nextShown.length} more</span>
+                    )}
+                    <a href="#todo" className="ml-2 text-stone-400 hover:text-stone-700 underline">
+                      to do
+                    </a>
+                  </>
+                ) : (
+                  <span className="text-stone-400">
+                    {fired === 0 ? "Not started — no events yet" : "No open next step — this path is complete"}
+                  </span>
+                )}
+              </div>
+            )}
+            {rec && recEvent && (
+              <div
+                className="text-[12px] mt-0.5 truncate"
+                title={`AI-recommended next action (ranked #${rec.priority} across the whole workflow): ${rec.why}`}
+              >
+                <span className="text-[10px] px-1 py-px rounded bg-stone-900 text-white font-semibold mr-1.5">AI</span>
+                <span className="uppercase tracking-widest text-stone-400 font-semibold text-[10px] mr-1.5">
+                  Recommended
+                </span>
+                <b className="font-medium text-stone-700">{recEvent.name}</b>
+                <span className="text-stone-500"> — {rec.why}</span>
+              </div>
+            )}
           </div>
           <div className="text-sm text-stone-500 mr-2 tabular-nums">
             <span className="font-semibold text-stone-800">{fired}</span> / {total} fired

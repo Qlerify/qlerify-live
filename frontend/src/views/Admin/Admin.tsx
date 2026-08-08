@@ -5,6 +5,7 @@ import type { AdminData } from "../../lib/types.ts"
 import { Loading } from "../../components/Loading.tsx"
 import { GeneralTab } from "./GeneralTab.tsx"
 import { MembersTab } from "./MembersTab.tsx"
+import { DomainRolesTab } from "./DomainRolesTab.tsx"
 import { AuditTab, EnvironmentsTab, MarkingsTab, RolesTab, WorkflowsTab, WorkspacesTab } from "./SimpleTabs.tsx"
 
 export const Admin = () => {
@@ -30,6 +31,8 @@ export const Admin = () => {
         return <MembersTab admin={admin} reload={reload} />
       case "roles":
         return <RolesTab admin={admin} reload={reload} />
+      case "domain-roles":
+        return <DomainRolesTab admin={admin} reload={reload} />
       case "markings":
         return <MarkingsTab admin={admin} reload={reload} />
       case "environments":

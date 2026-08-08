@@ -34,9 +34,9 @@ const DEFAULT_MODEL = process.env.CHAT_MODEL ?? "claude-sonnet-4-6";
 
 // The SDK default is 10 minutes per attempt — one wedged provider request would
 // hold an agent turn (and its HTTP connection) far past any user's patience.
-// 3 minutes comfortably covers the largest call we make (4096 max_tokens);
-// override for unusually slow deployments. Applies per attempt, on top of the
-// SDK's own retries.
+// 3 minutes comfortably covers the largest call we make (8192 max_tokens, the
+// recommendations ranking in twin/next-actions-ai.ts); override for unusually
+// slow deployments. Applies per attempt, on top of the SDK's own retries.
 const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS ?? 180_000);
 const LLM_CLIENT_OPTS = { timeout: LLM_TIMEOUT_MS, maxRetries: 2 } as const;
 // Validate-on-save makes a 1-token call and renders a spinner in the admin UI —

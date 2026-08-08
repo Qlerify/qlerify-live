@@ -21,10 +21,13 @@ const ARROW_DIRS: Record<string, Direction> = {
 }
 
 export const Timeline = () => {
-  const { events, log, meta, expandedFirings, selectedStep, splitRef, set } = useStore()
+  const { events, log, meta, expandedFirings, selectedStep, splitRef, set, caseNextActions } = useStore()
 
   const total = events.length
   const firedRefs = firedRefSet(log)
+  // The case's frontier: unfired steps that are unblocked right now. Marked so
+  // "where the flow stands" and "what can happen next" read off the same map.
+  const readyRefs = new Set((caseNextActions || []).map((a) => a.eventRef))
   const firedCounts = firedCountMap(log)
   const firingsByRef = firingsByRefMap(log)
   const biz = businessByStep(log)
@@ -182,10 +185,12 @@ export const Timeline = () => {
               const fired = firedRefs.has(e.ref)
               const isCurrent = i === lastFiredIndex
               const isSelected = i === selectedStep
+              const isReady = readyRefs.has(e.ref)
               const provMode = provModeForBC(meta, e.boundedContext)
               const open = isExpanded(e.ref)
-              // Selection (sky) wins over the amber "latest fired" ring.
-              const ring = isSelected ? "ring-2 ring-sky-500" : isCurrent ? "ring-2 ring-amber-400" : ""
+              // Selection (sky) wins over the amber "latest fired" ring; the
+              // emerald "ready next" ring marks the frontier on unfired cards.
+              const ring = isSelected ? "ring-2 ring-sky-500" : isCurrent ? "ring-2 ring-amber-400" : isReady ? "ring-2 ring-emerald-300" : ""
               const bz = biz.get(e.ref)
               const bizLabel = fired ? fmtBizDate(bz?.iso) : null
               const gap = gapByRef.get(e.ref)
@@ -205,7 +210,7 @@ export const Timeline = () => {
                   key={e.ref}
                   title="View the data as of this event"
                   onClick={() => set({ selectedStep: i })}
-                  className={`absolute cursor-pointer rounded-md border ${fired ? "border-emerald-200" : PHASE_TONE[e.phase ?? 0] || "border-stone-300"} ${ring} ${fired ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired || isSelected ? "" : "opacity-60"} flex flex-col overflow-hidden`}
+                  className={`absolute cursor-pointer rounded-md border ${fired ? "border-emerald-200" : PHASE_TONE[e.phase ?? 0] || "border-stone-300"} ${ring} ${fired ? "bg-emerald-50" : "bg-white"} px-3 py-2 ${fired || isSelected || isReady ? "" : "opacity-60"} flex flex-col overflow-hidden`}
                   style={{
                     left: `${pos.col * colPitch}px`,
                     top: `${laneTop[pos.lane]}px`,
@@ -219,6 +224,14 @@ export const Timeline = () => {
                       {i + 1}. {e.boundedContext}
                     </span>
                     <span className="flex items-center gap-1 shrink-0">
+                      {isReady && (
+                        <span
+                          className="text-[9px] px-1 rounded bg-emerald-100 text-emerald-700 font-semibold leading-none py-0.5"
+                          title="Unblocked — this step can happen next"
+                        >
+                          next
+                        </span>
+                      )}
                       <ProvChip mode={provMode} />
                     </span>
                   </div>

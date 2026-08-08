@@ -3,6 +3,7 @@ import { Dashboard } from "./Dashboard.tsx"
 import { Overview } from "./Overview.tsx"
 import { Flow } from "./Flow/Flow.tsx"
 import { Rows } from "./Rows.tsx"
+import { Todo } from "./Todo/Todo.tsx"
 import { Detail } from "./Detail/Detail.tsx"
 import { Model } from "./Model/Model.tsx"
 import { Org } from "./Org/Org.tsx"
@@ -18,6 +19,7 @@ export const VIEWS: Record<string, ComponentType> = {
   overview: Overview,
   flow: Flow,
   rows: Rows,
+  todo: Todo,
   detail: Detail,
   model: Model,
   org: Org,

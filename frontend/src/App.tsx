@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { AUTH, setTenantHandlers, setUnauthorizedHandler, whoami } from "./lib/api.ts"
+import { applyDomainRole } from "./lib/role.ts"
 import { deactivateConnectorChat, resetChatState, syncChatScope } from "./lib/chatData.ts"
 import { navigate, useRoute, WORKFLOW_SCOPED_VIEWS } from "./lib/router.ts"
 import { useStore } from "./lib/store.ts"
@@ -31,7 +32,19 @@ export const App = () => {
         navigate("#login")
       }
     })
-    setTenantHandlers({ scopeChange: syncChatScope, signOut: resetChatState })
+    setTenantHandlers({
+      scopeChange: () => {
+        // Org/workflow switched: drop the per-workflow derived slices so a
+        // stale frontier or AI ranking never renders (or reorders panels) for
+        // the new tenant — recs in particular is only refetched by #todo/Detail.
+        useStore.getState().set({ recs: null, nextActions: null, caseNextActions: null })
+        syncChatScope()
+      },
+      signOut: () => {
+        useStore.getState().set({ recs: null, nextActions: null, caseNextActions: null })
+        resetChatState()
+      },
+    })
   }, [set])
 
   // The connector-builder thread is only live inside the explorer.
@@ -67,6 +80,9 @@ export const App = () => {
       if (WORKFLOW_SCOPED_VIEWS.has(route.view) && !AUTH.workflow() && m.workflowId) {
         AUTH.setWorkflow(m.workflowId)
       }
+      // Re-resolve the acting lane on every tenant (re)load: the mapping and
+      // the per-workflow pick both scope to the now-known workflow.
+      applyDomainRole(m)
       set({ me: m, orgs: m.organizations || [], booting: false })
     })
 

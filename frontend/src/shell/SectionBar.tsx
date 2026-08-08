@@ -10,7 +10,7 @@ const TABS: [string, string, string][] = [
 
 const isActive = (href: string, view: string): boolean => {
   if (href === "#") {
-    return ["dashboard", "detail", "flow", "rows", "overview"].includes(view)
+    return ["dashboard", "detail", "flow", "rows", "todo", "overview"].includes(view)
   }
   if (href === "#model") {
     return view === "model"

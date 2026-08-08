@@ -2,7 +2,7 @@ import { create } from "zustand"
 import type { Me } from "./api.ts"
 import { createOv } from "./ovquery.ts"
 import type { OvState } from "./ovquery.ts"
-import type { CaseRow, ChatInfo, ChatMessage, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, TestResult, VerifyResult } from "./types.ts"
+import type { CaseRow, ChatInfo, ChatMessage, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, NextAction, NextActionsResult, RecommendationsView, TestResult, VerifyResult } from "./types.ts"
 import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null
@@ -19,6 +19,14 @@ type State = {
   meta: Meta
   flow: FlowAggregate | null
   flowRows: FlowRows | null
+  // The workflow-wide frontier (all cases) — the To do tab / Flow panel / List
+  // columns read this; refreshed by the same stamp-gated Overview poll.
+  nextActions: NextActionsResult | null
+  // The open case's own frontier — the Detail "Next" banner + ready rings.
+  caseNextActions: NextAction[] | null
+  // Stored AI ranking of the frontier + its freshness; never auto-generated.
+  recs: RecommendationsView | null
+  recsBusy: boolean
 
   instance: Instance | null
   prevInstance: Instance | null
@@ -91,6 +99,10 @@ export const useStore = create<State>((set) => ({
   meta: DEFAULT_META,
   flow: null,
   flowRows: null,
+  nextActions: null,
+  caseNextActions: null,
+  recs: null,
+  recsBusy: false,
 
   instance: null,
   prevInstance: null,

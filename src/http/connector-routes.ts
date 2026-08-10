@@ -25,7 +25,7 @@ import {
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
 import { readSidecar, writeSidecar } from "../packs/sidecar.js";
-import { SCHEDULE_MIN_MINUTES } from "../packs/scheduler.js";
+import { SCHEDULE_MIN_MINUTES, nextRunAt } from "../packs/scheduler.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
 import { buildConnectorExport } from "../packs/connector/export.js";
 import { parseConnectorExport, importConnectors } from "../packs/connector/import.js";
@@ -71,6 +71,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           lastPullAt: cfg.lastPullAt ?? null,
           lastPullDurationMs: cfg.lastPullDurationMs ?? null,
           schedule: cfg.schedule ?? null,
+          nextRunAt: nextRunAt(cfg),
           rowCount,
           owned: !!cfg.workflowId, // false = legacy, adopted by model membership
           dateRoles: info?.dateRoles ?? null,

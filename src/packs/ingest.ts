@@ -84,7 +84,7 @@ export function isPullInFlight(adapterId: string): boolean {
 export async function ingestPull(adapterId: string, opts: { limit?: number | null; derive?: boolean } = {}): Promise<IngestSummary> {
   if (!getAdapter(adapterId)) throw new Error(`unknown adapter: ${adapterId}`); // pre-run: no adapter identity to journal against
   if (inFlight.has(adapterId)) {
-    throw new DomainError(`a pull is already running for connector "${adapterId}" — wait for it to finish`);
+    throw new DomainError(`a pull is already running for "${adapterId}" — wait for it to finish`);
   }
   inFlight.add(adapterId);
   try {

@@ -327,6 +327,7 @@ export type Connector = {
   lastPullAt?: string | null
   lastPullDurationMs?: number | null
   schedule?: ConnectorSchedule | null
+  nextRunAt?: string | null
   owned?: boolean
   summary?: string | null
   notes?: ConnectorNote[]

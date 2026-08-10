@@ -17,9 +17,10 @@ const MAX_BACKOFF_FACTOR = 16;
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
 
-function backoffFactor(failures: number): number {
-  if (failures <= 0) return 1;
-  return Math.min(MAX_BACKOFF_FACTOR, 2 ** failures);
+function backoffFactor(failures: unknown): number {
+  const n = Number(failures);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(MAX_BACKOFF_FACTOR, 2 ** Math.floor(n));
 }
 
 export function isDue(cfg: AdapterConfig, nowMs: number): boolean {
@@ -32,8 +33,17 @@ export function isDue(cfg: AdapterConfig, nowMs: number): boolean {
   if (!last) return true;
   const lastMs = Date.parse(last);
   if (!Number.isFinite(lastMs)) return true;
-  const waitMs = s.everyMinutes * 60_000 * backoffFactor(s.failures ?? 0);
+  const waitMs = s.everyMinutes * 60_000 * backoffFactor(s.failures);
   return nowMs - lastMs >= waitMs;
+}
+
+export function nextRunAt(cfg: AdapterConfig): string | null {
+  const s = cfg.schedule;
+  if (!s?.enabled || !Number.isFinite(s.everyMinutes) || s.everyMinutes < SCHEDULE_MIN_MINUTES) return null;
+  const last = s.lastAttemptAt ?? cfg.lastPullAt;
+  const lastMs = last ? Date.parse(last) : NaN;
+  if (!Number.isFinite(lastMs)) return new Date().toISOString();
+  return new Date(lastMs + s.everyMinutes * 60_000 * backoffFactor(s.failures)).toISOString();
 }
 
 function patchSchedule(id: string, patch: Partial<AdapterConfig["schedule"] & object>): void {

@@ -33,15 +33,7 @@ const fmtInterval = (m: number): string => {
 }
 
 const nextRunLabel = (c: Connector): string | null => {
-  const s = c.schedule
-  if (!s?.enabled) {
-    return null
-  }
-  const last = s.lastAttemptAt || c.lastPullAt
-  if (!last) {
-    return "due now"
-  }
-  const at = Date.parse(last) + s.everyMinutes * 60_000
+  const at = c.nextRunAt ? Date.parse(c.nextRunAt) : NaN
   if (!Number.isFinite(at)) {
     return null
   }

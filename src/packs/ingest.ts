@@ -21,6 +21,7 @@ import { PLATFORM_TIMESTAMP_COLS } from "./connector/codegen.js";
 import { applyFieldMap } from "./types.js";
 import { appendNote } from "./connector/journal.js";
 import { readSidecar, writeSidecar } from "./sidecar.js";
+import { DomainError } from "../errors.js";
 
 export interface IngestSummary {
   adapterId: string;
@@ -74,9 +75,27 @@ function stampLastPull(id: string, at: string, durationMs: number): void {
   writeSidecar({ ...cfg, lastPullAt: at, lastPullDurationMs: durationMs });
 }
 
+const inFlight = new Set<string>();
+
+export function isPullInFlight(adapterId: string): boolean {
+  return inFlight.has(adapterId);
+}
+
 export async function ingestPull(adapterId: string, opts: { limit?: number | null; derive?: boolean } = {}): Promise<IngestSummary> {
-  const adapter = getAdapter(adapterId);
-  if (!adapter) throw new Error(`unknown adapter: ${adapterId}`); // pre-run: no adapter identity to journal against
+  if (!getAdapter(adapterId)) throw new Error(`unknown adapter: ${adapterId}`); // pre-run: no adapter identity to journal against
+  if (inFlight.has(adapterId)) {
+    throw new DomainError(`a pull is already running for "${adapterId}" — wait for it to finish`);
+  }
+  inFlight.add(adapterId);
+  try {
+    return await runIngestPull(adapterId, opts);
+  } finally {
+    inFlight.delete(adapterId);
+  }
+}
+
+async function runIngestPull(adapterId: string, opts: { limit?: number | null; derive?: boolean }): Promise<IngestSummary> {
+  const adapter = getAdapter(adapterId)!;
   const t0 = Date.now();
   let durationMs = 0;
   let fetchMs = 0;

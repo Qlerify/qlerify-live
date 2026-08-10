@@ -73,6 +73,15 @@ export interface Pack {
 /** The wizard's forward progress for an adapter (persisted in the sidecar). */
 type AdapterPhase = "draft" | "introspected" | "mapped" | "built" | "tested" | "populated";
 
+export interface AdapterSchedule {
+  enabled: boolean;
+  everyMinutes: number;
+  failures?: number;
+  /** Every attempt, unlike lastPullAt which only advances on success. */
+  lastAttemptAt?: string;
+  disabledReason?: string;
+}
+
 /** Persisted adapter config — `.qlerify/adapters/<id>.json`. `credentialsRef` is a
  * KEY (env var / vault handle), NEVER the secret itself. */
 export interface AdapterConfig {
@@ -95,6 +104,7 @@ export interface AdapterConfig {
   lastPullAt?: string;
   /** Wall-clock ms the last successful pull took (written with lastPullAt). */
   lastPullDurationMs?: number;
+  schedule?: AdapterSchedule;
   fixturesDir?: string;
   // --- AI-authored adapter (Part 2.3, Slice 2) ---
   /** Configured source endpoint (passed to the body as ctx.endpoint). */

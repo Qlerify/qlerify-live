@@ -15,6 +15,7 @@ import {
 import type { Connector } from "../../lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { CodeEditor } from "./CodeEditor.tsx"
+import { SchedulePanel } from "./SchedulePanel.tsx"
 
 const Chip = ({ label, value }: { label: string; value: string }) => (
   <div className="text-[11px]">
@@ -130,6 +131,8 @@ const DetailsBody = ({ c }: { c: Connector }) => {
       </div>
 
       <Diagnostics c={c} />
+
+      <SchedulePanel c={c} />
 
       <div className="mt-5 rounded-lg border border-stone-200 p-4">
         <div className="text-sm font-medium text-stone-800">Re-point</div>

@@ -1,8 +1,26 @@
 import { create } from "zustand"
 import type { Me } from "./api.ts"
-import { createOv } from "./ovquery.ts"
-import type { OvState } from "./ovquery.ts"
-import type { CaseRow, ChatInfo, ChatMessage, ConnectorsData, EventDef, ExpState, FlowAggregate, FlowRows, Instance, LogEntry, Meta, ModelStatus, NextAction, NextActionsResult, RecommendationsView, TestResult, VerifyResult } from "./types.ts"
+import { createOv } from "./ovState.ts"
+import type { OvState } from "./ovState.ts"
+import type {
+  CaseRow,
+  ChatInfo,
+  ChatMessage,
+  ConnectorsData,
+  EventDef,
+  ExpState,
+  FlowAggregate,
+  FlowRows,
+  Instance,
+  LogEntry,
+  Meta,
+  ModelStatus,
+  NextAction,
+  NextActionsResult,
+  RecommendationsView,
+  TestResult,
+  VerifyResult
+} from "./types.ts"
 import { DEFAULT_META, EMPTY_EXP } from "./types.ts"
 
 type Toast = { ok: boolean; text: string } | null

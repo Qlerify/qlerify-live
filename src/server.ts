@@ -9,6 +9,7 @@ import { existsSync, readdirSync } from "node:fs";
 
 import { registerRoutes } from "./http/routes.js";
 import { loadPacks } from "./packs/loadPacks.js";
+import { startConnectorScheduler } from "./packs/scheduler.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
@@ -162,6 +163,13 @@ export async function buildServer() {
     app.log.info(`loaded ${n} adapter(s) from packs`);
   } catch (err) {
     app.log.warn({ err }, "pack loading skipped");
+  }
+
+  // After packs, so the adapter registry is populated.
+  try {
+    startConnectorScheduler(app.log);
+  } catch (err) {
+    app.log.warn({ err }, "connector scheduler not started");
   }
 
   // Claim the existing transactional data for the currently-loaded model if it

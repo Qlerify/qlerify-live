@@ -267,6 +267,28 @@ export const connImportFile = async (file: File) => {
   }
 }
 
+// Enable/disable unattended polling. The server floors the interval and clears
+// the failure streak, so re-enabling after a fix is one action.
+export const connSaveSchedule = async (enabled: boolean, everyMinutes: number) => {
+  const s = useStore.getState()
+  const id = s.connSel
+  if (!id || s.connBusy) {
+    return
+  }
+  s.set({ connBusy: true })
+  try {
+    await api(`/api/connectors/${encodeURIComponent(id)}/schedule`, {
+      method: "POST",
+      body: JSON.stringify({ enabled, everyMinutes }),
+    })
+    await loadConnectors()
+  } catch (e) {
+    alert("Could not save the schedule: " + (e as Error).message)
+  } finally {
+    useStore.getState().set({ connBusy: false })
+  }
+}
+
 export const fetchConnectorCode = (id: string) => api<{ code?: string }>(`/api/connectors/${encodeURIComponent(id)}/code`)
 
 export const saveConnectorCode = (id: string, code: string) =>

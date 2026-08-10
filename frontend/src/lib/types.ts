@@ -302,6 +302,14 @@ export const EMPTY_EXP: ExpState = {
   rowEventsBusy: false,
 }
 
+export type ConnectorSchedule = {
+  enabled: boolean
+  everyMinutes: number
+  failures?: number
+  lastAttemptAt?: string | null
+  disabledReason?: string | null
+}
+
 export type ConnectorNote = { kind: string; text: string; at: string; durationMs?: number | null }
 
 export type Connector = {
@@ -318,6 +326,7 @@ export type Connector = {
   endpoint?: string | null
   lastPullAt?: string | null
   lastPullDurationMs?: number | null
+  schedule?: ConnectorSchedule | null
   owned?: boolean
   summary?: string | null
   notes?: ConnectorNote[]

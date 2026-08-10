@@ -24,7 +24,8 @@ import {
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
-import { writeSidecar } from "../packs/sidecar.js";
+import { readSidecar, writeSidecar } from "../packs/sidecar.js";
+import { SCHEDULE_MIN_MINUTES } from "../packs/scheduler.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
 import { buildConnectorExport } from "../packs/connector/export.js";
 import { parseConnectorExport, importConnectors } from "../packs/connector/import.js";
@@ -69,6 +70,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           notes: (doc?.notes ?? []).slice(-6),
           lastPullAt: cfg.lastPullAt ?? null,
           lastPullDurationMs: cfg.lastPullDurationMs ?? null,
+          schedule: cfg.schedule ?? null,
           rowCount,
           owned: !!cfg.workflowId, // false = legacy, adopted by model membership
           dateRoles: info?.dateRoles ?? null,
@@ -238,6 +240,46 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       if (typeof code !== "string") return reply.code(400).send({ error: "NO_CODE", message: "code (string) required" });
       const result = await saveConnectorCode(id, code);
       return { id, ...result };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // `connector.build` because a schedule only changes WHEN already-authorised
+  // code runs.
+  app.post("/api/connectors/:id/schedule", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+
+      const body = (req.body ?? {}) as { enabled?: unknown; everyMinutes?: unknown };
+      const enabled = body.enabled === true;
+      const raw = Number(body.everyMinutes);
+      const submitted = Number.isFinite(raw) && raw >= SCHEDULE_MIN_MINUTES ? Math.floor(raw) : null;
+      if (enabled && submitted == null) {
+        return reply.code(400).send({
+          error: "BAD_INTERVAL",
+          message: `everyMinutes must be a number >= ${SCHEDULE_MIN_MINUTES}`,
+        });
+      }
+      const cur = readSidecar(id);
+      if (!cur) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no sidecar for "${id}"` });
+      const everyMinutes = submitted ?? cur.schedule?.everyMinutes ?? SCHEDULE_MIN_MINUTES;
+      const schedule = { enabled, everyMinutes, failures: 0, lastAttemptAt: cur.schedule?.lastAttemptAt };
+      writeSidecar({ ...cur, schedule });
+
+      const wasEnabled = cur.schedule?.enabled ?? false;
+      const wasEvery = cur.schedule?.everyMinutes;
+      if (enabled !== wasEnabled) {
+        appendNote(id, "note", enabled ? `Polling enabled — every ${everyMinutes} min.` : "Polling disabled.");
+      } else if (enabled && everyMinutes !== wasEvery) {
+        appendNote(id, "note", `Polling interval changed to every ${everyMinutes} min.`);
+      }
+      return { id, schedule };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

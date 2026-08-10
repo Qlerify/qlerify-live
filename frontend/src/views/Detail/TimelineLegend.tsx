@@ -1,6 +1,6 @@
-import { useStore } from "../../lib/store.ts"
-import { EST_TIME_TITLE, bizTimeEstimated } from "../../lib/time.ts"
-import { ProvChip } from "../../components/ProvChip.tsx"
+import { ProvChip } from "@/components/ProvChip.tsx"
+import { useStore } from "@/lib/store.ts"
+import { EST_TIME_TITLE, bizTimeEstimated } from "@/lib/time.ts"
 
 const LastEvent = () => {
   const log = useStore((s) => s.log)

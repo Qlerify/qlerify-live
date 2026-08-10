@@ -1,8 +1,8 @@
 import { useState } from "react"
-import { AUTH, api } from "../../lib/api.ts"
-import { useStore } from "../../lib/store.ts"
-import { RoleChip, Table } from "../../components/Table.tsx"
-import type { AdminData } from "../../lib/types.ts"
+import { RoleChip, Table } from "@/components/Table.tsx"
+import { AUTH, api } from "@/lib/api.ts"
+import { useStore } from "@/lib/store.ts"
+import type { AdminData } from "@/lib/types.ts"
 
 type TabProps = { admin: AdminData; reload: () => Promise<void> }
 

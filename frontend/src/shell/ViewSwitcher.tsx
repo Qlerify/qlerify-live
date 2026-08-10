@@ -1,5 +1,5 @@
-import { useStore } from "../lib/store.ts"
-import { ovQuerySuffix } from "../lib/ovquery.ts"
+import { useStore } from "@/lib/store.ts"
+import { ovQuerySuffix } from "@/lib/ovquery.ts"
 
 const SEGMENTS: [string, string, string][] = [
   ["#flow", "⑂ Workflow", "All cases merged onto one flow, with a counter on each event"],

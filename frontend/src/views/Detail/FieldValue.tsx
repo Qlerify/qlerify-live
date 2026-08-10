@@ -1,4 +1,4 @@
-import { Pill } from "../../components/Pill.tsx"
+import { Pill } from "@/components/Pill.tsx"
 
 export const FieldValue = ({ name, value }: { name: string; value: unknown }) => {
   if (value == null || value === "") {

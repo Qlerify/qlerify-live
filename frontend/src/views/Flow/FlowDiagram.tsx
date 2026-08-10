@@ -1,12 +1,12 @@
-import { computeFlowLayout, flowEdgeMid, laneMetrics, FLOW } from "../../lib/flowLayout.ts"
-import type { CohortStats, Period } from "../../lib/cohort.ts"
-import { drillToList } from "../../lib/drill.ts"
-import { cycleFilter, ov, patchOv, stepFiredFilter, stepNotFiredFilter } from "../../lib/ovquery.ts"
-import type { EventDef, Meta } from "../../lib/types.ts"
-import { EventCard } from "../../components/EventCard.tsx"
-import { FlowEdges } from "../../components/FlowEdges.tsx"
-import { CoverageBadge, coverageTone } from "../../components/CoverageBadge.tsx"
-import { PaceBar } from "../../components/PaceBar.tsx"
+import { EventCard } from "@/components/EventCard.tsx"
+import { FlowEdges } from "@/components/FlowEdges.tsx"
+import { CoverageBadge, coverageTone } from "@/components/CoverageBadge.tsx"
+import { PaceBar } from "@/components/PaceBar.tsx"
+import { computeFlowLayout, flowEdgeMid, laneMetrics, FLOW } from "@/lib/flowLayout.ts"
+import type { CohortStats, Period } from "@/lib/cohort.ts"
+import { drillToList } from "@/lib/drill.ts"
+import { cycleFilter, ov, patchOv, stepFiredFilter, stepNotFiredFilter } from "@/lib/ovquery.ts"
+import type { EventDef, Meta } from "@/lib/types.ts"
 
 type Props = {
   events: EventDef[]

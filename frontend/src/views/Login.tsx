@@ -1,8 +1,8 @@
 import { useState } from "react"
-import { AUTH, api } from "../lib/api.ts"
-import { navigate } from "../lib/router.ts"
-import { QlerifyMark } from "../components/Icons.tsx"
-import { useStore } from "../lib/store.ts"
+import { QlerifyMark } from "@/components/Icons.tsx"
+import { AUTH, api } from "@/lib/api.ts"
+import { navigate } from "@/lib/router.ts"
+import { useStore } from "@/lib/store.ts"
 
 export const Login = () => {
   const [subject, setSubject] = useState("")

@@ -1,4 +1,4 @@
-import { STATUS_TONE } from "../lib/tone.ts"
+import { STATUS_TONE } from "@/lib/tone.ts"
 
 type Props = {
   text: string

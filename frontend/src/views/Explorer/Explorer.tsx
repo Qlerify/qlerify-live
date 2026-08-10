@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react"
-import { useRoute } from "../../lib/router.ts"
-import { useStore } from "../../lib/store.ts"
+import { useRoute } from "@/lib/router.ts"
+import { useStore } from "@/lib/store.ts"
 import {
   adaptersForEntity,
   clearRows,
@@ -14,14 +14,13 @@ import {
   reimportAll,
   selectEntity,
   selectSystem,
-} from "../../lib/explorerData.ts"
-import type { ColState } from "../../lib/explorerData.ts"
-import { activateConnectorChat, openChat } from "../../lib/chatData.ts"
-import type { ExpState, ExpSystem, ExpTable } from "../../lib/types.ts"
+} from "@/lib/explorerData.ts"
+import type { ColState } from "@/lib/explorerData.ts"
+import { activateConnectorChat, openChat } from "@/lib/chatData.ts"
+import type { ExpState, ExpSystem, ExpTable } from "@/lib/types.ts"
 import { TableGlyph } from "./TableGlyph.tsx"
 import { RowEventsCell } from "./RowEvents.tsx"
 import { FiltersPanel } from "./FiltersPanel.tsx"
-
 
 const COL_STYLE: Record<ColState, { text: string; dot: string; title: string }> = {
   green: { text: "text-emerald-700", dot: "bg-emerald-500", title: "In the model and the data" },

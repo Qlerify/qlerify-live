@@ -1,5 +1,5 @@
-import { MiniStat, PanelShell } from "../../components/PanelShell.tsx"
-import type { OrgPortfolio } from "../../lib/types.ts"
+import { MiniStat, PanelShell } from "@/components/PanelShell.tsx"
+import type { OrgPortfolio } from "@/lib/types.ts"
 
 type Props = {
   o: OrgPortfolio

@@ -1,7 +1,7 @@
-import { GEN_HIDDEN, genFieldChanged, genParseRows, genPrevCollection, genRowChanged, shortId } from "../../lib/asOf.ts"
-import type { DiffCtx } from "../../lib/asOf.ts"
-import { prettyEntity } from "../../lib/format.ts"
-import type { Row } from "../../lib/types.ts"
+import { GEN_HIDDEN, genFieldChanged, genParseRows, genPrevCollection, genRowChanged, shortId } from "@/lib/asOf.ts"
+import type { DiffCtx } from "@/lib/asOf.ts"
+import { prettyEntity } from "@/lib/format.ts"
+import type { Row } from "@/lib/types.ts"
 import { FieldValue } from "./FieldValue.tsx"
 import { EmbeddedTable } from "./EmbeddedTable.tsx"
 

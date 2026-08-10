@@ -1,6 +1,6 @@
 import { useState } from "react"
-import { useStore } from "../../lib/store.ts"
-import { applyWorkflowModel } from "../../lib/modelData.ts"
+import { useStore } from "@/lib/store.ts"
+import { applyWorkflowModel } from "@/lib/modelData.ts"
 
 export const ReplaceModelForm = () => {
   const { projModelOpen, projModelBusy, projModelErr, set } = useStore()

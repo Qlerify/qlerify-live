@@ -1,5 +1,5 @@
-import { GEN_HIDDEN } from "../../lib/asOf.ts"
-import type { Row } from "../../lib/types.ts"
+import { GEN_HIDDEN } from "@/lib/asOf.ts"
+import type { Row } from "@/lib/types.ts"
 import { FieldValue } from "./FieldValue.tsx"
 
 type Props = {

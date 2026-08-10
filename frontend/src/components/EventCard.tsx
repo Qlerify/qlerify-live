@@ -1,6 +1,6 @@
-import { provHatch, provModeForBC } from "../lib/prov.ts"
-import { PHASE_TONE } from "../lib/tone.ts"
-import type { EventDef, Meta } from "../lib/types.ts"
+import { provHatch, provModeForBC } from "@/lib/prov.ts"
+import { PHASE_TONE } from "@/lib/tone.ts"
+import type { EventDef, Meta } from "@/lib/types.ts"
 import { ProvChip } from "./ProvChip.tsx"
 
 type Props = {

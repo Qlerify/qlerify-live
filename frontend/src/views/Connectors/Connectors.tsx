@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react"
-import { useRoute } from "../../lib/router.ts"
-import { useStore } from "../../lib/store.ts"
-import { connExportAll, connImportFile, connectorName, loadConnectors } from "../../lib/connectorsData.ts"
-import type { Connector } from "../../lib/types.ts"
+import { useRoute } from "@/lib/router.ts"
+import { useStore } from "@/lib/store.ts"
+import { connExportAll, connImportFile, connectorName, loadConnectors } from "@/lib/connectorsData.ts"
+import type { Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { ConnectorDetail } from "./ConnectorDetail.tsx"
 

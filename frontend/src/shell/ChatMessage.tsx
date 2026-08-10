@@ -1,5 +1,5 @@
-import { Markdown } from "../components/Markdown.tsx"
-import type { ChatBlock, ChatMessage as Msg } from "../lib/types.ts"
+import { Markdown } from "@/components/Markdown.tsx"
+import type { ChatBlock, ChatMessage as Msg } from "@/lib/types.ts"
 
 const WRITE_TOOLS = new Set([
   "next_step",

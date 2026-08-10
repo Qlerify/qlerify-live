@@ -1,4 +1,4 @@
-import type { ProvMode } from "../lib/types.ts"
+import type { ProvMode } from "@/lib/types.ts"
 
 // Colourblind-safe: the dashed border + 3-letter label distinguish modes without
 // relying on hue alone.

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react"
-import { loadMonaco } from "../../lib/monaco.ts"
-import { connectorName, fetchConnectorCode, loadConnectors, saveConnectorCode } from "../../lib/connectorsData.ts"
-import { useStore } from "../../lib/store.ts"
-import type { Connector } from "../../lib/types.ts"
+import { loadMonaco } from "@/lib/monaco.ts"
+import { connectorName, fetchConnectorCode, loadConnectors, saveConnectorCode } from "@/lib/connectorsData.ts"
+import { useStore } from "@/lib/store.ts"
+import type { Connector } from "@/lib/types.ts"
 
 type Editor = { getValue: () => string; setValue: (v: string) => void; dispose: () => void }
 

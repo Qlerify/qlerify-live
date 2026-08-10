@@ -5,13 +5,13 @@
 // a same-birthday cohort segments are directly comparable — a pale cell is a
 // pace problem owned by one team. Every cell drills to its worst-first worklist.
 import { useState } from "react"
-import { AUTH } from "../../lib/api.ts"
-import { attrText, prettyEntity } from "../../lib/format.ts"
-import { furthestIndex } from "../../lib/cohort.ts"
-import { attrFieldKeys, stepNotFiredFilter } from "../../lib/ovquery.ts"
-import type { CaseRecord, OvFilter } from "../../lib/ovquery.ts"
-import { drillToList } from "../../lib/drill.ts"
-import type { EventDef } from "../../lib/types.ts"
+import { AUTH } from "@/lib/api.ts"
+import { attrText, prettyEntity } from "@/lib/format.ts"
+import { furthestIndex } from "@/lib/cohort.ts"
+import { attrFieldKeys, stepNotFiredFilter } from "@/lib/ovquery.ts"
+import type { CaseRecord, OvFilter } from "@/lib/ovquery.ts"
+import { drillToList } from "@/lib/drill.ts"
+import type { EventDef } from "@/lib/types.ts"
 
 type Props = {
   records: CaseRecord[]

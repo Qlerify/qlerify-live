@@ -1,8 +1,8 @@
 import { useState } from "react"
-import { AUTH, api } from "../../lib/api.ts"
-import { navigate } from "../../lib/router.ts"
-import { useStore, currentOrgName } from "../../lib/store.ts"
-import type { AdminData } from "../../lib/types.ts"
+import { AUTH, api } from "@/lib/api.ts"
+import { navigate } from "@/lib/router.ts"
+import { useStore, currentOrgName } from "@/lib/store.ts"
+import type { AdminData } from "@/lib/types.ts"
 import { AnthropicCard } from "./AnthropicCard.tsx"
 import { QlerifyCard } from "./QlerifyCard.tsx"
 

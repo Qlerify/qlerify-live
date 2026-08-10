@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react"
-import { api } from "../lib/api.ts"
-import { useStore } from "../lib/store.ts"
-import type { FlowAggregate } from "../lib/types.ts"
-import { Loading } from "../components/Loading.tsx"
+import { Loading } from "@/components/Loading.tsx"
+import { api } from "@/lib/api.ts"
+import { useStore } from "@/lib/store.ts"
+import type { FlowAggregate } from "@/lib/types.ts"
 import { Dashboard } from "./Dashboard.tsx"
 import { Flow } from "./Flow/Flow.tsx"
 

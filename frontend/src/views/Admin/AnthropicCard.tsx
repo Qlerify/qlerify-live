@@ -1,7 +1,7 @@
 import { useState } from "react"
-import { api } from "../../lib/api.ts"
-import { ANTHROPIC_MODELS, BEDROCK_MODEL_SUGGESTIONS, BEDROCK_REGIONS } from "../../lib/adminData.ts"
-import type { LlmConfig } from "../../lib/types.ts"
+import { api } from "@/lib/api.ts"
+import { ANTHROPIC_MODELS, BEDROCK_MODEL_SUGGESTIONS, BEDROCK_REGIONS } from "@/lib/adminData.ts"
+import type { LlmConfig } from "@/lib/types.ts"
 
 const providerLabel = (p?: string) => (p === "bedrock" ? "AWS Bedrock" : p === "anthropic" ? "Anthropic API" : "—")
 

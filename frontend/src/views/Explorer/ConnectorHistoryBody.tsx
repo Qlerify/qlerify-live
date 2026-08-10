@@ -1,8 +1,8 @@
-import { NOTE_BADGE, connectorName } from "../../lib/connectorsData.ts"
-import { kindOf } from "../../lib/explorerData.ts"
-import { formatVersionDate } from "../../lib/modelData.ts"
-import { useStore } from "../../lib/store.ts"
-import type { ExpAdapter, ExpState } from "../../lib/types.ts"
+import { NOTE_BADGE, connectorName } from "@/lib/connectorsData.ts"
+import { kindOf } from "@/lib/explorerData.ts"
+import { formatVersionDate } from "@/lib/modelData.ts"
+import { useStore } from "@/lib/store.ts"
+import type { ExpAdapter, ExpState } from "@/lib/types.ts"
 
 // Connector-scoped management (re-point, timestamps, full history, delete) lives
 // on the Connectors tab — its single home. This card deep-links there rather than

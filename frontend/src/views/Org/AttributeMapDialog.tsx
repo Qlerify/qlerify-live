@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { api } from "../../lib/api.ts"
-import type { OrgMapping } from "../../lib/types.ts"
+import { api } from "@/lib/api.ts"
+import type { OrgMapping } from "@/lib/types.ts"
 
 type Props = {
   onClose: () => void

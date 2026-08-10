@@ -1,5 +1,5 @@
-import { flowEdgePath } from "../lib/flowLayout.ts"
-import type { FlowLayout, Geom } from "../lib/flowLayout.ts"
+import { flowEdgePath } from "@/lib/flowLayout.ts"
+import type { FlowLayout, Geom } from "@/lib/flowLayout.ts"
 
 type Props = {
   layout: FlowLayout

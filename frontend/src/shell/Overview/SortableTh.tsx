@@ -1,5 +1,5 @@
-import { cycleSort } from "../../lib/ovquery.ts"
-import { useStore } from "../../lib/store.ts"
+import { cycleSort } from "@/lib/ovquery.ts"
+import { useStore } from "@/lib/store.ts"
 
 // Click = sort by this column (toggling direction); shift-click = stack it as an
 // extra level.

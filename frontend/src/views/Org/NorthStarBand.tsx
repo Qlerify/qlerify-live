@@ -1,5 +1,5 @@
 import type { ReactNode } from "react"
-import type { OrgPortfolio } from "../../lib/types.ts"
+import type { OrgPortfolio } from "@/lib/types.ts"
 
 const Tile = ({ label, big, sub, tone, spark }: { label: string; big: ReactNode; sub?: string; tone?: string; spark?: ReactNode }) => (
   <div className="rounded-lg border border-stone-200 bg-white p-4">

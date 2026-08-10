@@ -1,5 +1,5 @@
-import { toggleChat } from "../lib/chatData.ts"
-import { useStore } from "../lib/store.ts"
+import { toggleChat } from "@/lib/chatData.ts"
+import { useStore } from "@/lib/store.ts"
 
 export const AssistantButton = () => {
   const chatOpen = useStore((s) => s.chatOpen)

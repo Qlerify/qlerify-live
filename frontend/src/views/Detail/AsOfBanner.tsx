@@ -1,4 +1,4 @@
-import { useStore } from "../../lib/store.ts"
+import { useStore } from "@/lib/store.ts"
 
 export const AsOfBanner = () => {
   const { events, selectedStep, set } = useStore()

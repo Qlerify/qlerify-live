@@ -1,4 +1,4 @@
-import { useStore } from "../lib/store.ts"
+import { useStore } from "@/lib/store.ts"
 
 export const RegistryBanner = () => {
   const registryError = useStore((s) => s.registryError)

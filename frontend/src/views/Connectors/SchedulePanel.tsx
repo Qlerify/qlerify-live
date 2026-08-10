@@ -1,8 +1,8 @@
 import { useState } from "react"
-import { connSaveSchedule } from "../../lib/connectorsData.ts"
-import { formatVersionDate } from "../../lib/modelData.ts"
-import { useStore } from "../../lib/store.ts"
-import type { Connector } from "../../lib/types.ts"
+import { connSaveSchedule } from "@/lib/connectorsData.ts"
+import { formatVersionDate } from "@/lib/modelData.ts"
+import { useStore } from "@/lib/store.ts"
+import type { Connector } from "@/lib/types.ts"
 
 const MIN_MINUTES = 5
 

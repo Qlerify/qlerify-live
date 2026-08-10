@@ -1,7 +1,7 @@
+import { showOverlay, hideOverlay } from "@/components/Overlay.tsx"
 import { api } from "./api.ts"
 import { formatDuration } from "./format.ts"
 import { useStore } from "./store.ts"
-import { showOverlay, hideOverlay } from "../components/Overlay.tsx"
 import type { ExpAdapter, ExpHealth, ExpRowEvent, ExpState, ExpTable, Row } from "./types.ts"
 
 const exp = () => useStore.getState().exp

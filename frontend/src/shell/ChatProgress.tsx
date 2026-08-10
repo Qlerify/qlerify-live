@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { stopChat } from "../lib/chatData.ts"
-import { useStore } from "../lib/store.ts"
+import { stopChat } from "@/lib/chatData.ts"
+import { useStore } from "@/lib/store.ts"
 
 // The live line under the messages while a turn runs: current activity (model
 // thinking vs a named tool), step/tool-call counts once there's more than one,

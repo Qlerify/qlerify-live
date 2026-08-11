@@ -10,12 +10,37 @@ const walk = (dir: string): string[] =>
     return statSync(p).isDirectory() ? walk(p) : /\.tsx?$/.test(p) ? [p] : [];
   });
 
-// `import type` / `export type` statements are erased by verbatimModuleSyntax,
-// so they cannot cause an initialisation-order failure at runtime.
-const runtimeSpecifiers = (text: string): string[] =>
-  [...text.matchAll(/^(?:import|export)\s+(?!type\s)[^\n]*?from\s+"([^"]+)"|^import\s+"([^"]+)"/gm)]
-    .map((m) => m[1] ?? m[2])
-    .filter((s): s is string => Boolean(s));
+// `import type` / `export type` are erased by verbatimModuleSyntax — not runtime edges.
+const runtimeSpecifiers = (text: string): string[] => {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!/^\s*(?:import|export)\b/.test(line) || /^\s*(?:import|export)\s+type\b/.test(line)) {
+      continue;
+    }
+    const here = line.match(/from\s+"([^"]+)"/) ?? line.match(/^\s*import\s+"([^"]+)"/);
+    if (here) {
+      out.push(here[1]!);
+      continue;
+    }
+    if (!/^\s*(?:import|export)\s*\{[^}]*$/.test(line)) {
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j++) {
+      const closing = lines[j]!.match(/^\s*}\s*from\s+"([^"]+)"/);
+      if (closing) {
+        out.push(closing[1]!);
+        i = j;
+        break;
+      }
+      if (/^\s*(?:import|export)\b/.test(lines[j]!)) {
+        break;
+      }
+    }
+  }
+  return out;
+};
 
 const resolveSpec = (fromFile: string, spec: string): string | null => {
   let target: string | null = null;
@@ -56,7 +81,9 @@ const findCycles = (): string[][] => {
   };
 
   for (const f of files) {
-    if (!state.has(f)) { visit(f); }
+    if (!state.has(f)) {
+      visit(f);
+    }
   }
   return cycles;
 };

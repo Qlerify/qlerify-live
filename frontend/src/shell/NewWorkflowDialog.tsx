@@ -1,10 +1,10 @@
 import { useState } from "react"
-import { AUTH, api } from "@/lib/api.ts"
+import { AUTH, api, modellerPlaceholder } from "@/lib/api.ts"
 import { navigate } from "@/lib/router.ts"
 import { useStore } from "@/lib/store.ts"
 
 export const NewWorkflowDialog = () => {
-  const { newWfOpen, newWfBusy, newWfErr, set } = useStore()
+  const { newWfOpen, newWfBusy, newWfErr, me, set } = useStore()
   const [name, setName] = useState("")
   const [url, setUrl] = useState("")
   const [text, setText] = useState("")
@@ -95,7 +95,7 @@ export const NewWorkflowDialog = () => {
               }
             }}
             className="w-full rounded-md border border-stone-300 px-3 py-2 text-sm"
-            placeholder="https://app.qlerify.com/workflow/<projectId>/<workflowId>"
+            placeholder={modellerPlaceholder(me)}
           />
           <div className="text-xs text-stone-500 mt-1">
             Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.

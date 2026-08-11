@@ -228,6 +228,7 @@ All configuration is via environment variables (see `.env.example`). For **local
 | `PLATFORM_ENCRYPTION_KEY` | auto | 32-byte hex encrypting per-org BYOK secrets at rest — **auto-generated** by setup. **Do not change once set: rotating it invalidates stored per-org keys.** |
 | `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify key for "Reload from link"; per-org keys set in Org Admin override it. In dev it falls back to `~/.claude.json`. |
 | `QLERIFY_MCP_URL` | rare | Qlerify Modeller endpoint. Defaults to `https://mcp.qlerify.com`; set only to point at a white-labelled Modeller. |
+| `QLERIFY_APP_URL` | rare | Modeller a pasted model **link** must be on (the link-side twin of `QLERIFY_MCP_URL`). Defaults to `https://app.qlerify.com`; **replaces** the default rather than adding to it. Must include the scheme (`http://localhost:8080`, not `localhost:8080`) — an invalid value is ignored with a warning. Set both when pointing at a local or white-labelled Modeller. |
 | `CHAT_MODEL` | optional | Override the default Claude model (`claude-sonnet-4-6`) |
 | `CHAT_EFFORT` | optional | Reasoning effort: `low` / `medium` (default) / `high` |
 | `NODE_ENV` | prod | `production` **disables the forgeable dev auth shim** — required for real auth |

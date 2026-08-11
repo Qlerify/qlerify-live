@@ -120,7 +120,7 @@ export interface OntologyEvent {
 
 export interface Ontology {
   version: number;
-  /** UI title for the workflow: overlay.title, else the primary bounded context. */
+  /** UI title for the workflow: overlay.title, else the export's name, else the primary bounded context. */
   title: string;
   /** The primary bounded context (the export's root context). */
   primaryBoundedContext: string;
@@ -209,6 +209,7 @@ interface RawContext {
 
 interface RawWorkflow extends RawContext {
   version?: number;
+  name?: string;
   /** Primary bounded-context name in the native export. */
   boundedContext?: string;
   roles?: string[];
@@ -436,7 +437,7 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
   const overlayKeys = Object.keys(overlayEvents);
   const matchingKeys = overlayKeys.filter((k) => eventByKey.has(k)).length;
   const overlayForThisModel = overlayKeys.length === 0 || matchingKeys / overlayKeys.length >= 0.5;
-  const title = (overlayForThisModel && overlay.title) || primaryBoundedContext;
+  const title = (overlayForThisModel && overlay.title?.trim()) || wf.name?.trim() || primaryBoundedContext;
 
   function topologicalOrder(): string[] {
     const indegree = new Map(events.map((e) => [e.key, e.predecessors.length]));

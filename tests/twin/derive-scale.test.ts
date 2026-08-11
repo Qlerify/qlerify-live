@@ -63,8 +63,8 @@ const N = 1200;
 
 // 2×N sequential SQLite inserts plus three derive passes run ~20s on a slower dev
 // box — over the suite's 15s default. Scale IS the regression being pinned, so give
-// these room rather than shrinking N. (The inner tripwire on genericInstanceDetail
-// still holds the actual performance assertion at 3s.)
+// these room rather than shrinking N. Each test keeps its own timing tripwire, so
+// raising this ceiling does not remove the performance assertion.
 const SCALE_TIMEOUT_MS = 60_000;
 
 const model = modelHarness(SHOP_MODEL);
@@ -92,6 +92,8 @@ describe("deriveFromData at scale (batched, uncapped)", () => {
       expect(r.totalEmitted).toBe(2 * N);
       expect(r.instances).toBe(2 * N);
       expect(r.durationMs).toBeGreaterThanOrEqual(0); // the pass reports its own wall-clock
+      // Tripwire for a reintroduced per-instance query: batched runs in well under a second here.
+      expect(r.durationMs).toBeLessThan(10_000);
 
       // Every account starts its own case; every order inherited its account's.
       const events = await prisma.eventLog.findMany({

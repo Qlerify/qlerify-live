@@ -1,9 +1,10 @@
 import { useState } from "react"
+import { modellerPlaceholder } from "@/lib/api.ts"
 import { useStore } from "@/lib/store.ts"
 import { applyWorkflowModel } from "@/lib/modelData.ts"
 
 export const ReplaceModelForm = () => {
-  const { projModelOpen, projModelBusy, projModelErr, set } = useStore()
+  const { projModelOpen, projModelBusy, projModelErr, me, set } = useStore()
   const [url, setUrl] = useState("")
   const [text, setText] = useState("")
 
@@ -59,7 +60,7 @@ export const ReplaceModelForm = () => {
         value={url}
         onChange={(e) => setUrl(e.target.value)}
         className="w-full rounded-md border border-stone-300 px-3 py-2 text-sm bg-white"
-        placeholder="https://app.qlerify.com/workflow/<projectId>/<workflowId>"
+        placeholder={modellerPlaceholder(me)}
       />
       <div className="text-xs text-stone-500 mt-1">
         Paste the workflow URL from the Qlerify modeller — we'll pull the latest model.

@@ -5,7 +5,7 @@
 // This is the seam used by the PER-WORKFLOW model flow: setting a workflow's own
 // model from a modeller link goes through fetchWorkflowModelFromUrl() (which also
 // carries the modeller's workflow name, so creation can default to it — the
-// reload path uses the name-less fetchSpecificationFromUrl() wrapper), and the
+// reload path uses fetchStoredWorkflowModel()), and the
 // returned text is stored in the content-addressed ontology store. There is no
 // global model file anymore — the legacy .qlerify/workflow.json materialization
 // + version-history machinery has been removed.
@@ -15,16 +15,50 @@ import { resolveQlerifyCreds } from "../llm/qlerify.js";
 
 const QLERIFY_APP = "https://app.qlerify.com";
 
+const WORKFLOW_PATH = /^\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})(?:\/|$)/;
+
+let badAppUrlWarned = false;
+
 /** The modeller that model links must be on: QLERIFY_APP_URL when set — a locally-run
  * or white-labelled Modeller, the link-side twin of QLERIFY_MCP_URL — else the hosted
  * one. It replaces the default rather than adding to it. Read per call so a dev server
  * or test can repoint it; a malformed value falls back instead of rejecting every link. */
 function modeller(): URL {
+  const raw = process.env.QLERIFY_APP_URL?.trim();
+  if (!raw) return new URL(QLERIFY_APP);
   try {
-    return new URL(process.env.QLERIFY_APP_URL || QLERIFY_APP);
-  } catch {
-    return new URL(QLERIFY_APP);
+    const parsed = new URL(raw);
+    // new URL("localhost:8080") does not throw — it parses with an EMPTY host.
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.host) return parsed;
+  } catch { /* handled below */ }
+  if (!badAppUrlWarned) {
+    badAppUrlWarned = true;
+    console.warn(`QLERIFY_APP_URL is not a valid http(s) URL (${JSON.stringify(raw)}) — ignoring it and pinning model links to ${QLERIFY_APP}`);
   }
+  return new URL(QLERIFY_APP);
+}
+
+export function warnIfModellerUrlsDisagree(log: { warn: (msg: string) => void } = console): void {
+  const app = process.env.QLERIFY_APP_URL?.trim();
+  const mcp = process.env.QLERIFY_MCP_URL?.trim();
+  if (!app === !mcp) return;
+  log.warn(
+    app
+      ? `QLERIFY_APP_URL is set but QLERIFY_MCP_URL is not — model links must be on ${app}, yet their models are fetched from the default endpoint.`
+      : `QLERIFY_MCP_URL is set but QLERIFY_APP_URL is not — models are fetched from ${mcp}, yet links must still be on ${QLERIFY_APP}.`,
+  );
+}
+
+export function modellerLinkBase(): string {
+  const app = modeller();
+  return `${app.origin}${app.pathname.replace(/\/+$/, "")}`;
+}
+
+function workflowIds(pathname: string, app: URL): { projectId: string; workflowId: string } | null {
+  const base = app.pathname.replace(/\/+$/, "");
+  if (base && !pathname.startsWith(`${base}/`)) return null;
+  const m = pathname.slice(base.length).match(WORKFLOW_PATH);
+  return m ? { projectId: m[1]!, workflowId: m[2]! } : null;
 }
 
 /** Pull the project/workflow ids out of a modeller URL, pinning the host to modeller()
@@ -32,20 +66,34 @@ function modeller(): URL {
  * only its ids are, against the MCP endpoint from resolveQlerifyCreds. For tests. */
 export function parseWorkflowUrl(url: string): { projectId: string; workflowId: string } {
   const app = modeller();
+  const shape = `URL must look like ${app.origin}${app.pathname.replace(/\/+$/, "")}/workflow/<projectId>/<workflowId>`;
   let parsed: URL;
   try {
     parsed = new URL((url ?? "").trim());
   } catch {
-    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
+    throw new DomainError(shape);
   }
   if (parsed.host !== app.host) {
-    throw new Error(`Model link must be on ${app.host} (got "${parsed.host}")`);
+    throw new DomainError(`Model link must be on ${app.host} (got "${parsed.host}")`);
   }
-  const m = parsed.pathname.match(/^\/workflow\/([0-9a-fA-F-]{8,})\/([0-9a-fA-F-]{8,})(?:\/|$)/);
-  if (!m) {
-    throw new Error(`URL must look like ${app.origin}/workflow/<projectId>/<workflowId>`);
+  const ids = workflowIds(parsed.pathname, app);
+  if (!ids) throw new DomainError(shape);
+  return ids;
+}
+
+/** The host pin is deliberately NOT re-applied: only the ids are ever fetched, so
+ * re-pinning a stored link can only break workflows when QLERIFY_APP_URL changes. */
+export function parseStoredWorkflowUrl(url: string): { projectId: string; workflowId: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL((url ?? "").trim());
+  } catch {
+    throw new DomainError(`Stored model link is not a URL: ${JSON.stringify(url)}`);
   }
-  return { projectId: m[1], workflowId: m[2] };
+  const at = parsed.pathname.indexOf("/workflow/");
+  const ids = at >= 0 ? parsed.pathname.slice(at).match(WORKFLOW_PATH) : null;
+  if (!ids) throw new DomainError(`Stored model link has no /workflow/<projectId>/<workflowId>: ${parsed.pathname}`);
+  return { projectId: ids[1]!, workflowId: ids[2]! };
 }
 
 /** Parse an MCP HTTP response that may be plain JSON or an SSE (text/event-stream)
@@ -100,7 +148,10 @@ function qlerifyAuthError(): DomainError {
  * known spellings. Null when the payload names nothing. Exported for tests. */
 export function modellerWorkflowName(payload: unknown): string | null {
   const p = payload as Record<string, any> | null;
-  const candidates = [p?.name, p?.workflowName, p?.workflow?.name, p?.title];
+  return firstNonBlank(p?.name, p?.workflowName, p?.workflow?.name, p?.title);
+}
+
+function firstNonBlank(...candidates: unknown[]): string | null {
   for (const c of candidates) {
     if (typeof c === "string" && c.trim()) return c.trim();
   }
@@ -135,10 +186,7 @@ export function deriveNameFromModel(workflowJson: string, overlayJson: string | 
     const title = overlay?.title;
     if (typeof title === "string" && title.trim() && overlayBelongsToModel(overlay, spec)) return title.trim();
   } catch { /* a bad overlay never blocks name derivation */ }
-  for (const candidate of [spec?.name, spec?.boundedContext]) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
-  return null;
+  return firstNonBlank(spec?.name, spec?.boundedContext);
 }
 
 /** Normalize a candidate workflow name before it is stored: strip control and
@@ -210,14 +258,16 @@ export interface FetchedWorkflowModel {
  * modeller's workflow name (so creation can default to it). Throws a clear error
  * on a malformed URL or a fetch failure. */
 export async function fetchWorkflowModelFromUrl(workflowUrl: string): Promise<FetchedWorkflowModel> {
-  const { projectId, workflowId } = parseWorkflowUrl(workflowUrl); // throws on a bad URL
-  const payload = await fetchWorkflowPayload(projectId, workflowId);
-  return { workflow: serialize((payload as any).specification), name: modellerWorkflowName(payload) };
+  return fetchModel(parseWorkflowUrl(workflowUrl)); // throws on a bad URL
 }
 
-/** Name-less variant for callers that only want the workflow.json text (reload). */
-export async function fetchSpecificationFromUrl(workflowUrl: string): Promise<string> {
-  return (await fetchWorkflowModelFromUrl(workflowUrl)).workflow;
+export async function fetchStoredWorkflowModel(workflowUrl: string): Promise<FetchedWorkflowModel> {
+  return fetchModel(parseStoredWorkflowUrl(workflowUrl));
+}
+
+async function fetchModel(ids: { projectId: string; workflowId: string }): Promise<FetchedWorkflowModel> {
+  const payload = await fetchWorkflowPayload(ids.projectId, ids.workflowId);
+  return { workflow: serialize((payload as any).specification), name: modellerWorkflowName(payload) };
 }
 
 /** Validate a Qlerify MCP credential by making a cheap `tools/list` call. Throws

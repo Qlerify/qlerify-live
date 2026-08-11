@@ -4,6 +4,7 @@ import { registerAdapter } from "../../src/packs/registry.js";
 import { createSimulatedAdapter } from "../../src/packs/adapters/simulated.js";
 import { modelHarness } from "../helpers/po-model.js";
 import { runWithTenant } from "../../src/platform/tenancy/context.js";
+import { resolveAnthropicStatus } from "../../src/llm/anthropic.js";
 import { newId } from "../../src/platform/ids.js";
 import { prisma } from "../../src/db.js";
 import type { TenantContext } from "../../src/platform/types.js";
@@ -79,7 +80,7 @@ describe("Connection Doctor tools", () => {
   });
 
   it("regenerate_adapter_body (confirmed) reports the unconfigured AI provider", async () => {
-    if (process.env.ANTHROPIC_API_KEY) return; // a key would actually generate — skip
+    if ((await asAdmin(() => resolveAnthropicStatus())).configured) return; // would generate for real
     const r = await asAdmin(() => runTool("regenerate_adapter_body", { adapterId: ID, confirmed: true }));
     expect(r.isError).toBe(true);
     // Points at where to fix it. Matches the message text, not the env var — BYOK

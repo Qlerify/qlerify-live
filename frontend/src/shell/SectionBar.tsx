@@ -1,5 +1,5 @@
-import { WORKFLOW_SCOPED_VIEWS } from "../lib/router.ts"
-import { AUTH } from "../lib/api.ts"
+import { WORKFLOW_SCOPED_VIEWS } from "@/lib/router.ts"
+import { AUTH } from "@/lib/api.ts"
 
 const TABS: [string, string, string][] = [
   ["#", "Overview", "Live ops — instances in flight for this workflow"],

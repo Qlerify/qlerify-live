@@ -1,9 +1,12 @@
 import { useEffect } from "react"
-import { api } from "../lib/api.ts"
-import { navigate, parseHash } from "../lib/router.ts"
-import { useStore } from "../lib/store.ts"
-import { prettyEntity } from "../lib/format.ts"
-import { loadDashboard, pollOverview } from "../lib/workflowData.ts"
+import { Pill } from "@/components/Pill.tsx"
+import { ProvChip } from "@/components/ProvChip.tsx"
+import { AttrCell } from "@/components/AttrCell.tsx"
+import { api } from "@/lib/api.ts"
+import { navigate, parseHash } from "@/lib/router.ts"
+import { useStore } from "@/lib/store.ts"
+import { prettyEntity } from "@/lib/format.ts"
+import { loadDashboard, pollOverview } from "@/lib/workflowData.ts"
 import {
   applyQuery,
   caseRecords,
@@ -16,17 +19,14 @@ import {
   pctOf,
   resetOvQuery,
   syncOvHash,
-} from "../lib/ovquery.ts"
-import type { CaseRecord } from "../lib/ovquery.ts"
-import { OvToolbar } from "../shell/Overview/OvToolbar.tsx"
-import { OvPager } from "../shell/Overview/OvPager.tsx"
-import { SortableTh } from "../shell/Overview/SortableTh.tsx"
-import type { CaseRow } from "../lib/types.ts"
-import { Pill } from "../components/Pill.tsx"
-import { ProvChip } from "../components/ProvChip.tsx"
-import { AttrCell } from "../components/AttrCell.tsx"
-import { ViewSwitcher } from "../shell/ViewSwitcher.tsx"
-import { AssistantButton } from "../shell/AssistantButton.tsx"
+} from "@/lib/ovquery.ts"
+import type { CaseRecord } from "@/lib/ovquery.ts"
+import type { CaseRow } from "@/lib/types.ts"
+import { OvToolbar } from "@/shell/Overview/OvToolbar.tsx"
+import { OvPager } from "@/shell/Overview/OvPager.tsx"
+import { SortableTh } from "@/shell/Overview/SortableTh.tsx"
+import { ViewSwitcher } from "@/shell/ViewSwitcher.tsx"
+import { AssistantButton } from "@/shell/AssistantButton.tsx"
 
 const POLL_MS = 5000
 

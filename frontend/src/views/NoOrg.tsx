@@ -1,7 +1,7 @@
 import { useState } from "react"
-import { AUTH, api } from "../lib/api.ts"
-import { navigate } from "../lib/router.ts"
-import { useStore } from "../lib/store.ts"
+import { AUTH, api } from "@/lib/api.ts"
+import { navigate } from "@/lib/router.ts"
+import { useStore } from "@/lib/store.ts"
 
 export const NoOrg = () => {
   const { me, set } = useStore()

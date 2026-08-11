@@ -1,5 +1,5 @@
-import { navigate } from "../../lib/router.ts"
-import type { OrgPortfolio } from "../../lib/types.ts"
+import { navigate } from "@/lib/router.ts"
+import type { OrgPortfolio } from "@/lib/types.ts"
 
 const TONE: Record<string, { chip: string; dot: string }> = {
   ok: { chip: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500" },

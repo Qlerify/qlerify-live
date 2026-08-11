@@ -1,7 +1,7 @@
 import { useState } from "react"
-import { useStore } from "../../lib/store.ts"
-import { formatVersionDate } from "../../lib/modelData.ts"
-import { formatDuration } from "../../lib/format.ts"
+import { useStore } from "@/lib/store.ts"
+import { formatVersionDate } from "@/lib/modelData.ts"
+import { formatDuration } from "@/lib/format.ts"
 import {
   NOTE_BADGE,
   connDelete,
@@ -11,8 +11,8 @@ import {
   connTest,
   connVerify,
   connectorName,
-} from "../../lib/connectorsData.ts"
-import type { Connector } from "../../lib/types.ts"
+} from "@/lib/connectorsData.ts"
+import type { Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { CodeEditor } from "./CodeEditor.tsx"
 import { SchedulePanel } from "./SchedulePanel.tsx"

@@ -1,9 +1,9 @@
 import { useEffect } from "react"
-import { AUTH, api } from "../lib/api.ts"
-import { navigate } from "../lib/router.ts"
-import { useStore, currentOrgName } from "../lib/store.ts"
-import { OrgAvatar, UserAvatar } from "../components/Avatar.tsx"
-import { QlerifyMark, WorkflowGlyph, MenuCaret, Check, LockIcon, SignOutIcon } from "../components/Icons.tsx"
+import { OrgAvatar, UserAvatar } from "@/components/Avatar.tsx"
+import { QlerifyMark, WorkflowGlyph, MenuCaret, Check, LockIcon, SignOutIcon } from "@/components/Icons.tsx"
+import { AUTH, api } from "@/lib/api.ts"
+import { navigate } from "@/lib/router.ts"
+import { useStore, currentOrgName } from "@/lib/store.ts"
 
 const AccountMenu = ({ onClose }: { onClose: () => void }) => {
   const me = useStore((s) => s.me)

@@ -1,5 +1,5 @@
-import { useStore } from "../../lib/store.ts"
-import { formatVersionDate, restoreWorkflowVersion, shortWorkflowUrl } from "../../lib/modelData.ts"
+import { useStore } from "@/lib/store.ts"
+import { formatVersionDate, restoreWorkflowVersion, shortWorkflowUrl } from "@/lib/modelData.ts"
 
 const SOURCE_TONE: Record<string, string> = {
   initial: "bg-stone-100 text-stone-500",

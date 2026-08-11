@@ -1,10 +1,14 @@
 import { useEffect } from "react"
-import { useStore } from "../lib/store.ts"
-import { parseHash } from "../lib/router.ts"
-import { attrText, genericColumns, prettyEntity } from "../lib/format.ts"
-import { EST_TIME_TITLE, bizTimeEstimated, fmtBizDate, fmtGap, minutesBetween, timeAgo } from "../lib/time.ts"
-import { computeFlowLayout, laneMetrics, FLOW } from "../lib/flowLayout.ts"
-import { loadFlowRows, pollOverview } from "../lib/workflowData.ts"
+import { EventCard } from "@/components/EventCard.tsx"
+import { FlowEdges } from "@/components/FlowEdges.tsx"
+import { FlowCountBadge } from "@/components/FlowCountBadge.tsx"
+import { CopyCaseId } from "@/components/CopyCaseId.tsx"
+import { useStore } from "@/lib/store.ts"
+import { parseHash } from "@/lib/router.ts"
+import { attrText, genericColumns, prettyEntity } from "@/lib/format.ts"
+import { EST_TIME_TITLE, bizTimeEstimated, fmtBizDate, fmtGap, minutesBetween, timeAgo } from "@/lib/time.ts"
+import { computeFlowLayout, laneMetrics, FLOW } from "@/lib/flowLayout.ts"
+import { loadFlowRows, pollOverview } from "@/lib/workflowData.ts"
 import {
   applyQuery,
   caseRecords,
@@ -14,16 +18,12 @@ import {
   ovActive,
   resetOvQuery,
   syncOvHash,
-} from "../lib/ovquery.ts"
-import { OvToolbar } from "../shell/Overview/OvToolbar.tsx"
-import { OvPager } from "../shell/Overview/OvPager.tsx"
-import type { CaseRow, EventDef, FlowCaseRow } from "../lib/types.ts"
-import { EventCard } from "../components/EventCard.tsx"
-import { FlowEdges } from "../components/FlowEdges.tsx"
-import { FlowCountBadge } from "../components/FlowCountBadge.tsx"
-import { CopyCaseId } from "../components/CopyCaseId.tsx"
-import { ViewSwitcher } from "../shell/ViewSwitcher.tsx"
-import { AssistantButton } from "../shell/AssistantButton.tsx"
+} from "@/lib/ovquery.ts"
+import type { CaseRow, EventDef, FlowCaseRow } from "@/lib/types.ts"
+import { OvToolbar } from "@/shell/Overview/OvToolbar.tsx"
+import { OvPager } from "@/shell/Overview/OvPager.tsx"
+import { ViewSwitcher } from "@/shell/ViewSwitcher.tsx"
+import { AssistantButton } from "@/shell/AssistantButton.tsx"
 
 const POLL_MS = 5000
 const LABEL_W = 210

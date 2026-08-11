@@ -1,7 +1,7 @@
 import { useState } from "react"
-import { api } from "../../lib/api.ts"
-import { RoleChip, Table } from "../../components/Table.tsx"
-import type { AdminData } from "../../lib/types.ts"
+import { RoleChip, Table } from "@/components/Table.tsx"
+import { api } from "@/lib/api.ts"
+import type { AdminData } from "@/lib/types.ts"
 
 type Issued = { subject: string; password: string } | null
 

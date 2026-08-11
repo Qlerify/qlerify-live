@@ -1,5 +1,5 @@
-import { useStore } from "../../lib/store.ts"
-import type { ExpFilter } from "../../lib/types.ts"
+import { useStore } from "@/lib/store.ts"
+import type { ExpFilter } from "@/lib/types.ts"
 
 const CONDS = ["Equal to", "Not equal to", "Contains", "Begins with", "Greater than", "Less than"]
 const TYPES = ["String", "Number"]

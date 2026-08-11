@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react"
-import { activateConnectorChat, clearChat, lastAssistantAsksConfirmation, sendChat, toggleChat } from "../lib/chatData.ts"
-import { useStore } from "../lib/store.ts"
+import { activateConnectorChat, clearChat, lastAssistantAsksConfirmation, sendChat, toggleChat } from "@/lib/chatData.ts"
+import { useStore } from "@/lib/store.ts"
+import { EventLogBody } from "@/views/Detail/EventLogBody.tsx"
+import { ConnectorHistoryBody } from "@/views/Explorer/ConnectorHistoryBody.tsx"
 import { ChatMessage } from "./ChatMessage.tsx"
 import { ChatProgress } from "./ChatProgress.tsx"
-import { EventLogBody } from "../views/Detail/EventLogBody.tsx"
-import { ConnectorHistoryBody } from "../views/Explorer/ConnectorHistoryBody.tsx"
 
 const ADVISOR_EXAMPLES = [
   "How many cases haven't moved in 24h?",

@@ -7,10 +7,10 @@
 // business timestamps are exactly the coverage events, so no new data is needed.
 // Rendered only when one cycle dominates the slice (mixed cycles have no shared
 // clock to plot against).
-import { dayOfPeriod } from "../../lib/cohort.ts"
-import type { Period } from "../../lib/cohort.ts"
-import type { CaseRecord } from "../../lib/ovquery.ts"
-import type { EventDef } from "../../lib/types.ts"
+import { dayOfPeriod } from "@/lib/cohort.ts"
+import type { Period } from "@/lib/cohort.ts"
+import type { CaseRecord } from "@/lib/ovquery.ts"
+import type { EventDef } from "@/lib/types.ts"
 
 const W = 180
 const H = 64

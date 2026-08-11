@@ -1,4 +1,4 @@
-import { useStore } from "../lib/store.ts"
+import { useStore } from "@/lib/store.ts"
 
 // Blocking scrim + spinner for long server-synchronous ops (model rebuild, org
 // switch). Ref-counted so nested shows don't clear early.

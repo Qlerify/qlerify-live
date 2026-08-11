@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
-import { AUTH, api } from "../../lib/api.ts"
-import { Table } from "../../components/Table.tsx"
-import type { AdminData, DomainRoleList } from "../../lib/types.ts"
+import { Table } from "@/components/Table.tsx"
+import { AUTH, api } from "@/lib/api.ts"
+import type { AdminData, DomainRoleList } from "@/lib/types.ts"
 
 // Domain-role mapping: which member plays which model lane in which workflow.
 // Personalization for the To do surfaces (whoami.domainRoles), NOT security —

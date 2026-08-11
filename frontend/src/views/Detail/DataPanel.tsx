@@ -1,6 +1,6 @@
-import { useStore } from "../../lib/store.ts"
-import { activeDetailInstance, genAllRows, genBcByAgg } from "../../lib/asOf.ts"
-import type { DiffCtx } from "../../lib/asOf.ts"
+import { useStore } from "@/lib/store.ts"
+import { activeDetailInstance, genAllRows, genBcByAgg } from "@/lib/asOf.ts"
+import type { DiffCtx } from "@/lib/asOf.ts"
 import { EntityCard } from "./EntityCard.tsx"
 
 export const DataPanel = () => {

@@ -1,10 +1,10 @@
-import { caseFirings, buildBranchForest, layoutForestRows } from "../../lib/branchForest.ts"
-import type { ForestNode } from "../../lib/branchForest.ts"
-import { SPLIT_FLOW } from "../../lib/flowLayout.ts"
-import type { FlowLayout } from "../../lib/flowLayout.ts"
-import { EST_TIME_TITLE, fmtBizDate } from "../../lib/time.ts"
-import { shortId } from "../../lib/asOf.ts"
-import type { EventDef, LogEntry } from "../../lib/types.ts"
+import { caseFirings, buildBranchForest, layoutForestRows } from "@/lib/branchForest.ts"
+import type { ForestNode } from "@/lib/branchForest.ts"
+import { SPLIT_FLOW } from "@/lib/flowLayout.ts"
+import type { FlowLayout } from "@/lib/flowLayout.ts"
+import { EST_TIME_TITLE, fmtBizDate } from "@/lib/time.ts"
+import { shortId } from "@/lib/asOf.ts"
+import type { EventDef, LogEntry } from "@/lib/types.ts"
 import { TimelineLegend } from "./TimelineLegend.tsx"
 
 type Props = {

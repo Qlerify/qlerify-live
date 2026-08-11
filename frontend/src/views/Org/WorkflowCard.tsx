@@ -1,5 +1,5 @@
-import { PROV_STYLE } from "../../components/ProvChip.tsx"
-import type { OrgWorkflowCard, TwinTrust } from "../../lib/types.ts"
+import { PROV_STYLE } from "@/components/ProvChip.tsx"
+import type { OrgWorkflowCard, TwinTrust } from "@/lib/types.ts"
 
 // Colour follows the provenance ladder.
 const TrustChip = ({ tp }: { tp: TwinTrust }) => {

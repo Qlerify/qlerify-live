@@ -6,10 +6,10 @@
 // When the slice is one synchronized cycle, a tick marks today as a fraction of
 // the period: in a same-birthday cohort, position-vs-day-N is the only pace
 // signal age can't give.
-import { dayOfPeriod } from "../lib/cohort.ts"
-import type { CohortStats, Period } from "../lib/cohort.ts"
-import { drillToList } from "../lib/drill.ts"
-import type { EventDef } from "../lib/types.ts"
+import { dayOfPeriod } from "@/lib/cohort.ts"
+import type { CohortStats, Period } from "@/lib/cohort.ts"
+import { drillToList } from "@/lib/drill.ts"
+import type { EventDef } from "@/lib/types.ts"
 
 type Props = {
   events: EventDef[]

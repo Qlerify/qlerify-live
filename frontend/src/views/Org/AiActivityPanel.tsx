@@ -1,5 +1,5 @@
-import { MiniStat, PanelShell } from "../../components/PanelShell.tsx"
-import type { OrgPortfolio } from "../../lib/types.ts"
+import { MiniStat, PanelShell } from "@/components/PanelShell.tsx"
+import type { OrgPortfolio } from "@/lib/types.ts"
 
 export const AiActivityPanel = ({ a }: { a: OrgPortfolio["aiActivity"] }) => {
   if (!a) {

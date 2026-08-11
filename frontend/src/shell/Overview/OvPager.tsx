@@ -1,6 +1,6 @@
-import { PAGE_SIZES, pageAction, setOvPageSize } from "../../lib/ovquery.ts"
-import { useStore } from "../../lib/store.ts"
-import type { QueryResult } from "../../lib/ovquery.ts"
+import { PAGE_SIZES, pageAction, setOvPageSize } from "@/lib/ovquery.ts"
+import { useStore } from "@/lib/store.ts"
+import type { QueryResult } from "@/lib/ovquery.ts"
 
 // Shared by the List footer and the By-case banner.
 export const OvPager = ({ tab, res }: { tab: "list" | "rows"; res: QueryResult }) => {

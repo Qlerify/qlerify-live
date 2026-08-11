@@ -1,4 +1,4 @@
-import { attrLines } from "../lib/format.ts"
+import { attrLines } from "@/lib/format.ts"
 
 // Capped at 4 lines with a "+N more" hint so one rich field can't blow up the row.
 export const AttrCell = ({ value }: { value: unknown }) => {

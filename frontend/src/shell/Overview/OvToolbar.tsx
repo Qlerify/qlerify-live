@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
-import { useStore } from "../../lib/store.ts"
-import { prettyEntity } from "../../lib/format.ts"
+import { useStore } from "@/lib/store.ts"
+import { prettyEntity } from "@/lib/format.ts"
 import {
   ACTIVITY_WINDOWS,
   OPS,
@@ -26,8 +26,8 @@ import {
   setOvCols,
   sortMenuFields,
   toggleOvCol,
-} from "../../lib/ovquery.ts"
-import type { CaseRecord, OvFilter, OvTab, QueryResult } from "../../lib/ovquery.ts"
+} from "@/lib/ovquery.ts"
+import type { CaseRecord, OvFilter, OvTab, QueryResult } from "@/lib/ovquery.ts"
 import { Dropdown } from "./Dropdown.tsx"
 
 const SELECT = "text-sm border border-stone-300 rounded-md px-2 py-1.5 bg-white"

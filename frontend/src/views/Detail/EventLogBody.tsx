@@ -1,8 +1,8 @@
-import { EVIDENCE_KIND, EvidenceChip } from "../../components/EvidenceChip.tsx"
-import { ProvChip } from "../../components/ProvChip.tsx"
-import { EST_TIME_TITLE, bizTimeEstimated } from "../../lib/time.ts"
-import { useStore } from "../../lib/store.ts"
-import type { LogEntry } from "../../lib/types.ts"
+import { EVIDENCE_KIND, EvidenceChip } from "@/components/EvidenceChip.tsx"
+import { ProvChip } from "@/components/ProvChip.tsx"
+import { EST_TIME_TITLE, bizTimeEstimated } from "@/lib/time.ts"
+import { useStore } from "@/lib/store.ts"
+import type { LogEntry } from "@/lib/types.ts"
 
 // payload is JSON-serialized command args; pretty-print it, falling back to the
 // raw string for legacy rows that aren't valid JSON.

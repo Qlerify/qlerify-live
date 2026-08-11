@@ -1,6 +1,6 @@
 import { useState } from "react"
-import { api } from "../../lib/api.ts"
-import type { QlerifyConfig } from "../../lib/types.ts"
+import { api } from "@/lib/api.ts"
+import type { QlerifyConfig } from "@/lib/types.ts"
 
 type Props = {
   q: QlerifyConfig | null

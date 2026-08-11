@@ -1,8 +1,8 @@
-import { useStore } from "../../lib/store.ts"
-import { navigate } from "../../lib/router.ts"
-import { ovQuerySuffix } from "../../lib/ovquery.ts"
-import { PanelShell } from "../../components/PanelShell.tsx"
-import type { CaseRecord } from "../../lib/ovquery.ts"
+import { PanelShell } from "@/components/PanelShell.tsx"
+import { useStore } from "@/lib/store.ts"
+import { navigate } from "@/lib/router.ts"
+import { ovQuerySuffix } from "@/lib/ovquery.ts"
+import type { CaseRecord } from "@/lib/ovquery.ts"
 
 const TOP_N = 7
 

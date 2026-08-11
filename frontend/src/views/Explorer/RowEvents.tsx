@@ -1,5 +1,5 @@
-import { formatVersionDate } from "../../lib/modelData.ts"
-import type { ExpRowEvent } from "../../lib/types.ts"
+import { formatVersionDate } from "@/lib/modelData.ts"
+import type { ExpRowEvent } from "@/lib/types.ts"
 
 const DOT: Record<string, string> = {
   live: "bg-emerald-500",

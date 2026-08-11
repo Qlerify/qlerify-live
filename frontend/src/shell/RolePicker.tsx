@@ -1,6 +1,6 @@
 import { useState } from "react"
-import { useStore } from "../lib/store.ts"
-import { applyDomainRole, persistRolePick, storedRolePick } from "../lib/role.ts"
+import { useStore } from "@/lib/store.ts"
+import { applyDomainRole, persistRolePick, storedRolePick } from "@/lib/role.ts"
 
 // "Acting as" — which model lane the signed-in user plays. Options come from
 // the loaded model's lanes (no extra fetch); ★ marks lanes the admin mapped to

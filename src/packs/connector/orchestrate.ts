@@ -6,7 +6,8 @@
 
 import { getOntology } from "../../ontology/model.js";
 import { periodKeyOf, periodFormatExample } from "../../twin/period.js";
-import { cycleLinkFields } from "../../twin/correlate.js";
+import { cycleLinkFields, foreignKeyFields } from "../../twin/correlate.js";
+import * as store from "../../twin/projection-store.js";
 import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.js";
 import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
@@ -207,10 +208,32 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   // itself (a period-named composite key) or as a child linked into one.
   const pk = targetKind === "entity" ? periodKeyOf(target) : null;
   const childLinks = targetKind === "entity" ? cycleLinkFields(target.name, getOntology()) : [];
+  // Event-chain (FK) facts, also from the model: fields that chain this table's
+  // rows into a parent aggregate's case by id equality (twin/correlate.ts).
+  // Cycle-claimed fields are excluded — the cycle sections own their guidance —
+  // and each parent's REAL id values are sampled from the projection store so
+  // the author AI sees the exact format the chain will be matched against.
+  const cycleClaimed = new Set(childLinks.flatMap((l) => l.subjectFields.map((p) => p.child)));
+  const fkLinks: Array<{ field: string; target: string; targetIdExamples: string[]; parentIsCycle?: boolean }> = [];
+  if (targetKind === "entity") {
+    for (const fk of foreignKeyFields(target.name, getOntology())) {
+      if (cycleClaimed.has(fk.name)) continue;
+      const targetIdExamples = (await store.tableExists(fk.target))
+        ? (await store.findMany(fk.target, 3)).map((r) => String(r.id ?? "")).filter(Boolean)
+        : [];
+      const parent = getOntology().entity(fk.target);
+      fkLinks.push({
+        field: fk.name, target: fk.target, targetIdExamples,
+        ...(parent && periodKeyOf(parent) ? { parentIsCycle: true } : {}),
+      });
+    }
+  }
   const gen = await generateConnectorModule({
     target, targetKind, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
+    workflowTables: [...getOntology().entities, ...getOntology().valueObjects].map((e) => e.name),
+    ...(fkLinks.length ? { fkLinks } : {}),
     ...(pk
       ? {
           cycle: {
@@ -227,6 +250,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
             target: l.target,
             pairs: l.subjectFields,
             granularity: l.granularity,
+            periodExample: periodFormatExample(l.granularity),
           })),
         }
       : {}),

@@ -28,6 +28,17 @@ describe("chat system prompt", () => {
     expect(a).toBe(b);
   });
 
+  it("carries the connector re-run ritual (settle re-run behavior before building)", () => {
+    const dump = systemBlocks().map((b) => b.text).join("\n");
+    expect(dump).toContain("Re-run behavior — settle it BEFORE building");
+    expect(dump).toContain("per subject FOREVER or per subject PER PERIOD");
+    // An empty pull on a covered table is the gate working — the assistant must
+    // not "repair" the gate away, and simulate-content builds are exempt from
+    // the ask entirely.
+    expect(dump).toContain("not an error to repair");
+    expect(dump).toContain("don't ask there");
+  });
+
   it("renders related-schema fields as closed sets with the related item's example values", async () => {
     const model = modelHarness(REGULATED_DEMAND_MODEL);
     const dump = (await model.run(async () => systemBlocks())).map((b) => b.text).join("\n");

@@ -77,6 +77,36 @@ describe("connector subprocess sandbox", () => {
     expect(r.ok).toBe(false);
   });
 
+  // Workflow-table snapshots: the host serializes read-only COPIES of the
+  // workflow's projection tables into the ctx file; the module reads them via
+  // ctx.readTable — the real tables stay outside the sandbox.
+  it("exposes host-provided tables via ctx.tables / ctx.readTable (case-insensitive, [] when absent)", async () => {
+    mk("sbx-tables", `export async function fetchRows(ctx) {
+      return [{
+        id: "1",
+        names: ctx.tables.join(","),
+        exact: ctx.readTable("Quarter").length,
+        ci: ctx.readTable("quarter")[0].id,
+        missing: ctx.readTable("NoSuchTable").length,
+      }];
+    }`);
+    const r = await runConnector("sbx-tables", {
+      entity: ENTITY, limit: 5,
+      tables: { Quarter: [{ id: "q1" }, { id: "q2" }] },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.rows).toEqual([{ id: "1", names: "Quarter", exact: 2, ci: "q1", missing: 0 }]);
+  });
+
+  it("a run without tables sees none — a previous run's snapshot never leaks", async () => {
+    mk("sbx-tables-leak", `export async function fetchRows(ctx) { return [{ id: "1", names: ctx.tables.join(",") }]; }`);
+    const first = await runConnector("sbx-tables-leak", { entity: ENTITY, limit: 1, tables: { Quarter: [{ id: "q1" }] } });
+    expect(first.rows).toEqual([{ id: "1", names: "Quarter" }]);
+    const second = await runConnector("sbx-tables-leak", { entity: ENTITY, limit: 1 });
+    expect(second.ok).toBe(true);
+    expect(second.rows).toEqual([{ id: "1", names: "" }]);
+  });
+
   it("is fully disabled by the deployment kill-switch", async () => {
     const prev = process.env.QLERIFY_CONNECTORS_ENABLED;
     process.env.QLERIFY_CONNECTORS_ENABLED = "false";

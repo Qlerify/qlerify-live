@@ -7,12 +7,30 @@
 
 import { getOntology, type EntitySchema } from "../../ontology/model.js";
 import type { AdapterConfig, SourceAdapter } from "../types.js";
-import { runConnector, moduleExists } from "../connector/runtime.js";
+import { runConnector, moduleExists, SNAPSHOT_ROWS_PER_TABLE } from "../connector/runtime.js";
+import * as store from "../../twin/projection-store.js";
 
 /** Resolve the connector's target schema — an entity, or a value object. */
 export function resolveTargetSchema(name: string): EntitySchema | undefined {
   const o = getOntology();
   return o.entity(name) ?? o.valueObject(name);
+}
+
+/** Read-only copies of every populated projection table in the loaded model
+ * (entities and value objects), keyed by logical name — the ctx.readTable
+ * snapshot. Earlier events routinely shape what a connector must pull (e.g. one
+ * Insights row per Quarter company), so every pull gets the whole workflow's
+ * data. COPIES only: they travel via the ctx file into the sandboxed child,
+ * which still has no path to the real tables. */
+export async function collectWorkflowTables(): Promise<Record<string, Array<Record<string, unknown>>>> {
+  const o = getOntology();
+  const out: Record<string, Array<Record<string, unknown>>> = {};
+  for (const e of [...o.entities, ...o.valueObjects]) {
+    if (out[e.name] || !(await store.tableExists(e.name))) continue;
+    const rows = await store.findMany(e.name, SNAPSHOT_ROWS_PER_TABLE);
+    out[e.name] = rows.map(({ organization_id: _org, ...rest }) => rest);
+  }
+  return out;
 }
 
 export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
@@ -39,7 +57,7 @@ export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
       const e = target();
       // null = uncapped (pull everything); only an OMITTED limit falls back.
       const limit = opts.limit === null ? null : opts.limit ?? cfg.limits?.limit ?? 25;
-      const r = await runConnector(cfg.id, { entity: e, limit, endpoint: cfg.endpoint });
+      const r = await runConnector(cfg.id, { entity: e, limit, endpoint: cfg.endpoint, tables: await collectWorkflowTables() });
       if (!r.ok) {
         const trace = r.trace?.length ? `\nTrace:\n${r.trace.slice(-12).join("\n")}` : "";
         throw new Error(`${r.error ?? "connector run failed"}${trace}`);

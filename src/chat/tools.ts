@@ -314,7 +314,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "build_connector",
     description:
-      "WRITE — Have AI write (or repair) the connector's integration code from a natural-language description of the source, then auto-install whatever npm packages the code imports. The connector may use ANY package or protocol (AWS SDK, pg, googleapis, fetch, soap…). Stop-and-show: it writes + registers the code but does NOT run or ingest — test it next with adapter_dry_run. To REPAIR a failed connector, pass errorReport (the error + trace from the failed adapter_dry_run) and it will rewrite the code to fix it. Requires confirmation: summarize what you'll build/fix, ask 'Shall I build it?', wait for yes, then call with confirmed:true.",
+      "WRITE — Have AI write (or repair) the connector's integration code from a natural-language description of the source, then auto-install whatever npm packages the code imports. The connector may use ANY package or protocol (AWS SDK, pg, googleapis, fetch, soap…). Stop-and-show: it writes + registers the code but does NOT run or ingest — test it next with adapter_dry_run. When the connector COMPUTES its rows (per-row AI/API cost) rather than passing a source through, instructions must state the re-run behavior agreed with the user (incremental vs regenerate-all; per-period ids when the target links into a recurring cycle) — see the Re-run behavior ritual. To REPAIR a failed connector, pass errorReport (the error + trace from the failed adapter_dry_run) and it will rewrite the code to fix it. Requires confirmation: summarize what you'll build/fix, ask 'Shall I build it?', wait for yes, then call with confirmed:true.",
     input_schema: {
       type: "object",
       properties: {

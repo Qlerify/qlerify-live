@@ -42,6 +42,11 @@ import type { EntitySchema } from "../../ontology/model.js";
 const DATA_ROOT = process.env.QLERIFY_DATA_DIR || join(homedir(), ".qlerify-data");
 const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
 
+/** Per-table row ceiling for the ctx tables snapshot (RunRequest.tables) — a
+ * safety cap on ctx-file size, far above any real projection table here. The
+ * builder prompt surfaces it so truncation is never silent to the author AI. */
+export const SNAPSHOT_ROWS_PER_TABLE = 2000;
+
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network
 const HEAP_MB = 512;
@@ -161,6 +166,16 @@ async function safeFetch(url, opts) {
   return globalThis.fetch(url, opts);
 }
 
+// Read-only snapshot of the workflow's data tables, taken by the host at run
+// start. Copies — the real tables live outside the sandbox and never see writes.
+const tables = input.tables || {};
+function readTable(name) {
+  if (Object.prototype.hasOwnProperty.call(tables, name)) return tables[name];
+  const want = String(name || "").toLowerCase();
+  for (const k of Object.keys(tables)) if (k.toLowerCase() === want) return tables[k];
+  return [];
+}
+
 const ctx = {
   entity: input.entity,
   limit: input.limit,
@@ -170,6 +185,8 @@ const ctx = {
   fetch: (...a) => safeFetch(...a),
   log,
   trace,
+  tables: Object.keys(tables),
+  readTable,
 };
 async function main() {
   const mod = await import(modUrl);
@@ -331,6 +348,11 @@ interface RunRequest {
   limit: number | null;
   endpoint?: string;
   op?: "fetchRows" | "probe";
+  /** Read-only snapshot of the workflow's projection tables (entity name → rows),
+   * exposed to the module as ctx.tables / ctx.readTable(name). These are COPIES
+   * serialized into the ctx file — the child still cannot reach the real DB, so
+   * mutating them changes nothing. */
+  tables?: Record<string, Array<Record<string, unknown>>>;
 }
 
 interface RunResult {
@@ -356,7 +378,15 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
   // A full ingest still hands the module a real number: generated code defends
   // with `ctx.limit ?? <fallback>`, so a null ctx.limit would silently shrink
   // the pull to that fallback instead of the platform ceiling.
-  const input = { entity: req.entity, limit: req.limit ?? UNCAPPED_PULL_ROWS, endpoint: req.endpoint, op: req.op ?? "fetchRows" };
+  const input = {
+    entity: req.entity,
+    limit: req.limit ?? UNCAPPED_PULL_ROWS,
+    endpoint: req.endpoint,
+    op: req.op ?? "fetchRows",
+    // Always present (empty when the caller sends none) so a run can never see a
+    // previous run's snapshot — the ctx file is rewritten wholesale each time.
+    tables: req.tables ?? {},
+  };
   writeFileSync(ctxPath(id), JSON.stringify(input));
   if (!existsSync(credPath(id))) writeFileSync(credPath(id), "{}");
   if (existsSync(resultPath(id))) rmSync(resultPath(id));

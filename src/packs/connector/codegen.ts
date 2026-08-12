@@ -8,7 +8,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { EntitySchema, SchemaField } from "../../ontology/model.js";
 import { getAnthropicClient } from "../../llm/anthropic.js";
-import { scanImports } from "./runtime.js";
+import { scanImports, SNAPSHOT_ROWS_PER_TABLE } from "./runtime.js";
 
 /** A schema one of the target's fields points at via `relatedEntity`. Its example
  * values are the model's allowed vocabulary for that field when data is fabricated. */
@@ -50,7 +50,19 @@ interface ConnectorGenInput {
     target: string;
     pairs: Array<{ child: string; subject: string }>;
     granularity: string;
+    /** The exact period format, e.g. "2026Q3" (twin/period.ts). */
+    periodExample: string;
   }>;
+  /** Foreign-key event-chain links: fields on the target that reference a PARENT
+   * table's row id, chaining this row's events into that row's case. Resolved by
+   * the caller from the model (twin/correlate.ts foreignKeyFields), with real
+   * parent id values sampled from the projection store when data exists.
+   * parentIsCycle marks a period-scoped parent (one row per subject per period),
+   * where referencing the RIGHT period's row matters. */
+  fkLinks?: Array<{ field: string; target: string; targetIdExamples: string[]; parentIsCycle?: boolean }>;
+  /** Names of the workflow's data tables the module can read at run time via
+   * ctx.readTable (resolved by the caller from the loaded model). */
+  workflowTables?: string[];
 }
 
 interface ConnectorGenResult {
@@ -76,7 +88,7 @@ function exampleVocab(f: SchemaField, max = 10): string[] {
 
 /** Exported for unit tests — pure (no I/O, no ontology reads). */
 export function buildConnectorPrompt(input: ConnectorGenInput): string {
-  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, cycle, cycleChild } = input;
+  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, cycle, cycleChild, fkLinks, workflowTables } = input;
   const fields = target.fields
     .map((f) => {
       const req = (target.required ?? []).includes(f.name) ? " (required)" : "";
@@ -124,8 +136,42 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
         `The platform assigns each ${target.name} row to its cycle case automatically; this connector's ONLY job is faithful values:`,
         ...(cycleChild ?? []).flatMap((c) => [
           `- ${c.pairs.map((p) => `"${p.child}"`).join(", ")}: must carry the ${c.target} table's ${c.pairs.map((p) => p.subject).join(" / ")} value VERBATIM — byte-for-byte the same string that table's connector emits (no added prefixes, no stripped ids).`,
-          `- Do NOT compose composite keys, and do NOT filter rows to the current ${c.granularity} — return every row in scope with its REAL dates; the platform buckets each row into its ${c.target} cycle by its business date.`,
+          `- Do NOT compose composite values into those subject field(s), and do NOT filter rows read from the source to the current ${c.granularity} — return every row in scope with its REAL dates; the platform buckets each row into its ${c.target} cycle by its business date.`,
+          `- GENERATED/computed rows (content this connector derives per ${c.target} member rather than reads from a source system) must land in the CORRECT ${c.granularity}: by default one row per (subject, ${c.granularity}) — a deterministic id containing BOTH, e.g. "<subject>@${c.periodExample}", and a business date inside that ${c.granularity} — so the next ${c.granularity} generates FRESH rows instead of being skipped as already present. Only when the operator explicitly says an item is per subject FOREVER, drop the period from the id. Either way the period never leaks into ${c.pairs.map((p) => `"${p.child}"`).join("/")} — those stay the bare subject value. An incremental already-done check (see Re-runs) must compare the SAME identity: per (subject, ${c.granularity}) by default.`,
         ]),
+      ]
+    : [];
+
+  // Event-chain guidance is CONDITIONAL on the model's declaration (an FK field
+  // pointing at another entity) — like the cycle sections, the author AI never
+  // guesses at chain semantics, and a chain-free target gets none of this.
+  const fkSection = (fkLinks ?? []).length
+    ? [
+        ``,
+        `## Event-chain links — fields that chain this table's rows to a parent table`,
+        `The platform builds each end-to-end case by chaining a row's events onto its parent row's events through these fields, matched by EXACT string equality against the parent table's "id" column. A wrong value format does not error — the chain silently breaks and the row starts its own orphan case. So:`,
+        ...(fkLinks ?? []).map((l) =>
+          `- "${l.field}" must hold an id that EXISTS in the ${l.target} table — byte-for-byte the value of ${l.target}.id (no added prefixes, no stripped parts, no case changes).${l.targetIdExamples.length ? ` Real ${l.target}.id values right now: ${l.targetIdExamples.map((v) => JSON.stringify(v)).join(", ")}.` : ""}${l.parentIsCycle ? ` ${l.target} is period-scoped (one row per subject per period): reference the parent row for the CORRECT period — the one this row's business date falls in — never another period's row for the same subject.` : ""}`),
+        `Cross-check the parent table's ACTUAL id format at run time via ctx.readTable("<ParentTable>"). When you FABRICATE rows, pick these fields' values ONLY from ids present in that snapshot (distribute children realistically across parents). When you pull from a real source, map the source's reference into exactly the format the parent table holds.`,
+      ]
+    : [];
+
+  // Re-run economics are platform facts, not model-conditional: every connector
+  // re-runs (manual pulls, scheduled polling), and ingest lands rows idempotently
+  // by id — an already-present id is SKIPPED, never updated. Value objects carry
+  // no connector-supplied id, so the id-diff guidance applies to entities only.
+  // The one skip exception — engine-opened _provisional placeholders get MERGED
+  // (ingest.ts) — exists only for period-scoped cycle tables, so that nuance is
+  // emitted only alongside the cycle section (elsewhere it would be noise about a
+  // column that never occurs).
+  const rerunSection = targetKind === "entity"
+    ? [
+        ``,
+        `## Re-runs — this connector runs REPEATEDLY (manual pulls and scheduled polling)`,
+        `The platform lands rows idempotently by id: a returned row whose id already EXISTS in the ${target.name} table is SKIPPED — never updated, never duplicated.${cycle ? ` (One exception: an existing row marked _provisional is an engine-opened placeholder your pull is expected to fill — it IS merged.)` : ""} Re-returning existing rows is harmless, but every unit of work spent producing them is wasted. The operator's instructions decide the re-run behavior — follow them exactly when they specify one; otherwise:`,
+        `- INCREMENTAL is the default whenever each row is EXPENSIVE to produce (an AI/LLM call per row, a paid enrichment API): read this connector's own target table via ctx.readTable("${target.name}") and process ONLY the source items with no row there yet. Apply ctx.limit AFTER excluding already-present items — return up to ctx.limit NEW rows — so successive runs work through the backlog instead of re-examining the same first slice. Nothing missing means return [] (a valid, cheap no-op run). Never re-do per-row paid work whose result already sits in the target table. The snapshot is capped at ${SNAPSHOT_ROWS_PER_TABLE} rows: if the table can outgrow that, do not trust the diff alone — also filter at the source (a watermark / updated-since query).${cycle ? ` This table is the Recurring-cycle table described above, so compare by its subject + period fields instead of id (the platform composes those ids) — and treat rows marked _provisional as MISSING: re-return them so the platform can fill the placeholder.` : ""}`,
+        `- REGENERATE-ALL only when the instructions explicitly ask for it: produce every row each run — the id-skip makes that a no-op for existing rows, so it only changes anything after the operator clears the table.`,
+        `- A plain pass-through pull from a system of record needs no gating: return the rows with stable ids and the platform skips what it already has.`,
       ]
     : [];
 
@@ -149,6 +195,8 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     ...relatedSection,
     ...cycleSection,
     ...cycleChildSection,
+    ...fkSection,
+    ...rerunSection,
     ``,
     `## How to reach the source — you have FULL power`,
     `You MAY import ANY npm package (e.g. @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, pg, mysql2, mongodb, googleapis, soap, ldapjs, snowflake-sdk) and use ANY protocol. Just \`import\` what you need with ESM syntax — the runtime detects your imports and installs them automatically before running. Plain HTTP/REST: use the global \`fetch\` (also available as ctx.fetch).`,
@@ -161,6 +209,8 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     `  ctx.limit         — max rows to return; null = NO cap (a full ingest: page through the source and return everything)`,
     `  ctx.fetch(url,init)— the global fetch`,
     `  ctx.log(message)  — append a line to the run trace shown to the operator (do NOT rely on console for diagnostics)`,
+    `  ctx.tables        — names of this workflow's data tables available as read-only snapshots${workflowTables?.length ? `: ${workflowTables.join(", ")}` : ""}`,
+    `  ctx.readTable(name) — that table's current rows as an array of plain objects (empty array if the table has no data yet; a snapshot capped at ${SNAPSHOT_ROWS_PER_TABLE} rows per table, taken when the run starts — reading is free, mutating it changes nothing)`,
     ``,
     creds,
     ``,
@@ -174,6 +224,7 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     ...((related ?? []).length
       ? [`- FABRICATED data for a field with a Related schema must use ONLY that schema's allowed values (see "Related schemas") — distribute them realistically across rows, but never invent a value outside the list.`]
       : []),
+    `- When the operator drives this connector from data already in the workflow (a list of companies, ids or fields from another table, results of earlier events), read it at RUN TIME via ctx.readTable("<Table>") — NEVER bake a copied snapshot of another table's rows into the code; it goes stale the moment that table changes.`,
     `- Authenticate ONLY from ctx.credentials. Never hardcode or ctx.log a secret.`,
     `- On any failure, throw an Error whose message explains what went wrong (it is shown to the operator and fed back to you to fix).`,
     `- Output ONLY the JavaScript module source. No markdown fences, no prose, no commentary.`,

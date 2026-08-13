@@ -10,6 +10,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { registerRoutes } from "./http/routes.js";
 import { loadPacks } from "./packs/loadPacks.js";
 import { startConnectorScheduler, stopConnectorScheduler } from "./packs/scheduler.js";
+import { warnIfModellerUrlsDisagree } from "./ontology/sync.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
 import { prisma } from "./db.js";
@@ -156,6 +157,8 @@ export async function buildServer() {
 
   registerRoutes(app);
   registerControlRoutes(app);
+
+  warnIfModellerUrlsDisagree(app.log);
 
   // Discover + register source-system packs (additive, fail-soft, dynamic import).
   try {

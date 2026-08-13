@@ -2,18 +2,21 @@
 // from link". Model-INDEPENDENT: builds its own customer-account / org fixtures.
 //
 // Proves:
-//   - parseWorkflowUrl pins the host to app.qlerify.com (the SSRF guard): a foreign
-//     host or a non-URL is rejected; a real modeller link parses to its ids
+//   - parseWorkflowUrl pins the host to the configured modeller — app.qlerify.com
+//     unless QLERIFY_APP_URL overrides it: a foreign host or a non-URL is rejected;
+//     a real modeller link parses to its ids
 //   - resolveQlerifyCreds returns the platform-default creds when no org context /
 //     no org key, and the org's own (decrypted) key when one is configured
 //   - invalidateQlerifyCache lets a freshly-rotated key take effect
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "../../src/db.js";
 import { newId } from "../../src/platform/ids.js";
 import { runWithTenant } from "../../src/platform/tenancy/context.js";
 import { encryptSecret } from "../../src/platform/secrets/secret-box.js";
-import { deriveNameFromModel, modellerWorkflowName, parseWorkflowUrl, sanitizeWorkflowName } from "../../src/ontology/sync.js";
+import { deriveNameFromModel, modellerWorkflowName, parseStoredWorkflowUrl, parseWorkflowUrl, sanitizeWorkflowName } from "../../src/ontology/sync.js";
+import { DomainError } from "../../src/errors.js";
+import { loadOntologyFromStrings } from "../../src/ontology/model.js";
 import {
   resolveQlerifyCreds,
   resolveQlerifyStatus,
@@ -68,6 +71,11 @@ afterAll(async () => {
 });
 
 describe("parseWorkflowUrl host-pinning", () => {
+  // Assert the DEFAULT modeller, so a QLERIFY_APP_URL in the developer's .env
+  // (running against a local Modeller) can't turn these red.
+  beforeAll(() => vi.stubEnv("QLERIFY_APP_URL", ""));
+  afterAll(() => vi.unstubAllEnvs());
+
   it("parses a real app.qlerify.com modeller link", () => {
     const p = parseWorkflowUrl("https://app.qlerify.com/workflow/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222");
     expect(p.projectId).toBe("11111111-1111-1111-1111-111111111111");
@@ -87,9 +95,95 @@ describe("parseWorkflowUrl host-pinning", () => {
   });
 });
 
+// QLERIFY_APP_URL repoints the pin at a locally-run or white-labelled modeller.
+describe("parseWorkflowUrl modeller override (QLERIFY_APP_URL)", () => {
+  const PATH = "/workflow/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222";
+  afterEach(() => vi.unstubAllEnvs());
+
+  // Stubbing AFTER import also proves the env is read per call, not at load.
+  it("accepts the overridden host (port included) and refuses every other", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "http://localhost:8080");
+    expect(parseWorkflowUrl(`http://localhost:8080${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(() => parseWorkflowUrl(`https://app.qlerify.com${PATH}`)).toThrow(/localhost:8080/); // replaces, not adds
+    expect(() => parseWorkflowUrl(`https://evil.example.com${PATH}`)).toThrow(/localhost:8080/);
+  });
+
+  it("ignores a malformed override instead of breaking every link", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "http://[not a url");
+    expect(parseWorkflowUrl(`https://app.qlerify.com${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+
+  it("ignores a scheme-less override rather than pinning to an empty host", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "localhost:8080");
+    expect(parseWorkflowUrl(`https://app.qlerify.com${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+
+  it("ignores a non-http override", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "ftp://files.example.com");
+    expect(parseWorkflowUrl(`https://app.qlerify.com${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+
+  it("accepts a modeller served under a sub-path", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "https://modeller.acme.com/qlerify");
+    expect(parseWorkflowUrl(`https://modeller.acme.com/qlerify${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+    expect(() => parseWorkflowUrl(`https://modeller.acme.com${PATH}`)).toThrow(/qlerify/);
+  });
+
+  it("rejects client-input mistakes as DomainError, so they surface as 422 not 502", () => {
+    expect(() => parseWorkflowUrl("not a url")).toThrow(DomainError);
+    expect(() => parseWorkflowUrl(`https://app.qlerify.com/workflows/x/y`)).toThrow(DomainError);
+    expect(() => parseWorkflowUrl(`https://evil.example.com${PATH}`)).toThrow(DomainError);
+  });
+});
+
+describe("parseStoredWorkflowUrl (reload path)", () => {
+  const PATH = "/workflow/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222";
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("keeps working after the pin changes or is removed", () => {
+    vi.stubEnv("QLERIFY_APP_URL", "");
+    expect(parseStoredWorkflowUrl(`http://localhost:8080${PATH}`).workflowId).toBe("22222222-2222-2222-2222-222222222222");
+    vi.stubEnv("QLERIFY_APP_URL", "https://other.example.com");
+    expect(parseStoredWorkflowUrl(`http://localhost:8080${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+
+  it("still reads ids from a sub-path modeller link", () => {
+    expect(parseStoredWorkflowUrl(`https://modeller.acme.com/qlerify${PATH}`).projectId).toBe("11111111-1111-1111-1111-111111111111");
+  });
+
+  it("rejects a stored value that carries no ids", () => {
+    expect(() => parseStoredWorkflowUrl("https://app.qlerify.com/dashboard")).toThrow(DomainError);
+    expect(() => parseStoredWorkflowUrl("not a url")).toThrow(DomainError);
+  });
+});
+
 // Workflow-name derivation — creating a workflow without a name takes it from
 // the loaded model: the modeller payload's own name (link pulls), else the
 // model's overlay title / primary bounded context.
+describe("workflow name and ontology title agree", () => {
+  const spec = (extra: Record<string, unknown>) =>
+    JSON.stringify({ version: 1, boundedContext: "Orders", domainEvents: {}, ...extra });
+
+  it("both prefer the export's own name over the bounded context", () => {
+    const json = spec({ name: "Order Fulfilment" });
+    expect(deriveNameFromModel(json, null)).toBe("Order Fulfilment");
+    expect(loadOntologyFromStrings(json, null).title).toBe("Order Fulfilment");
+  });
+
+  it("both fall back to the bounded context when the export names nothing", () => {
+    const json = spec({});
+    expect(deriveNameFromModel(json, null)).toBe("Orders");
+    expect(loadOntologyFromStrings(json, null).title).toBe("Orders");
+  });
+
+  it("both let a matching overlay title win", () => {
+    const json = spec({ name: "Order Fulfilment" });
+    const overlay = JSON.stringify({ title: "Q3 Pilot", events: {} });
+    expect(deriveNameFromModel(json, overlay)).toBe("Q3 Pilot");
+    expect(loadOntologyFromStrings(json, overlay).title).toBe("Q3 Pilot");
+  });
+});
+
 describe("modellerWorkflowName payload probing", () => {
   it("takes the payload's top-level name", () => {
     expect(modellerWorkflowName({ name: "Order Fulfilment", specification: {} })).toBe("Order Fulfilment");
@@ -120,6 +214,21 @@ describe("deriveNameFromModel (upload/paste fallback)", () => {
   it("falls back to the primary bounded context", () => {
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), null)).toBe("Orders");
     expect(deriveNameFromModel(JSON.stringify({ boundedContext: "Orders" }), JSON.stringify({ title: "  " }))).toBe("Orders");
+  });
+
+  // v1's `name` — the only workflow name an uploaded/pasted workflow.json carries,
+  // since there is no modeller payload to probe on that path.
+  it("prefers the export's name over the bounded context", () => {
+    const named = (name: unknown) => JSON.stringify({ name, boundedContext: "Orders" });
+    expect(deriveNameFromModel(named("Order Fulfilment"), null)).toBe("Order Fulfilment");
+    expect(deriveNameFromModel(named("  Padded  "), null)).toBe("Padded");
+    expect(deriveNameFromModel(named("   "), null)).toBe("Orders"); // blank → falls through
+    expect(deriveNameFromModel(named(7), null)).toBe("Orders"); // non-string → falls through
+  });
+
+  it("still lets the overlay title outrank the export's name", () => {
+    const wf = JSON.stringify({ name: "Order Fulfilment", boundedContext: "Orders" });
+    expect(deriveNameFromModel(wf, JSON.stringify({ title: "Renamed In Live" }))).toBe("Renamed In Live");
   });
 
   it("a bad overlay never blocks derivation", () => {

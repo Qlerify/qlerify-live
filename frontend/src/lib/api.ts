@@ -309,7 +309,13 @@ export type Me = {
   // The model lanes this member plays in the active workflow (admin-managed
   // mapping) — defaults the To do filter and the domain-role picker.
   domainRoles?: string[]
+  modellerUrl?: string
 }
+
+export const MODELLER_FALLBACK = "https://app.qlerify.com"
+
+export const modellerPlaceholder = (me: Me | null | undefined) =>
+  `${me?.modellerUrl || MODELLER_FALLBACK}/workflow/<projectId>/<workflowId>`
 
 export const whoami = async (): Promise<Me | null> => {
   try {

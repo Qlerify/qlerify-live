@@ -93,6 +93,24 @@ function fieldMap(v: unknown): Record<string, string> | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
+function discoveredFields(v: unknown): Array<{ name: string; dataType?: string; sample?: string }> | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: Array<{ name: string; dataType?: string; sample?: string }> = [];
+  for (const item of v.slice(0, 200)) {
+    if (!item || typeof item !== "object") continue;
+    const name = str((item as Record<string, unknown>).name);
+    if (!name) continue;
+    const dataType = str((item as Record<string, unknown>).dataType);
+    const sample = str((item as Record<string, unknown>).sample);
+    out.push({
+      name: name.slice(0, 200),
+      ...(dataType ? { dataType: dataType.slice(0, 40) } : {}),
+      ...(sample !== undefined ? { sample: sample.slice(0, 200) } : {}),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
 function limits(v: unknown): { pageSize?: number; limit?: number } | undefined {
   if (!v || typeof v !== "object") return undefined;
   const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : undefined);
@@ -239,6 +257,8 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
   const roles = dateRoles(src.dateRoles);
   const map = fieldMap(src.fieldMap);
   const lim = limits(src.limits);
+  const discovered = discoveredFields(src.discoveredFields);
+  const discoveredAtStr = str(src.discoveredAt);
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: str(src.boundedContext) ?? "", targetEntity: target, targetKind,
     phase: code ? "built" : "draft", mode: provMode(src.mode),
@@ -251,6 +271,8 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
     ...(endpoint !== undefined ? { endpoint } : {}),
     ...(connectionOptionId !== undefined ? { connectionOptionId } : {}),
     ...(ruleRecords.length ? { triggerRules: ruleRecords } : {}),
+    ...(discovered ? { discoveredFields: discovered } : {}),
+    ...(discovered && discoveredAtStr ? { discoveredAt: discoveredAtStr } : {}),
   };
   writeSidecar(cfg);
   ix.sidecarIds.add(id);

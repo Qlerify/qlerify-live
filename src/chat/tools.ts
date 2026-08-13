@@ -16,8 +16,9 @@ import { applyFieldMap } from "../packs/types.js";
 import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js";
 import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
-  connectorInfo, readConnectorCode, removeConnector,
+  connectorInfo, readConnectorCode, removeConnector, discoverSourceFields,
 } from "../packs/connector/orchestrate.js";
+import { fetchDocs } from "./fetch-docs.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { previewRule } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
@@ -43,6 +44,11 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   create_connector: "connector.build",
   build_connector: "connector.build",
   build_trigger_rules: "connector.build",
+  // Discovery executes connector code AND persists the observed shape on the
+  // sidecar; docs fetching is an AI-driven outbound network request. Both ride
+  // the connector-authoring capability (and its kill-switch, via guardData).
+  discover_source_fields: "connector.build",
+  fetch_docs: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -62,7 +68,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 // likewise checked inside their own handlers.
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
-  "build_trigger_rules", "ingest_connector", "remove_connector",
+  "build_trigger_rules", "ingest_connector", "remove_connector", "discover_source_fields",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -226,7 +232,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "adapter_dry_run",
     description:
-      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
+      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, the extra source fields beyond the model (extraFields — informational, NOT an error: ingest preserves them in the row's _raw JSON column), or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
     input_schema: {
       type: "object",
       properties: {
@@ -234,6 +240,30 @@ export const TOOLS: Anthropic.Tool[] = [
         limit: { type: "number", description: "Rows to attempt (default 3)." },
       },
       required: ["adapterId"],
+    },
+  },
+  {
+    name: "discover_source_fields",
+    description:
+      "Sample the LIVE source through the built connector (a few rows, nothing written to any table) and RECORD the source's actual field shape on the connector — names, inferred types, one example value each. Call it after a build_connector succeeds when the source's schema is unknown, or when adapter_dry_run shows missing required fields or surprising extras: the discovered shape is threaded into every later build_connector prompt automatically, so a repair maps the source's REAL fields instead of guessing. Returns the fields split into modelFields (land as columns) and extraFields (preserved in the row's _raw JSON at ingest).",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+      },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "fetch_docs",
+    description:
+      "Fetch one PUBLIC documentation web page (an API reference, developer guide, or schema description) and return its readable text. Call this BEFORE build_connector when you are unsure which endpoints, fields, auth scheme, or pagination a source system's API exposes — ground the build instructions in the vendor's real documentation instead of guessing, trying a few likely URLs if the first misses. HTTPS/HTTP to public hosts only (private and internal addresses are blocked); HTML is stripped to text and long pages are truncated.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The documentation page URL, e.g. https://developers.pipedrive.com/docs/api/v1" },
+      },
+      required: ["url"],
     },
   },
   {
@@ -478,7 +508,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
     // ownership inside their handlers with the unknown-id shape, so they don't leak
     // an existence oracle.)
     if (TOOL_OWNED_ID.has(name)) {
-      const idArg = typeof args.adapterId === "string" ? args.adapterId : "";
+      // Coerce EXACTLY like the handlers do (String(...)), so a non-string
+      // adapterId (an array, a number) can't slip past the gate and reach a
+      // foreign tenant's connector via the handler's own String() coercion.
+      const idArg = args.adapterId == null ? "" : String(args.adapterId);
       if (idArg && !ownsAdapterId(idArg)) return err(`no adapter "${idArg}" in this workflow`);
     }
     switch (name) {
@@ -508,6 +541,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return ok(await handleRunAdapterHealthcheck(String(args.adapterId ?? "")));
       case "adapter_dry_run":
         return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3)));
+      case "discover_source_fields":
+        return await handleDiscoverSourceFields(String(args.adapterId ?? ""));
+      case "fetch_docs":
+        return ok(await fetchDocs(String(args.url ?? "")));
       case "regenerate_adapter_body":
         return await handleRegenerateAdapterBody(args);
       case "reset_adapter":
@@ -705,11 +742,22 @@ async function handleRunAdapterHealthcheck(adapterId: string) {
   }
 }
 
+/** Sample the live source and record its observed field shape (orchestrate
+ * discoverSourceFields). Defense-in-depth ownership recheck like the sibling
+ * exec tools, on top of the TOOL_OWNED_ID gate. */
+async function handleDiscoverSourceFields(adapterId: string): Promise<ToolResult> {
+  if (!adapterId) return err("adapterId required");
+  if (!ownsAdapterId(adapterId)) return err(`no adapter "${adapterId}" in this workflow`); // foreign ≡ unknown (no oracle)
+  return ok(await discoverSourceFields(adapterId));
+}
+
 async function handleAdapterDryRun(adapterId: string, limit: number) {
   if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
   const a = getAdapter(adapterId);
   if (!a) return { error: `no adapter "${adapterId}"` };
-  const entity = getOntology().entity(a.targetEntity);
+  // Entity OR value object — VO targets are first-class (ingest and the /test
+  // oracle resolve both), so their required/extras grading must work too.
+  const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
   try {
     const fieldMap = await a.mapping();
     const { rows } = await a.pull({ limit: limit > 0 ? limit : 3 });
@@ -717,7 +765,15 @@ async function handleAdapterDryRun(adapterId: string, limit: number) {
     const missingRequired = entity
       ? entity.required.filter((f) => mapped.length === 0 || mapped.some((r) => r[f] === undefined || r[f] === null || r[f] === ""))
       : [];
-    return { ok: true, count: mapped.length, sample: mapped.slice(0, 2), missingRequired };
+    // Source fields beyond the model — informational, not an error: ingest folds
+    // them into the row's `_raw` JSON column (packs/ingest.ts), nothing is lost.
+    const platformCols = new Set(store.PLATFORM_ROW_COLS);
+    const extraFields = entity
+      ? [...new Set(mapped.flatMap((r) => Object.keys(r).filter((k) => !platformCols.has(k))))].filter(
+          (k) => !entity.fields.some((f) => f.name === k),
+        )
+      : [];
+    return { ok: true, count: mapped.length, sample: mapped.slice(0, 2), missingRequired, extraFields };
   } catch (e: any) {
     // The error report the doctor reasons about (and can pass to regenerate).
     return { ok: false, error: e?.message ?? String(e) };

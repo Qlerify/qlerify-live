@@ -63,6 +63,7 @@ export function buildRulePrompt(input: RuleGenInput): string {
     ``,
     `## The row shape (${target.name})`,
     fields || "  (no fields declared)",
+    `  _raw: TEXT — source fields the model does NOT declare, folded into ONE JSON-encoded string at ingest. When the condition references a field not listed above, parse it defensively — let raw = {}; try { raw = JSON.parse(String(row._raw ?? "{}")) || {} } catch {} — and treat an absent/unparseable _raw as those fields being ABSENT.`,
     ...(samples ? [``, `## Real rows right now (coerce like these actually look — numbers may arrive as strings, booleans as 0/1/"true")`, samples] : []),
     ``,
     `## The contract`,

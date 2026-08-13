@@ -56,8 +56,11 @@ import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
 // Platform / internal columns that are never business evidence and never part of
-// a derived event's payload.
-const PLATFORM_COLS = new Set(["version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id"]);
+// a derived event's payload — the store's own list, minus `id` (which IS part of
+// payloads and correlation). `_raw` (undeclared source fields folded to JSON at
+// ingest) is visible to authored trigger rules via the full row, but never to
+// the static heuristics or payloads.
+const PLATFORM_COLS = new Set(store.PLATFORM_ROW_COLS.filter((c) => c !== "id"));
 
 type EvidenceKind = "authored" | "create" | "status" | "fields" | "none";
 

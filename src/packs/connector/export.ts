@@ -27,7 +27,8 @@ export const CONNECTOR_EXPORT_VERSION = 1;
 export type ExportedConnectorConfig = Pick<AdapterConfig,
   | "id" | "kind" | "boundedContext" | "targetEntity" | "targetKind"
   | "phase" | "mode" | "instructions" | "deps" | "dateRoles"
-  | "fieldMap" | "limits" | "endpoint" | "connectionOptionId">;
+  | "fieldMap" | "limits" | "endpoint" | "connectionOptionId"
+  | "discoveredFields" | "discoveredAt">;
 
 /** A per-event trigger rule, portable form: the code travels inline; the
  * content-hash file name + builtAt are re-derived on import. gwtHash is the
@@ -76,6 +77,8 @@ export function exportConnectorEntry(cfg: AdapterConfig): ConnectorExportEntry {
     limits: cfg.limits,
     endpoint: cfg.endpoint,
     connectionOptionId: cfg.connectionOptionId,
+    discoveredFields: cfg.discoveredFields,
+    discoveredAt: cfg.discoveredAt,
   };
   for (const k of Object.keys(config) as (keyof ExportedConnectorConfig)[]) {
     if (config[k] === undefined) delete config[k];

@@ -210,3 +210,36 @@ describe("buildConnectorPrompt cycle guidance", () => {
     expect(prompt).not.toContain("Cycle membership");
   });
 });
+
+// Connectors default to capturing the WHOLE source record: model fields land as
+// columns, undeclared source fields are preserved in the row's _raw JSON at
+// ingest. The prompt must (a) instruct capture-everything, and (b) when a
+// discovery sample has run, show the source's REAL observed fields to map from.
+describe("buildConnectorPrompt capture-everything + discovered source fields", () => {
+  it("instructs capturing every source field by default, extras un-coerced", () => {
+    const prompt = buildConnectorPrompt(demandInput([]));
+    expect(prompt).toContain("Capture the WHOLE source record by default");
+    expect(prompt).toContain("The platform preserves the extra fields automatically");
+    expect(prompt).toContain("Extra (non-model) fields ride along AS-IS");
+  });
+
+  it("renders the discovered source fields with types and samples when discovery has run", () => {
+    const prompt = buildConnectorPrompt({
+      ...demandInput([]),
+      discoveredFields: [
+        { name: "deal_id", dataType: "string", sample: '"D-1001"' },
+        { name: "Deal Size (USD)", dataType: "integer", sample: "42000" },
+        { name: "owner", dataType: "json", sample: '{"name":"Kim"}' },
+      ],
+    });
+    expect(prompt).toContain("## Source fields observed on the LIVE source");
+    expect(prompt).toContain('deal_id: string — e.g. "D-1001"');
+    expect(prompt).toContain("Deal Size (USD): integer — e.g. 42000");
+    expect(prompt).toContain("include every remaining source field on your rows unchanged");
+  });
+
+  it("omits the discovered section when no discovery sample has run", () => {
+    const prompt = buildConnectorPrompt(demandInput([]));
+    expect(prompt).not.toContain("## Source fields observed on the LIVE source");
+  });
+});

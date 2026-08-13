@@ -263,6 +263,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
     target, targetKind, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
+    ...(cfg.discoveredFields?.length ? { discoveredFields: cfg.discoveredFields } : {}),
     workflowTables: [...getOntology().entities, ...getOntology().valueObjects].map((e) => e.name),
     ...(targetEvents.length ? { events: targetEvents } : {}),
     ...(fkLinks.length ? { fkLinks } : {}),
@@ -446,6 +447,94 @@ export function setConnectorDateRoles(
   registerAdapter(createConnectorAdapter(next));
   appendNote(id, "note", `Timestamp roles set: created=${clean.created ?? "—"}, updated=${clean.updated ?? "—"}.`);
   return clean;
+}
+
+// --- Source-field discovery (the introspect() seam, made real) ---------------
+// Sample the LIVE source through the built connector and record which fields it
+// actually exposes — the union of row keys, an inferred dataType, one truncated
+// example value each. Persisted on the sidecar (discoveredFields) so the next
+// build prompt maps the source's real shape instead of guessing, and served by
+// the adapter's introspect().
+
+const DISCOVER_SAMPLE_ROWS = 5;
+const DISCOVER_SAMPLE_CHARS = 120;
+
+/** Field names whose sample VALUES are never recorded (name + inferred type
+ * only): discovery persists samples to the sidecar and replays them into every
+ * later build prompt, so a secret-bearing source field must not ride along.
+ * Advisory, like the run-trace redaction — a secret under an innocuous name
+ * still passes; this catches the conventional names. */
+const SECRET_FIELD_RE = /(token|secret|passw|api[-_]?key|apikey|credential|private[-_]?key|authorization|bearer|ssn|session[-_]?id)/i;
+
+/** Infer the field list from sampled source rows. Pure (unit-testable): keys in
+ * first-seen order; the dataType comes from the first non-null value (nested
+ * structure reads as "json"); the sample is JSON-encoded and truncated so a
+ * long value can't bloat the sidecar or the build prompt — and omitted entirely
+ * for secret-named fields. */
+export function inferDiscoveredFields(rows: Array<Record<string, unknown>>): Array<{ name: string; dataType?: string; sample?: string }> {
+  const byName = new Map<string, { name: string; dataType?: string; sample?: string }>();
+  for (const row of rows) {
+    for (const [k, v] of Object.entries(row)) {
+      let f = byName.get(k);
+      if (!f) { f = { name: k }; byName.set(k, f); }
+      if (v === null || v === undefined || f.dataType !== undefined) continue;
+      f.dataType =
+        typeof v === "number" ? (Number.isInteger(v) ? "integer" : "number")
+        : typeof v === "boolean" ? "boolean"
+        : typeof v === "object" ? "json"
+        : "string";
+      if (!SECRET_FIELD_RE.test(k)) f.sample = JSON.stringify(v).slice(0, DISCOVER_SAMPLE_CHARS);
+    }
+  }
+  return [...byName.values()];
+}
+
+export interface DiscoverSourceResult {
+  /** Rows in the sample the fields were observed on. */
+  sampled: number;
+  fields: Array<{ name: string; dataType?: string; sample?: string }>;
+  /** Discovered names that match a model field (already land as columns). */
+  modelFields: string[];
+  /** Discovered names beyond the model — preserved in `_raw` at ingest. */
+  extraFields: string[];
+}
+
+/** Run the connector against the live source with a small limit and persist the
+ * observed field shape. Executes connector code — callers gate it exactly like
+ * a dry run (ownership + connector capability + kill-switch). */
+export async function discoverSourceFields(id: string): Promise<DiscoverSourceResult> {
+  const cfg = readSidecar(id);
+  const adapter = getAdapter(id);
+  if (!cfg || !adapter) throw new Error(`no connector "${id}"`);
+  const { rows } = await adapter.pull({ limit: DISCOVER_SAMPLE_ROWS });
+  const sample = rows[cfg.targetEntity] ?? [];
+  if (!sample.length) throw new Error("the source returned no rows to sample — nothing to discover (an incremental connector with no new items returns []; discovery needs a pull that yields rows)");
+  const fields = inferDiscoveredFields(sample);
+  const target = resolveTargetSchema(cfg.targetEntity);
+  const declared = new Set((target?.fields ?? []).map((f) => f.name));
+  // The model/extra split must mirror what INGEST will do, and ingest partitions
+  // AFTER applying the sidecar fieldMap — so classify each raw source name by
+  // the name it LANDS under. discoveredFields keep the raw source names (the
+  // shape the build prompt maps FROM).
+  const fieldMap = await adapter.mapping();
+  const landedName = (n: string) => fieldMap[n] ?? n;
+  const modelFields = fields.map((f) => f.name).filter((n) => declared.has(landedName(n)));
+  const extraFields = fields.map((f) => f.name).filter((n) => !declared.has(landedName(n)));
+  // Fresh-read → write, like every other sidecar mutator. Only a draft advances
+  // to the reserved "introspected" phase — discovery after build/test/populate
+  // must not regress the ladder.
+  const latest = readSidecar(id) ?? cfg;
+  const next: AdapterConfig = {
+    ...latest,
+    discoveredFields: fields,
+    discoveredAt: new Date().toISOString(),
+    ...(latest.phase === "draft" ? { phase: "introspected" as const } : {}),
+  };
+  // No re-registration needed: the registered adapter's introspect() fresh-reads
+  // the sidecar, and nothing pull() consumes changed.
+  writeSidecar(next);
+  appendNote(id, "note", `Discovered ${fields.length} source field(s) from a ${sample.length}-row sample — ${modelFields.length} map to ${cfg.targetEntity}, ${extraFields.length} extra (preserved in _raw at ingest).`);
+  return { sampled: sample.length, fields, modelFields, extraFields };
 }
 
 /** Read the connector's current source (for "show me the code"). */

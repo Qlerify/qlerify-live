@@ -35,6 +35,10 @@ interface ConnectorGenInput {
   /** Schemas of the kinds the target's fields hold via `relatedEntity` (resolved
    * by the caller — this module never reads the ontology). */
   related?: RelatedSchema[];
+  /** The SOURCE's observed field shape from a sampled live pull (orchestrate
+   * discoverSourceFields), when discovery has run — the real fields to map the
+   * model onto, instead of guessing from the operator's prose. */
+  discoveredFields?: Array<{ name: string; dataType?: string; sample?: string }>;
   /** Set when the target is a period-scoped CYCLE table (one row per subject per
    * period — twin/period.ts); resolved by the caller from the model's entity key. */
   cycle?: {
@@ -104,7 +108,7 @@ function exampleVocab(f: SchemaField, max = 10): string[] {
 
 /** Exported for unit tests — pure (no I/O, no ontology reads). */
 export function buildConnectorPrompt(input: ConnectorGenInput): string {
-  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, cycle, cycleChild, fkLinks, workflowTables, events } = input;
+  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, discoveredFields, cycle, cycleChild, fkLinks, workflowTables, events } = input;
   const fields = target.fields
     .map((f) => {
       const req = (target.required ?? []).includes(f.name) ? " (required)" : "";
@@ -114,6 +118,18 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
       return `  ${f.name}: ${f.dataType ?? "string"}${req}${ex}${rel}`;
     })
     .join("\n");
+
+  // The source's REAL field shape, when a discovery sample has run. Placed right
+  // after the target shape so the mapping (source name → model name) is stated
+  // from observation, not guessed from the operator's prose.
+  const discoveredSection = (discoveredFields ?? []).length
+    ? [
+        ``,
+        `## Source fields observed on the LIVE source (a sampled pull)`,
+        `These are the source's actual fields, seen on real records. Map the model field names above FROM these where they correspond (rename in code; keep values faithful), and include every remaining source field on your rows unchanged:`,
+        ...(discoveredFields ?? []).map((f) => `  ${f.name}${f.dataType ? `: ${f.dataType}` : ""}${f.sample !== undefined ? ` — e.g. ${f.sample}` : ""}`),
+      ]
+    : [];
 
   const relatedSection = (related ?? []).length
     ? [
@@ -219,13 +235,16 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     `## The source (operator's words)`,
     instructions || "(not specified yet — make a reasonable best effort and surface what you need via thrown errors / ctx.log)",
     ``,
-    `## Target shape — your returned objects MUST be keyed by THESE field names`,
+    `## Target shape — map the source onto THESE field names`,
     fields || "  (no fields declared)",
+    ``,
+    `Capture the WHOLE source record by default: key the fields above by exactly those names, and ALSO include every other field the source exposes as additional keys on the same row object — source-native names, nested objects/arrays welcome. The platform preserves the extra fields automatically alongside the model columns (nothing is dropped), so err on the side of returning everything. Narrow the field set only when the operator explicitly asks for specific fields.`,
     targetKind === "entity"
       ? cycle
         ? `\nDo not derive an "id" for these rows — the platform composes the canonical cycle row id (see the Recurring-cycle table rules below).`
         : `\nEach row should have a stable unique "id" (use the source's natural key; if there is none, derive a deterministic one).`
       : `\nThis is a value object (no identity of its own). Return the field values; the platform assigns an id when landing it as its own table.`,
+    ...discoveredSection,
     ...relatedSection,
     ...eventsSection,
     ...cycleSection,
@@ -250,11 +269,11 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     creds,
     ``,
     `## Export contract`,
-    `  export async function fetchRows(ctx) { /* … */ }  // returns an array of plain objects keyed by the field names above, at most ctx.limit of them (all of them when ctx.limit is null)`,
+    `  export async function fetchRows(ctx) { /* … */ }  // returns an array of plain objects — the model field names above plus the source's extra fields — at most ctx.limit of them (all of them when ctx.limit is null)`,
     `  export async function probe(ctx) { return { ok: true, detail: "…" } }  // OPTIONAL: a cheap reachability check`,
     ``,
     `## Rules`,
-    `- Coerce values to the target dataTypes (numbers as numbers, dates as ISO strings, booleans as booleans).`,
+    `- Coerce the MODEL fields' values to the target dataTypes (numbers as numbers, dates as ISO strings, booleans as booleans). Extra (non-model) fields ride along AS-IS — keep the source's own names and value shapes, do not coerce or rename them.`,
     `- If the operator asked to EMBED a related value object, return it as a nested object/array on that field — it will be stored as JSON.`,
     ...((related ?? []).length
       ? [`- FABRICATED data for a field with a Related schema must use ONLY that schema's allowed values (see "Related schemas") — distribute them realistically across rows, but never invent a value outside the list.`]

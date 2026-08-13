@@ -32,6 +32,8 @@ function buildAdapterPrompt(cfg: AdapterConfig, entity: EntitySchema): string {
     `Target entity "${entity.name}" fields (your returned objects must use THESE field names):`,
     fields,
     ``,
+    `Capture the whole source record by default: map the fields above by exactly those names, and ALSO include every other field the source exposes as additional keys on the same row object (source-native names) — the platform preserves the extras automatically. Narrow the field set only when the operator explicitly asks for specific fields.`,
+    ``,
     `Connection:`,
     `- endpoint: ${cfg.endpoint ? JSON.stringify(cfg.endpoint) : "(none configured — read it from ctx.endpoint, may be undefined)"}`,
     cfg.credentialsRef
@@ -39,7 +41,7 @@ function buildAdapterPrompt(cfg: AdapterConfig, entity: EntitySchema): string {
       : `- auth: none configured (ctx.secret may be undefined).`,
     ``,
     `Export exactly:`,
-    `  export async function fetchRows(ctx) { ... }  // returns an array of plain objects keyed by the entity field names above, at most ctx.limit of them`,
+    `  export async function fetchRows(ctx) { ... }  // returns an array of plain objects — the entity field names above plus the source's extra fields — at most ctx.limit of them`,
     `  // optional: export async function probe(ctx) { return { ok: boolean, detail?: string } }`,
     ``,
     `The ctx you are given (use ONLY these — there is no other ambient API):`,

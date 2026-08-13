@@ -96,6 +96,15 @@ export function tableFor(entity: EntitySchema): string {
   return entity.name;
 }
 
+/** Every platform column createTableSql adds beyond a model's declared fields.
+ * KEEP IN SYNC with createTableSql below — the DDL and this list co-evolve in
+ * this one file; every other reader (the ingest partition, derive's skip-list,
+ * the dry-run/test oracles) imports it instead of hand-copying (bc-routes' copy
+ * had already drifted two columns behind before this existed). */
+export const PLATFORM_ROW_COLS: readonly string[] = [
+  "id", "version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id", "_raw",
+];
+
 function createTableSql(entity: EntitySchema): string {
   // Guard the workflow namespace: a model entity named "_p…" could otherwise
   // collide with another workflow's gen__p<hex>_… tables.
@@ -124,6 +133,14 @@ function createTableSql(entity: EntitySchema): string {
   // connector pulled it: a placeholder the next ingest MERGES into (instead of
   // skipping on the existing id) and then clears.
   if (!declared.has("_provisional")) cols.push(`${ident("_provisional")} INTEGER`);
+  // Overflow capture: source fields the model does NOT declare, folded into one
+  // JSON object per row by ingest (packs/ingest.ts). Connectors may emit every
+  // field the source exposes; the undeclared ones are witnessed here instead of
+  // failing the INSERT on an unknown column. Never business evidence (derive
+  // iterates model fields only) — but visible to authored trigger rules,
+  // ctx.readTable snapshots, and the raw explorer, and available to promote
+  // into the model later.
+  if (!declared.has("_raw")) cols.push(`${ident("_raw")} TEXT`);
   // Multi-tenant owner. Snake-cased so it never collides with a model field
   // named `organizationId`; stamped on insert, filtered on read.
   if (!declared.has("organization_id")) cols.push(`${ident("organization_id")} TEXT`);

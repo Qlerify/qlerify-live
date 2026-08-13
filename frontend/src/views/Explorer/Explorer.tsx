@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import { useRoute } from "@/lib/router.ts"
 import { useStore } from "@/lib/store.ts"
 import {
@@ -21,6 +21,22 @@ import type { ExpState, ExpSystem, ExpTable } from "@/lib/types.ts"
 import { TableGlyph } from "./TableGlyph.tsx"
 import { RowEventsCell } from "./RowEvents.tsx"
 import { FiltersPanel } from "./FiltersPanel.tsx"
+import { FieldValue } from "@/views/Detail/FieldValue.tsx"
+
+// The `_raw` column holds the ingest fold of source fields the model doesn't
+// declare — one JSON object per row. Parsed here so the cell can render as an
+// expandable "N extra fields" toggle instead of a truncated JSON string.
+const parseRawFold = (v: unknown): Record<string, unknown> | null => {
+  if (typeof v !== "string" || !v) {
+    return null
+  }
+  try {
+    const p = JSON.parse(v)
+    return p && typeof p === "object" && !Array.isArray(p) ? p : null
+  } catch {
+    return null
+  }
+}
 
 const COL_STYLE: Record<ColState, { text: string; dot: string; title: string }> = {
   green: { text: "text-emerald-700", dot: "bg-emerald-500", title: "In the model and the data" },
@@ -66,6 +82,9 @@ export const Explorer = () => {
   const sysBody = useRef<HTMLDivElement>(null)
   const tblBody = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
+  // Row id whose `_raw` extras panel is expanded (one at a time; a stale id
+  // after paging/entity switches simply matches nothing).
+  const [rawOpen, setRawOpen] = useState<string | null>(null)
 
   useEffect(() => {
     loadExplorer(route.expSys, route.expEntity).catch(() => {})
@@ -361,33 +380,75 @@ export const Explorer = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r, ri) => (
-                      <tr key={String(r.id ?? ri)} className="hover:bg-stone-50 border-b border-stone-100">
-                        <td className="px-3 py-2 align-top">
-                          <input type="checkbox" className="rounded border-stone-300" />
-                        </td>
-                        {cols.map((col, ci) => {
-                          const val = r[col.name]
-                          const empty = val === null || val === undefined || val === ""
-                          const s = empty ? "" : String(val)
-                          return (
-                            <td
-                              key={col.name}
-                              className={`px-3 py-2 text-sm whitespace-nowrap align-top ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}`}
-                            >
-                              {empty ? (
-                                <span className="text-stone-300">—</span>
-                              ) : s.length > 44 ? (
-                                s.slice(0, 44) + "…"
-                              ) : (
-                                s
-                              )}
+                    {rows.map((r, ri) => {
+                      const rid = String(r.id ?? ri)
+                      const rawObj = parseRawFold(r._raw)
+                      const rawOpened = rawOpen === rid && !!rawObj
+                      return (
+                        <Fragment key={rid}>
+                          <tr className="hover:bg-stone-50 border-b border-stone-100">
+                            <td className="px-3 py-2 align-top">
+                              <input type="checkbox" className="rounded border-stone-300" />
                             </td>
-                          )
-                        })}
-                        <RowEventsCell events={e.rowEvents[String(r.id)]} busy={e.rowEventsBusy} />
-                      </tr>
-                    ))}
+                            {cols.map((col, ci) => {
+                              const val = r[col.name]
+                              const empty = val === null || val === undefined || val === ""
+                              const s = empty ? "" : String(val)
+                              if (col.name === "_raw" && rawObj) {
+                                const n = Object.keys(rawObj).length
+                                return (
+                                  <td key={col.name} className="px-3 py-2 text-sm whitespace-nowrap align-top">
+                                    <button
+                                      type="button"
+                                      aria-expanded={rawOpened}
+                                      onClick={() => setRawOpen(rawOpened ? null : rid)}
+                                      className="text-xs text-amber-700 hover:text-amber-900 underline decoration-dotted"
+                                    >
+                                      {n} extra field{n === 1 ? "" : "s"} {rawOpened ? "▴" : "▾"}
+                                    </button>
+                                  </td>
+                                )
+                              }
+                              return (
+                                <td
+                                  key={col.name}
+                                  className={`px-3 py-2 text-sm whitespace-nowrap align-top ${ci === 0 ? "text-sky-700 font-medium mono text-xs" : "text-stone-700"}`}
+                                >
+                                  {empty ? (
+                                    <span className="text-stone-300">—</span>
+                                  ) : s.length > 44 ? (
+                                    s.slice(0, 44) + "…"
+                                  ) : (
+                                    s
+                                  )}
+                                </td>
+                              )
+                            })}
+                            <RowEventsCell events={e.rowEvents[String(r.id)]} busy={e.rowEventsBusy} />
+                          </tr>
+                          {rawOpened && rawObj && (
+                            <tr className="border-b border-stone-100 bg-amber-50/40">
+                              <td />
+                              <td colSpan={cols.length + 1} className="px-3 py-2">
+                                <div className="text-[10px] uppercase tracking-wide text-amber-700 mb-1.5">
+                                  Extra source fields — preserved in _raw, not in the model
+                                </div>
+                                <div className="grid grid-cols-[minmax(0,14rem)_minmax(0,1fr)] gap-x-4 gap-y-1 max-w-4xl">
+                                  {Object.entries(rawObj).map(([k, v]) => (
+                                    <Fragment key={k}>
+                                      <div className="mono text-[11px] text-amber-800 break-words">{k}</div>
+                                      <div className="text-xs text-stone-700 min-w-0">
+                                        <FieldValue name={k} value={v} />
+                                      </div>
+                                    </Fragment>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

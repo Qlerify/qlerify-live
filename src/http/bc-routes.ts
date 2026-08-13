@@ -50,8 +50,11 @@ function serializeAdapter(a: ReturnType<typeof listAdapters>[number]) {
 }
 
 /** Grade a pulled batch against the model entity: per-required-field coverage,
- * type mismatches, and extra unmapped keys. The test-live oracle (no insert). */
-const PLATFORM_COLS = new Set(["id", "version", "createdAt", "updatedAt", "_provenance"]);
+ * type mismatches, and extra unmapped keys. The test-live oracle (no insert).
+ * `extraFields` is informational, not an error: ingest folds undeclared keys
+ * into the row's `_raw` JSON column (packs/ingest.ts), so extras are the
+ * source fields that will be PRESERVED there rather than landed as columns. */
+const PLATFORM_COLS = new Set(store.PLATFORM_ROW_COLS);
 function diffRows(rows: Array<Record<string, unknown>>, entity: EntitySchema) {
   const fieldByName = new Map(entity.fields.map((f) => [f.name, f] as const));
   const declared = new Set(entity.fields.map((f) => f.name));

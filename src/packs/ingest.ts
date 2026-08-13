@@ -60,7 +60,7 @@ export interface IngestSummary {
  * JSON-stringified so they land in the TEXT column verbatim — this is the
  * "embed the VO as JSON on the row" path, free because gen_ columns are TEXT. */
 function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   for (const [k, v] of Object.entries(row)) {
     out[k] = v !== null && typeof v === "object" ? JSON.stringify(v) : v;
   }
@@ -74,6 +74,42 @@ function hasValue(v: unknown): boolean {
 /** Platform/identity columns an upsert must never touch: identity + optimistic
  * lock + tenancy + the provisional marker (cleared only by the cycle merge). */
 const UPSERT_EXCLUDED = new Set(["id", "version", "organization_id", "_provisional"]);
+
+/** The ONLY platform columns a source row may supply values for: identity plus
+ * the witnessed source timestamps. Every OTHER platform column on a gen_ table
+ * (projection-store PLATFORM_ROW_COLS) is ENGINE-OWNED — version is the
+ * optimistic lock, organization_id the tenant stamp, _provenance the adapter
+ * mode, _provisional the cycle-placeholder marker, _raw the fold itself — so a
+ * source field carrying one of those names is just DATA and folds into `_raw`
+ * like any other undeclared key. Letting them through would let a source seed
+ * the lock with garbage (every later upsert dies as a stale write), pick its
+ * own tenant, or trip the provisional wholesale merge. */
+const SOURCE_SUPPLIABLE_COLS = ["id", "createdAt", "updatedAt"];
+
+/** Merge newly witnessed extra fields over a row's stored `_raw` JSON. Per-key:
+ * an incoming value wins, but a null/absent incoming value never erases what an
+ * earlier pull witnessed — the same rule the declared-column upsert applies.
+ * Null-prototype accumulator so a source key named "__proto__" is stored like
+ * any other instead of hitting the Object.prototype accessor. */
+function mergeRawJson(storedRaw: unknown, extras: Record<string, unknown>): string {
+  const base: Record<string, unknown> = Object.create(null);
+  if (typeof storedRaw === "string" && storedRaw) {
+    try {
+      const parsed = JSON.parse(storedRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.assign(base, parsed);
+    } catch { /* unparseable stored value — rebuild from the incoming extras */ }
+  }
+  // Purge empties from the stored fold too: folds written before the
+  // only-witnessed-values filter existed (below) carry hundreds of nulls from
+  // return-every-property sources — this self-heals them on the next merge.
+  for (const k of Object.keys(base)) {
+    if (!hasValue(base[k])) delete base[k];
+  }
+  for (const [k, v] of Object.entries(extras)) {
+    if (hasValue(v)) base[k] = v;
+  }
+  return JSON.stringify(base);
+}
 
 /** Diff an incoming mapped row against the stored one. Returns the columns to
  * update, or null when the row is unchanged (the skip case). Semantics:
@@ -92,6 +128,15 @@ function upsertChanges(
 ): Record<string, unknown> | null {
   const uCol = dateRoles?.updated;
   if (uCol && hasValue(mapped[uCol]) && hasValue(existing[uCol]) && String(mapped[uCol]) === String(existing[uCol])) {
+    // The watermark certifies the SOURCE RECORD didn't drift — but `_raw` is
+    // platform bookkeeping the watermark doesn't cover: a connector rebuilt to
+    // capture-everything starts returning extras whose records' last-modified
+    // never moved, and those must still land or existing rows would never gain
+    // their fold. The merged JSON is byte-stable, so an identical re-pull still
+    // converges to null (the skip).
+    if (hasValue(mapped._raw) && String(mapped._raw) !== String(existing._raw ?? "")) {
+      return { _raw: mapped._raw };
+    }
     return null;
   }
   const changes: Record<string, unknown> = {};
@@ -159,6 +204,13 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
 
     await store.ensureTable(entity);
+    // Tables created before overflow capture existed lack `_raw` — add it
+    // additively (a fresh createTableSql already carries it).
+    await store.ensureColumn(adapter.targetEntity, "_raw");
+    // Keys a row may land as real columns: the model's declared fields plus the
+    // source-suppliable platform columns. Everything else — undeclared business
+    // fields AND engine-owned platform names — folds into `_raw`.
+    const declaredCols = new Set<string>([...entity.fields.map((f) => f.name), ...SOURCE_SUPPLIABLE_COLS]);
     // Period-scoped cycle target (twin/period.ts): the ENGINE owns the row id —
     // canonical subject@period — so connectors never hand-compose composite keys
     // and a next-period pull creates the next cycle instead of skipping on a
@@ -175,7 +227,33 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     const incoming = rows[adapter.targetEntity] ?? [];
 
     for (const raw of incoming) {
-      const mapped = flattenValues(applyFieldMap(raw, fieldMap));
+      // Partition the (field-mapped) row: keys the table has columns for vs.
+      // EXTRAS the model doesn't declare. Extras are witnessed, not dropped —
+      // folded into the `_raw` JSON column — so a connector may return every
+      // field the source exposes without the model declaring each one first
+      // (and a source field named unlike a SQL identifier can't break the
+      // INSERT). Nested extra values stay real JSON here, not double-encoded
+      // strings, which is why the fold happens before flattenValues.
+      const renamed = applyFieldMap(raw, fieldMap);
+      // Null-prototype accumulators: a source key named "__proto__" must land
+      // as an own property (and reach the fold), not hit the prototype accessor.
+      const kept: Record<string, unknown> = Object.create(null);
+      const extras: Record<string, unknown> = Object.create(null);
+      for (const [k, v] of Object.entries(renamed)) {
+        if (declaredCols.has(k)) {
+          kept[k] = v;
+          continue;
+        }
+        // Only witnessed VALUES enter the fold. Sources that return EVERY field
+        // with null/"" for the unset ones (HubSpot returns the whole property
+        // catalog per record) would otherwise drown the real extras in noise
+        // and bloat every row — and the merge already treats empty incoming
+        // values as absent, so keeping them here bought nothing.
+        if (hasValue(v)) extras[k] = v;
+      }
+      const mapped = flattenValues(kept);
+      const hasExtras = Object.keys(extras).length > 0;
+      if (hasExtras) mapped._raw = JSON.stringify(extras);
       // Ingested rows carry ONLY timestamps the source actually recorded: a
       // createdAt/updatedAt the record doesn't supply lands as NULL, never as
       // insert's ingestion-time default. A fabricated "when we pulled" sits
@@ -205,6 +283,12 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
       mapped._provenance = adapter.mode; // current-state provenance on the row
       const existing = await store.findById(adapter.targetEntity, id);
       if (existing) {
+        // Extras MERGE over the stored `_raw` (per-key, incoming wins): a pull
+        // that returns fewer extra fields must not erase what an earlier pull
+        // witnessed — the declared-column no-clobber rule, applied to the fold.
+        if (hasExtras && hasValue(existing._raw)) {
+          mapped._raw = mergeRawJson(existing._raw, extras);
+        }
         if (existing._provisional) {
           // A cycle row the engine opened lazily before this pull: ENRICH it
           // with the source's real values instead of skipping on the id.

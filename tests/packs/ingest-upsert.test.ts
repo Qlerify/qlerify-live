@@ -211,3 +211,148 @@ describe("ingest upsert — drifted rows update, progression fires later events 
       expect(row!.lastModified).toBe("2026-03-09T00:00:00.000Z");
     }));
 });
+
+describe("ingest extras — source fields the model doesn't declare land in _raw", () => {
+  it("undeclared fields (nested, and named unlike SQL identifiers) are folded into _raw, not dropped and not fatal", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-land");
+      src.set([{
+        id: "ord-x", status: "NEW", amount: "900",
+        region: "EMEA",
+        "Deal Size (USD)": 1234,
+        meta: { source: "crm", tags: ["a", "b"] },
+      }]);
+      const first = await ingestPull("extras-land", { derive: false });
+      expect(first.inserted).toBe(1);
+      const row = await store.findById("Order", "ord-x");
+      expect(row!.status).toBe("NEW");
+      const rawObj = JSON.parse(String(row!._raw));
+      expect(rawObj).toEqual({ region: "EMEA", "Deal Size (USD)": 1234, meta: { source: "crm", tags: ["a", "b"] } });
+
+      // Extras are never business evidence: the derived create event's payload
+      // must not carry _raw or any undeclared field.
+      await deriveFromData();
+      const ev = await prisma.eventLog.findFirst({
+        where: { workflowId: model.workflowId, aggregateId: "ord-x", eventRef: { contains: "OrderCreated" } },
+      });
+      const payload = JSON.parse(ev!.payload);
+      expect(payload._raw).toBeUndefined();
+      expect(payload.region).toBeUndefined();
+    }));
+
+  it("re-pulls MERGE extras per-key (a pull returning fewer extras never erases witnessed ones) and identical extras don't churn", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-merge");
+      src.set([{ id: "ord-y", status: "NEW", region: "EMEA", owner: "kim" }]);
+      await ingestPull("extras-merge", { derive: false });
+
+      // Changed extra + new extra + omitted extra: only declared no-clobber
+      // semantics, applied inside the fold — owner survives the omission.
+      src.set([{ id: "ord-y", status: "NEW", region: "APAC", tier: "gold" }]);
+      const second = await ingestPull("extras-merge", { derive: false });
+      expect(second.updated).toBe(1); // extras-only drift still counts as drift
+      const merged = JSON.parse(String((await store.findById("Order", "ord-y"))!._raw));
+      expect(merged).toEqual({ region: "APAC", owner: "kim", tier: "gold" });
+
+      // An identical re-pull converges to "unchanged" — the merged JSON is
+      // byte-stable, so _raw must not churn the updated counter every pull.
+      src.set([{ id: "ord-y", status: "NEW", region: "APAC", tier: "gold" }]);
+      const third = await ingestPull("extras-merge", { derive: false });
+      expect(third.updated).toBe(0);
+      expect(third.skipped).toBe(1);
+    }));
+
+  it("rows with ONLY declared fields leave _raw untouched (null)", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-none");
+      src.set([{ id: "ord-z", status: "NEW", amount: "10" }]);
+      await ingestPull("extras-none", { derive: false });
+      expect((await store.findById("Order", "ord-z"))!._raw).toBeNull();
+    }));
+
+  it("only witnessed VALUES enter the fold — null/empty extras are noise, and stored empties purge on merge", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-nulls");
+      // HubSpot-style response: every property present, most of them null.
+      src.set([{ id: "ord-h", status: "NEW", region: "EMEA", about_us: null, account_hypothesis: null, note: "" }]);
+      await ingestPull("extras-nulls", { derive: false });
+      let row = await store.findById("Order", "ord-h");
+      expect(JSON.parse(String(row!._raw))).toEqual({ region: "EMEA" });
+
+      // A fold written BEFORE the filter existed (null-laden) self-heals on the
+      // next pull that merges: stored empties purge, real values survive.
+      await store.update("Order", "ord-h", { _raw: '{"about_us":null,"region":"EMEA","legacy":"keep"}' }, Number(row!.version));
+      src.set([{ id: "ord-h", status: "NEW", region: "APAC", about_us: null }]);
+      const healed = await ingestPull("extras-nulls", { derive: false });
+      expect(healed.updated).toBe(1);
+      row = await store.findById("Order", "ord-h");
+      expect(JSON.parse(String(row!._raw))).toEqual({ region: "APAC", legacy: "keep" });
+    }));
+
+  it("engine-owned platform column names from the source fold into _raw, never into live columns", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-engine");
+      // 'version' would poison the optimistic lock (NaN expectedVersion bricks
+      // every later upsert), 'organization_id' would defeat the tenant stamp,
+      // and a truthy '_provisional' would trip the cycle wholesale merge. All
+      // three are just DATA when the source happens to use those names.
+      src.set([{ id: "ord-e", status: "NEW", version: "2.1.0", organization_id: "crm-org-9", _provisional: 1 }]);
+      const first = await ingestPull("extras-engine", { derive: false });
+      expect(first.inserted).toBe(1);
+      const row = await store.findById("Order", "ord-e");
+      expect(row).not.toBeNull(); // visible to the OWNING org — tenant stamp intact
+      expect(row!.version).toBe(0); // the engine's lock seed, not the source string
+      expect(row!._provisional).toBeNull();
+      expect(JSON.parse(String(row!._raw))).toEqual({ version: "2.1.0", organization_id: "crm-org-9", _provisional: 1 });
+
+      // Source drift still lands (the lock was not poisoned) and the provisional
+      // wholesale-merge branch never fires.
+      src.set([{ id: "ord-e", status: "SHIPPED", version: "2.1.0", organization_id: "crm-org-9", _provisional: 1 }]);
+      const second = await ingestPull("extras-engine", { derive: false });
+      expect(second.updated).toBe(1);
+      expect(second.merged).toBe(0);
+      expect((await store.findById("Order", "ord-e"))!.status).toBe("SHIPPED");
+    }));
+
+  it("a source field named __proto__ still lands in _raw (no prototype-accessor swallowing)", () =>
+    model.run(async () => {
+      const src = orderAdapter("extras-proto");
+      // JSON.parse creates __proto__ as an OWN key — exactly how connector rows
+      // arrive from the sandboxed child's result file.
+      src.set([JSON.parse('{"id":"ord-p","status":"NEW","__proto__":{"polluted":true}}')]);
+      await ingestPull("extras-proto", { derive: false });
+      const raw = JSON.parse(String((await store.findById("Order", "ord-p"))!._raw));
+      expect(raw["__proto__"]).toEqual({ polluted: true });
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined(); // no global pollution either
+    }));
+
+  it("extras land even under an unchanged dateRoles.updated watermark (a rebuilt connector backfills _raw)", () =>
+    model.run(async () => {
+      const id = "extras-watermark";
+      writeSidecar({
+        id, kind: "simulated", boundedContext: "Shop", targetEntity: "Order",
+        phase: "built", mode: "simulated", workflowId: model.workflowId,
+        organizationId: model.orgId, dateRoles: { updated: "lastModified" },
+      });
+      sidecars.push(id);
+      const src = orderAdapter(id);
+      src.set([{ id: "ord-w", status: "NEW", lastModified: "2026-03-01T00:00:00.000Z" }]);
+      await ingestPull(id, { derive: false });
+      expect((await store.findById("Order", "ord-w"))!._raw).toBeNull();
+
+      // The connector is rebuilt to capture-everything: same watermark, new
+      // extras. The watermark still holds SOURCE drift (status must not land),
+      // but the fold — platform bookkeeping — must.
+      src.set([{ id: "ord-w", status: "SHIPPED", lastModified: "2026-03-01T00:00:00.000Z", region: "EMEA" }]);
+      const second = await ingestPull(id, { derive: false });
+      expect(second.updated).toBe(1);
+      const row = await store.findById("Order", "ord-w");
+      expect(row!.status).toBe("NEW");
+      expect(JSON.parse(String(row!._raw))).toEqual({ region: "EMEA" });
+
+      // An identical re-pull converges to skip — the merged JSON is byte-stable.
+      const third = await ingestPull(id, { derive: false });
+      expect(third.updated).toBe(0);
+      expect(third.skipped).toBe(1);
+    }));
+});

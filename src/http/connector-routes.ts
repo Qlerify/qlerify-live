@@ -303,12 +303,20 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
         organizationId: cfg.organizationId ?? owner.organizationId,
       };
       delete next.triggerRules;
+      // The discovery sample has the same table binding as the rules: it was
+      // taken against the OLD target's output shape, and a stale sample would
+      // poison every later build prompt + introspect(). Drop it; the operator
+      // re-runs discover_source_fields against the new target.
+      const droppedDiscovery = !!cfg.discoveredFields?.length;
+      delete next.discoveredFields;
+      delete next.discoveredAt;
       writeSidecar(next);
       for (const r of droppedRules) deleteRuleFiles(id, r.eventKey);
       registerAdapter(createConnectorAdapter(next));
       await regenerateConnectorSummary(id); // table + access changed → refresh the description
       const ruleNote = droppedRules.length ? ` ${droppedRules.length} trigger rule(s) were dropped (they belonged to ${previous}'s events).` : "";
-      appendNote(id, "repointed", `Re-pointed from ${previous} to ${target}.${ruleNote}`);
+      const discoveryNote = droppedDiscovery ? ` The discovered source-field sample was dropped — re-run discovery against the new target.` : "";
+      appendNote(id, "repointed", `Re-pointed from ${previous} to ${target}.${ruleNote}${discoveryNote}`);
       return { id, target, previousTarget: previous, targetKind, droppedRules: droppedRules.length };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });

@@ -170,6 +170,15 @@ export interface AdapterConfig {
    * every pre-existing sidecar — connectors without rules run the static
    * evidence heuristics unchanged. */
   triggerRules?: TriggerRule[];
+  /** The SOURCE's observed field shape — the union of row keys from a sampled
+   * pull (orchestrate discoverSourceFields), with an inferred dataType and one
+   * truncated example value per field. Distinct from the model schema: this is
+   * what the source actually exposes. Threaded into the connector build prompt
+   * so the author maps real fields instead of guessing, and served by the
+   * adapter's introspect(). */
+  discoveredFields?: Array<{ name: string; dataType?: string; sample?: string }>;
+  /** When the discovery sample was taken (ISO). */
+  discoveredAt?: string;
 }
 
 /** Resolves a credentialsRef to the actual secret. Dev = env var; KeyVault later

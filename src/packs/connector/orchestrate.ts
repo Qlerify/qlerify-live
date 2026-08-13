@@ -13,7 +13,7 @@ import { getAdapter, registerAdapter, unregisterAdapter } from "../registry.js";
 import { readSidecar, writeSidecar, deleteSidecar, listSidecars } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
 import {
-  generateConnectorModule, describeConnector, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS,
+  generateConnectorModule, describeConnectorStructured, proposeDateRoles, timestampFields, PLATFORM_TIMESTAMP_COLS,
   type RelatedSchema,
 } from "./codegen.js";
 import type { EntitySchema } from "../../ontology/model.js";
@@ -80,9 +80,8 @@ export async function regenerateConnectorSummary(id: string, codeOverride?: stri
   const target = resolveTargetSchema(cfg.targetEntity);
   if (!target) return;
   const keys = credentialKeys(id);
-  let summary: string;
   try {
-    summary = await describeConnector({
+    const d = await describeConnectorStructured({
       system: cfg.boundedContext,
       target,
       targetKind: cfg.targetKind ?? (getOntology().entity(cfg.targetEntity) ? "entity" : "valueObject"),
@@ -93,10 +92,15 @@ export async function regenerateConnectorSummary(id: string, codeOverride?: stri
       mode: cfg.mode,
       code: codeOverride ?? readModule(id) ?? "",
     });
+    // Only replace stored facets when the describe actually returned structured
+    // JSON; a prose fallback keeps the prior facets (an empty {filters:[]} would
+    // silently erase a real "Filters" manifest section the code still enforces).
+    setConnectorSummary(id, d.summary, d.structured ? { filters: d.filters, ...(d.incremental ? { incremental: d.incremental } : {}) } : undefined);
   } catch {
-    summary = fallbackSummary(cfg, keys);
+    // Deterministic fallback keeps a summary present; stale facets are replaced
+    // only by a successful describe, never wiped by a failed one.
+    setConnectorSummary(id, fallbackSummary(cfg, keys));
   }
-  setConnectorSummary(id, summary);
 }
 
 interface CreateConnectorInput {
@@ -182,6 +186,32 @@ export function relatedSchemasFor(target: EntitySchema): RelatedSchema[] {
   return out;
 }
 
+/** The target table's lifecycle events (linear order) with their GWTs — what
+ * the connector-builder prompt and the trigger-rule compiler both ground on.
+ * Empty for value-object targets (events root on entities only). */
+export function eventsForTarget(targetName: string): Array<{
+  key: string; name: string; commandName: string; acceptanceCriteria: string[];
+  siblings?: string[]; coupledTo?: string;
+}> {
+  const o = getOntology();
+  const rooted = o.linearOrder()
+    .map((k) => o.eventByKey(k))
+    .filter((e) => !!e && e.aggregateRoot === targetName && !!e.commandName);
+  return rooted.map((e) => {
+    const siblings = rooted
+      .filter((s) => s!.key !== e!.key && s!.commandName === e!.commandName)
+      .map((s) => s!.name);
+    return {
+      key: e!.key,
+      name: e!.name,
+      commandName: e!.commandName,
+      acceptanceCriteria: e!.acceptanceCriteria,
+      ...(siblings.length ? { siblings } : {}),
+      ...(e!.coupledTo ? { coupledTo: o.eventByKey(e!.coupledTo)?.name ?? e!.coupledTo } : {}),
+    };
+  });
+}
+
 interface BuildConnectorResult {
   deps: string[];
   install: InstallResult;
@@ -228,11 +258,13 @@ export async function buildConnector(id: string, instructions?: string, errorRep
       });
     }
   }
+  const targetEvents = targetKind === "entity" ? eventsForTarget(target.name) : [];
   const gen = await generateConnectorModule({
     target, targetKind, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
     workflowTables: [...getOntology().entities, ...getOntology().valueObjects].map((e) => e.name),
+    ...(targetEvents.length ? { events: targetEvents } : {}),
     ...(fkLinks.length ? { fkLinks } : {}),
     ...(pk
       ? {

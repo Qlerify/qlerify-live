@@ -46,10 +46,12 @@ import { prisma } from "../db.js";
 import { emitMany, type BatchEvent } from "../events/bus.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { currentWorkflowId } from "../platform/tenancy/context.js";
 import { withActorKind } from "../platform/tenancy/actor.js";
 import { dateRolesForEntity } from "../packs/connector/orchestrate.js";
+import { loadAuthoredRuleSet } from "../packs/connector/rules.js";
 import { decideCaseId, foreignKeyFields, cycleLinkFields, subjectValues, type CycleLink } from "./correlate.js";
-import { periodOf, periodStart, cycleId, periodKeyOf } from "./period.js";
+import { periodOf, periodStart, cycleId, periodKeyOf, type PeriodGranularity } from "./period.js";
 import { PROV_MODES, type ProvMode } from "./provenance.js";
 import * as store from "./projection-store.js";
 
@@ -57,7 +59,79 @@ import * as store from "./projection-store.js";
 // a derived event's payload.
 const PLATFORM_COLS = new Set(["version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id"]);
 
-type EvidenceKind = "create" | "status" | "fields" | "none";
+type EvidenceKind = "authored" | "create" | "status" | "fields" | "none";
+
+// ---------------------------------------------------------------------------
+// Authored trigger rules — the per-EVENT escape hatch from the static evidence
+// heuristics below. A rule is a tiny pure predicate compiled (by AI, from the
+// event's GWTs + the operator's condition) or hand-written per connector, loaded
+// by packs/connector/rules.ts and INJECTED into planDerivation as plain
+// functions, so the planner stays pure and unit-testable. A rule replaces only
+// the firing predicate: payload + business-date semantics keep the event's
+// static SHAPE kind (an authored create still rides FKs and seeds the ladder's
+// first status; an authored status event still stamps its target status).
+// ---------------------------------------------------------------------------
+
+/** What a rule module's detect() must synchronously return. */
+export interface AuthoredRuleResult {
+  fired: boolean;
+  /** Human-readable justification citing the deciding values. */
+  evidence?: string;
+}
+
+/** The compiled predicate. `previous` is reserved for a future re-fire-on-change
+ * contract — always null today, so rules written now survive that extension. */
+export type AuthoredRuleFn = (
+  row: Record<string, unknown>,
+  ctx: RuleContext,
+  previous: null,
+) => AuthoredRuleResult;
+
+/** What a rule may see. Deliberately closed: no network, no fs, no credentials —
+ * a rule is a pure classification of workflow data (enforced by the deny-scan in
+ * packs/connector/rules.ts; this type is the honest inventory). */
+export interface RuleContext {
+  event: { key: string; ref: string; name: string; acceptanceCriteria: string[] };
+  entity: EntitySchema;
+  /** Fixed once per derive pass — "current quarter" is stable across rows. */
+  now: Date;
+  period: {
+    of: (date: Date, granularity: PeriodGranularity) => string;
+    start: (period: string, granularity: PeriodGranularity) => Date | null;
+  };
+  /** Names of the workflow tables readTable can serve. */
+  tables: string[];
+  /** Read-only snapshot of another workflow table (case-insensitive name;
+   * unknown table → []). Capped rows — a rule must not assume completeness. */
+  readTable(name: string): Array<Record<string, unknown>>;
+  log(msg: string): void;
+}
+
+/** The rules loaded for one derive pass, keyed by event key, plus the ctx
+ * factory (built by packs/connector/rules.ts over the pass's row snapshots). */
+export interface AuthoredRuleSet {
+  rules: Map<string, { detect: AuthoredRuleFn; condition?: string; connectorId?: string }>;
+  makeCtx(event: OntologyEvent, entity: EntitySchema): RuleContext;
+  /** ctx.log lines accumulated this pass, keyed by event key. Lives on the set
+   * (per-pass), never a module global, so concurrent passes don't cross-leak. */
+  logs: Map<string, string[]>;
+}
+
+/** Rule health of one derive pass — surfaced, never silent (RuleReport rides on
+ * DeriveResult so /sim/derive, pulls, and previews all show it). */
+export interface RuleReport {
+  /** Rules loaded and eligible to fire this pass. */
+  active: number;
+  /** Loaded rules whose source GWT drifted since compile — they still run;
+   * drift is surfaced, never auto-applied. */
+  stale: Array<{ eventKey: string; connector: string }>;
+  /** Rules that failed to load/scan, or threw at evaluation (the event then
+   * fell back to its static heuristic — see EventPlan.ruleError). */
+  errors: Array<{ eventKey: string; connector: string; error: string }>;
+  /** Rules skipped by design: operator-disabled, orphaned (event gone from the
+   * model), or the connector kill-switch. */
+  disabled: Array<{ eventKey: string; connector: string; reason: string }>;
+}
 
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -393,16 +467,23 @@ interface EventPlan {
   kind: EvidenceKind;
   fired: PlannedEmission[];
   noEvidence: number;
+  /** Set when this event's authored rule threw or returned a malformed result —
+   * the whole event was re-evaluated with its static heuristic (kind reflects
+   * that fallback), never a silent per-row mix of authored and static. */
+  ruleError?: string;
 }
 
 /** PURE model-driven core: given the ontology and the rows per entity, decide
  * which events the data implies. No DB, no I/O, no idempotency — that's the
  * wrapper's job. Walks events in linear order so an instance's create precedes
- * its updates (and the businessAt spread stays monotonic). */
+ * its updates (and the businessAt spread stays monotonic). An AuthoredRuleSet
+ * (pre-loaded by the wrapper) overrides the firing predicate per event; absent,
+ * every event runs the static heuristics unchanged. */
 export function planDerivation(
   ont: Ontology,
   rowsByEntity: Map<string, Array<Record<string, unknown>>>,
   dateRolesByEntity?: Map<string, { created?: string; updated?: string }>,
+  authored?: AuthoredRuleSet,
 ): EventPlan[] {
   const order = ont.linearOrder();
   const plans: EventPlan[] = [];
@@ -420,50 +501,103 @@ export function planDerivation(
     if (rows.length === 0) continue;
     const roles = dateRolesByEntity?.get(entity.name);
 
-    const kind = classify(event, entity, ont);
-    const fired: PlannedEmission[] = [];
-    const firedIds = new Set<string>();
-    let noEvidence = 0;
+    // The static shape kind ALWAYS drives payload + business-date semantics; an
+    // authored rule replaces only the firing predicate. Satellites keep their
+    // mirror-the-predecessor semantics — a rule never binds to a coupled event.
+    const shapeKind = classify(event, entity, ont);
+    const entry = !event.coupledTo ? authored?.rules.get(event.key) : undefined;
 
     // A satellite "completes with" its coupled predecessor: fire for exactly the
     // rows where that predecessor fired, not its own (absent) evidence rule.
     const predFired = event.coupledTo ? firedIdsByEvent.get(event.coupledTo) ?? new Set<string>() : null;
     const coupledName = event.coupledTo ? ont.eventByKey(event.coupledTo)?.name ?? event.coupledTo : "";
 
-    for (const row of rows) {
-      const id = String(row.id ?? "");
-      if (!id) continue;
-      let reason: string;
-      if (predFired) {
-        if (!predFired.has(id)) {
-          noEvidence++;
-          continue;
+    /** One pass over the rows — with the authored predicate, or the static one.
+     * Throws on a broken rule so the caller can rerun the WHOLE event statically. */
+    const runPass = (rule: typeof entry): { fired: PlannedEmission[]; firedIds: Set<string>; noEvidence: number } => {
+      const ctx = rule ? authored!.makeCtx(event, entity) : null;
+      const fired: PlannedEmission[] = [];
+      const firedIds = new Set<string>();
+      let noEvidence = 0;
+      for (const row of rows) {
+        const id = String(row.id ?? "");
+        if (!id) continue;
+        let reason: string;
+        if (predFired) {
+          if (!predFired.has(id)) {
+            noEvidence++;
+            continue;
+          }
+          reason = `completes with ${coupledName}`;
+        } else if (rule) {
+          // A SHALLOW COPY, never the planner's own row object: a rule that
+          // mutates its argument (AI code plausibly normalizes in place, e.g.
+          // `row.status = String(row.status).toUpperCase()`) would otherwise
+          // corrupt this event's own payload, every LATER event's evaluation of
+          // the same shared row, and the cycle indexes built from rowsByEntity.
+          const r = rule.detect({ ...row }, ctx!, null) as AuthoredRuleResult | undefined;
+          if (!r || typeof r.fired !== "boolean") {
+            // Also catches an async detect: a Promise has no boolean `fired`.
+            throw new Error("detect(row, ctx) must synchronously return { fired: boolean, evidence?: string }");
+          }
+          if (!r.fired) {
+            noEvidence++;
+            continue;
+          }
+          reason = `rule: ${typeof r.evidence === "string" && r.evidence ? r.evidence : "condition met"}`;
+        } else {
+          const ev = evaluate(shapeKind, event, row, entity, ont);
+          if (!ev.happened) {
+            noEvidence++;
+            continue;
+          }
+          reason = ev.reason;
         }
-        reason = `completes with ${coupledName}`;
-      } else {
-        const ev = evaluate(kind, event, row, entity, ont);
-        if (!ev.happened) {
-          noEvidence++;
-          continue;
-        }
-        reason = ev.reason;
+        const base = eventBaseDate(shapeKind, row, entity, roles);
+        fired.push({
+          ref: event.ref,
+          aggregateId: id,
+          role: event.role,
+          payload: buildPayload(shapeKind, event, row, entity, ont),
+          businessAt: base.date ? new Date(base.date.getTime() + oi * 1000) : null,
+          businessAtKnown: base.known,
+          provenance: rowProvenance(row),
+          evidence: reason,
+        });
+        firedIds.add(id);
       }
-      const base = eventBaseDate(kind, row, entity, roles);
-      fired.push({
-        ref: event.ref,
-        aggregateId: id,
-        role: event.role,
-        payload: buildPayload(kind, event, row, entity, ont),
-        businessAt: base.date ? new Date(base.date.getTime() + oi * 1000) : null,
-        businessAtKnown: base.known,
-        provenance: rowProvenance(row),
-        evidence: reason,
-      });
-      firedIds.add(id);
-    }
+      return { fired, firedIds, noEvidence };
+    };
 
-    firedIdsByEvent.set(event.key, firedIds);
-    plans.push({ key: event.key, name: event.name, aggregateRoot: event.aggregateRoot, kind, fired, noEvidence });
+    let pass: ReturnType<typeof runPass>;
+    let ruleError: string | undefined;
+    if (entry) {
+      try {
+        pass = runPass(entry);
+      } catch (e: any) {
+        // Fail soft AND visible: the partial authored results are discarded, the
+        // event re-derives with its static heuristic, and the error is recorded
+        // on the plan → DeriveResult.rules.errors. The ingest wrapper journals it
+        // onto the connector's history, and /sim/derive + preview surface it —
+        // never a silent skip.
+        ruleError = String(e?.message ?? e).slice(0, 300);
+        pass = runPass(undefined);
+      }
+    } else {
+      pass = runPass(undefined);
+    }
+    const kind: EvidenceKind = entry && !ruleError ? "authored" : shapeKind;
+
+    firedIdsByEvent.set(event.key, pass.firedIds);
+    plans.push({
+      key: event.key,
+      name: event.name,
+      aggregateRoot: event.aggregateRoot,
+      kind,
+      fired: pass.fired,
+      noEvidence: pass.noEvidence,
+      ...(ruleError ? { ruleError } : {}),
+    });
   }
 
   return plans;
@@ -482,6 +616,12 @@ interface DerivedEventSummary {
   noEvidence: number;
   /** A representative evidence reason. */
   sample?: string;
+  /** Preview mode only: the first fired rows with their evidence, so a rule (or
+   * heuristic) can be inspected against real data before anything is emitted. */
+  samples?: Array<{ id: string; evidence: string }>;
+  /** The event's authored rule broke and the static heuristic answered instead
+   * (see EventPlan.ruleError). */
+  ruleError?: string;
 }
 
 /** Cycle-correlation outcome of one derive pass — the diagnostics that make an
@@ -506,6 +646,12 @@ interface DeriveResult {
   /** Cycle-correlation outcome; only present when the model declares a
    * period-scoped aggregate. */
   cycles?: CycleReport;
+  /** Authored trigger-rule health; only present when the workflow's connectors
+   * carry rules (or tried to — errors and disabled rules surface here too). */
+  rules?: RuleReport;
+  /** Preview only: ctx.log lines per event key from this pass's authored rules
+   * (carried off the rule set, never a module global — no cross-pass leak). */
+  ruleLogs?: Record<string, string[]>;
   /** Wall-clock ms the derivation pass took. */
   durationMs: number;
   /** Event-log rows deleted before re-deriving. Only set by rebuildFromData(). */
@@ -514,6 +660,29 @@ interface DeriveResult {
 
 /** The idempotency key: this event already fired for this aggregate instance. */
 const pairKey = (eventRef: string, aggregateId: string): string => `${eventRef}\u0000${aggregateId}`;
+
+// Serialize EMITTING derive passes per workflow. The idempotency floor is a
+// read-then-write over the EventLog (seed `seen` from findMany, later emitMany):
+// two overlapping passes for one workflow both read before either writes, both
+// plan the same not-yet-logged events, and both emit them — duplicates, since
+// emitMany is a plain createMany with no unique constraint. ingest's inFlight
+// guard is PER-ADAPTER, so two adapters in one workflow (a scheduled pull of X
+// auto-deriving while a manual pull of Y derives) race here. A per-workflow
+// promise chain makes emitting passes run one at a time; preview passes never
+// emit, so they skip the chain (and stay concurrent).
+const deriveChains = new Map<string, Promise<unknown>>();
+
+export function deriveFromData(opts: { preview?: boolean; limit?: number | null } = {}): Promise<DeriveResult> {
+  if (opts.preview) return runDerive(opts);
+  let wf: string;
+  try { wf = currentWorkflowId(); } catch { return runDerive(opts); } // off-context (tests/boot): no scope to serialize on
+  const prior = deriveChains.get(wf) ?? Promise.resolve();
+  const next = prior.catch(() => {}).then(() => runDerive(opts));
+  // Keep the chain tip current, and prune it once settled so the map doesn't grow.
+  deriveChains.set(wf, next);
+  next.finally(() => { if (deriveChains.get(wf) === next) deriveChains.delete(wf); }).catch(() => {});
+  return next;
+}
 
 /** I/O wrapper: read the ingested rows from the store, plan the derivation, skip
  * events already in the log, and emit the rest. `preview: true` runs the plan and
@@ -527,7 +696,7 @@ const pairKey = (eventRef: string, aggregateId: string): string => `${eventRef}\
  * decideCaseId the emit() path uses, and the new events land via emitMany()'s
  * chunked INSERTs. planDerivation's linear order still guarantees a referenced
  * parent's create is decided before the child that inherits its case. */
-export async function deriveFromData(opts: { preview?: boolean; limit?: number | null } = {}): Promise<DeriveResult> {
+async function runDerive(opts: { preview?: boolean; limit?: number | null } = {}): Promise<DeriveResult> {
   const t0 = Date.now();
   const preview = !!opts.preview;
   const limit = opts.limit ?? null;
@@ -545,7 +714,24 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
     if (roles) dateRolesByEntity.set(name, roles);
   }
 
-  const plans = planDerivation(ont, rowsByEntity, dateRolesByEntity);
+  // Authored trigger rules for this workflow's connectors (empty set + report
+  // when there are none / off-context / kill-switched) — loaded HERE, alongside
+  // the rows, so the planner itself stays pure and synchronous.
+  const { set: authoredRules, report: ruleReport } = await loadAuthoredRuleSet(ont, rowsByEntity);
+
+  const plans = planDerivation(ont, rowsByEntity, dateRolesByEntity, authoredRules);
+
+  // A rule that broke during planning fell back to the static heuristic — fold
+  // it into the report so every derive surface shows it.
+  for (const plan of plans) {
+    if (plan.ruleError) {
+      ruleReport.errors.push({
+        eventKey: plan.key,
+        connector: authoredRules?.rules.get(plan.key)?.connectorId ?? "",
+        error: plan.ruleError,
+      });
+    }
+  }
 
   // ONE tenant-scoped pass over the log replaces the per-event queries: every
   // (eventRef, aggregateId) pair already present (idempotency), and the case each
@@ -739,6 +925,8 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
       alreadyPresent: already,
       noEvidence: plan.noEvidence,
       sample,
+      ...(preview ? { samples: plan.fired.slice(0, 5).map((f) => ({ id: f.aggregateId, evidence: f.evidence })) } : {}),
+      ...(plan.ruleError ? { ruleError: plan.ruleError } : {}),
     });
   }
 
@@ -747,12 +935,20 @@ export async function deriveFromData(opts: { preview?: boolean; limit?: number |
   if (batch.length > 0) await withActorKind("adapter", () => emitMany(batch));
 
   cycleReport.unknownSubjects = [...unknownSubjectCounts.values()].slice(0, 20);
+  const rulesRelevant =
+    ruleReport.active > 0 || ruleReport.errors.length > 0 || ruleReport.stale.length > 0 || ruleReport.disabled.length > 0;
   return {
     preview,
     totalEmitted,
     instances: touched.size,
     events: summaries,
     ...(periodScoped.length > 0 ? { cycles: cycleReport } : {}),
+    ...(rulesRelevant ? { rules: ruleReport } : {}),
+    // Preview carries the rules' ctx.log lines back for the editor's oracle view;
+    // an emitting pass has no reader for them (and would just bloat the payload).
+    ...(preview && authoredRules && authoredRules.logs.size
+      ? { ruleLogs: Object.fromEntries([...authoredRules.logs].filter(([, v]) => v.length)) }
+      : {}),
     durationMs: Date.now() - t0,
   };
 }

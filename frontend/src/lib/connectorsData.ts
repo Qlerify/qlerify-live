@@ -1,6 +1,6 @@
 import { api, apiDownload } from "./api.ts"
 import { useStore } from "./store.ts"
-import type { Connector, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
+import type { Connector, ConnectorManifest, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
 
 // Colour chip per update-note kind (connector doc timeline).
 export const NOTE_BADGE: Record<string, string> = {
@@ -14,6 +14,7 @@ export const NOTE_BADGE: Record<string, string> = {
   repointed: "bg-indigo-100 text-indigo-800",
   removed: "bg-rose-100 text-rose-800",
   note: "bg-stone-100 text-stone-700",
+  rule: "bg-fuchsia-100 text-fuchsia-800",
 }
 
 // kebab-slug, byte-for-byte the backend's connector-id minting.
@@ -161,9 +162,12 @@ export const connDelete = async () => {
   }
   const cur = (s.connectors?.connectors || []).find((c) => c.id === id)
   const name = cur ? connectorName(cur) : id
+  const ruleNote = (cur?.triggerRules || []).length
+    ? ` Its ${cur!.triggerRules!.length} trigger rule(s) die with it — a later "Rebuild from data" re-derives this table's events with the generic heuristics (the model's Given/When/Thens are untouched).`
+    : ""
   if (
     !confirm(
-      `Completely delete connector "${name}"?\n\nThis permanently deletes its code, credentials, ALL ingested rows in "${cur?.targetEntity}", the derived events, and its entire history. The connector is removed. This cannot be undone.`,
+      `Completely delete connector "${name}"?\n\nThis permanently deletes its code, credentials, ALL ingested rows in "${cur?.targetEntity}", the derived events, and its entire history.${ruleNote} The connector is removed. This cannot be undone.`,
     )
   ) {
     return
@@ -295,4 +299,61 @@ export const saveConnectorCode = (id: string, code: string) =>
   api<{ bytes: number; deps?: string[]; install?: { ok: boolean; log?: string } }>(
     `/api/connectors/${encodeURIComponent(id)}/code`,
     { method: "POST", body: JSON.stringify({ code }) },
+  )
+
+// --- Trigger rules (per-event authored predicates) + the structured manifest --
+
+export const fetchConnectorManifest = (id: string) =>
+  api<ConnectorManifest>(`/api/connectors/${encodeURIComponent(id)}/manifest`)
+
+export type RuleCode = {
+  eventKey: string
+  eventName: string
+  condition: string
+  builtAt: string
+  author: "ai" | "human"
+  status: "ok" | "stale" | "error" | "disabled" | "orphaned"
+  detail?: string
+  code: string
+}
+
+export const fetchRuleCode = (id: string, eventKey: string) =>
+  api<RuleCode>(`/api/connectors/${encodeURIComponent(id)}/rules/${encodeURIComponent(eventKey)}/code`)
+
+export const saveRuleCode = (id: string, eventKey: string, code: string) =>
+  api<{ rule: { eventKey: string; condition: string }; skipped: boolean }>(
+    `/api/connectors/${encodeURIComponent(id)}/rules/${encodeURIComponent(eventKey)}/code`,
+    { method: "POST", body: JSON.stringify({ code }) },
+  )
+
+export type RulePreviewResult = {
+  eventName: string
+  condition: string
+  status: string
+  statusDetail?: string
+  fired: number
+  wouldEmitNow: number
+  alreadyInLog: number
+  noEvidence: number
+  samples: { id: string; evidence: string }[]
+  ruleError?: string
+  log: string[]
+}
+
+export const previewRuleApi = (id: string, eventKey: string) =>
+  api<RulePreviewResult>(`/api/connectors/${encodeURIComponent(id)}/rules/${encodeURIComponent(eventKey)}/preview`, {
+    method: "POST",
+    body: "{}",
+  })
+
+export const deleteRuleApi = (id: string, eventKey: string) =>
+  api<{ removed: boolean }>(`/api/connectors/${encodeURIComponent(id)}/rules/${encodeURIComponent(eventKey)}/delete`, {
+    method: "POST",
+    body: "{}",
+  })
+
+export const recompileRuleApi = (id: string, eventKey: string) =>
+  api<{ rule: { eventKey: string; condition: string } }>(
+    `/api/connectors/${encodeURIComponent(id)}/rules/${encodeURIComponent(eventKey)}/recompile`,
+    { method: "POST", body: "{}" },
   )

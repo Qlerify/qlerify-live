@@ -369,20 +369,29 @@ export async function insert(table: string, data: Record<string, unknown>): Prom
   return (await findById(table, String(full.id)))!;
 }
 
-/** Optimistic-locked update: bumps version, fails if the row changed under us. */
+/** Optimistic-locked update: bumps version, fails if the row changed under us.
+ * `touchUpdatedAt: false` suppresses the wall-clock updatedAt stamp — ingestion
+ * upserts pass it because a pull is not a business change: the row must keep the
+ * source's own last-modified value (or none), never the time we happened to
+ * pull, which a dateRole pointing at the column would certify as business time. */
 export async function update(
   table: string,
   id: string,
   changes: Record<string, unknown>,
   expectedVersion: number,
+  opts: { touchUpdatedAt?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const cols = Object.keys(changes);
   const sets = cols.map((c) => `${ident(c)} = ?`);
   sets.push(`${ident("version")} = ${ident("version")} + 1`);
-  sets.push(`${ident("updatedAt")} = ?`);
+  const stamp: unknown[] = [];
+  if (opts.touchUpdatedAt !== false) {
+    sets.push(`${ident("updatedAt")} = ?`);
+    stamp.push(new Date().toISOString());
+  }
   const f = await orgFilterSql(table);
   const extra = f.clause ? ` AND ${f.clause}` : "";
-  const values = [...cols.map((c) => sqlValue(changes[c])), new Date().toISOString(), id, expectedVersion, ...f.params];
+  const values = [...cols.map((c) => sqlValue(changes[c])), ...stamp, id, expectedVersion, ...f.params];
   const affected = await prisma.$executeRawUnsafe(
     `UPDATE ${phys(table)} SET ${sets.join(", ")} WHERE ${ident("id")} = ? AND ${ident("version")} = ?${extra}`,
     ...values,

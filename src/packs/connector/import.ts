@@ -24,14 +24,15 @@ import { currentWorkflowId, currentOrgId } from "../../platform/tenancy/context.
 import { getAdapter, registerAdapter } from "../registry.js";
 import { listSidecars, writeSidecar } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
-import { writeModule, installDeps, scanImports, type InstallResult } from "./runtime.js";
+import { writeModule, writeRuleFile, installDeps, scanImports, type InstallResult } from "./runtime.js";
 import { appendNote } from "./journal.js";
 import { connectorInWorkflow, regenerateConnectorSummary } from "./orchestrate.js";
+import { ruleScan } from "./rules.js";
 import {
   CONNECTOR_EXPORT_FORMAT, CONNECTOR_EXPORT_VERSION,
   type ConnectorExportEnvelope, type ConnectorExportEntry,
 } from "./export.js";
-import type { AdapterConfig } from "../types.js";
+import type { AdapterConfig, TriggerRule } from "../types.js";
 import type { ProvMode } from "../../twin/provenance.js";
 
 /** Hard cap on entries per upload. An entry is cheap to fabricate (~60 bytes)
@@ -112,6 +113,10 @@ export interface ImportOutcome {
   /** Field NAMES the operator must re-enter — values are never in an export. */
   credentialKeys: string[];
   install?: InstallResult;
+  /** Trigger-rule outcome, when the entry carried rules. Rules failing the
+   * deny-scan (or malformed) are dropped per-rule with a reason, never imported
+   * blind — rule code runs IN-PROCESS at derive time. */
+  rules?: { imported: number; skipped: Array<{ eventKey: string; reason: string }> };
 }
 
 export interface ImportSkip { id: string; reason: string; message: string; }
@@ -191,6 +196,43 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
   const install = code ? await installDeps(deps ?? []) : undefined;
   if (code) writeModule(id, code);
 
+  // Trigger rules: per-rule sanitation + the SAME deny-scan the save path runs —
+  // this is in-process code, and a hand-crafted envelope is untrusted input. A
+  // rejected rule is dropped with a reason; the connector still imports (its
+  // event falls back to the static heuristic — visible in the manifest).
+  const ruleRecords: TriggerRule[] = [];
+  const ruleSkips: Array<{ eventKey: string; reason: string }> = [];
+  if (Array.isArray(entry.rules)) {
+    for (const r of entry.rules.slice(0, 50)) {
+      const eventKey = typeof r?.eventKey === "string" ? r.eventKey.trim() : "";
+      const ruleCode = typeof r?.code === "string" ? r.code : "";
+      if (!eventKey || !ruleCode.trim()) {
+        ruleSkips.push({ eventKey: eventKey || "(unknown)", reason: "missing eventKey/code" });
+        continue;
+      }
+      if (ruleRecords.some((x) => x.eventKey === eventKey)) {
+        ruleSkips.push({ eventKey, reason: "duplicate eventKey" });
+        continue;
+      }
+      const scan = ruleScan(ruleCode);
+      if (!scan.ok) {
+        ruleSkips.push({ eventKey, reason: `deny-scan: ${scan.violations.join(", ")}` });
+        continue;
+      }
+      const written = writeRuleFile(id, eventKey, ruleCode);
+      ruleRecords.push({
+        eventKey,
+        eventRef: str(r.eventRef) ?? `#/domainEvents/${eventKey}`,
+        condition: str(r.condition) ?? "",
+        gwtHash: str(r.gwtHash) ?? "",
+        file: written.file,
+        codeHash: written.codeHash,
+        builtAt: new Date().toISOString(),
+        author: r.author === "ai" ? "ai" : "human",
+      });
+    }
+  }
+
   const instructions = str(src.instructions);
   const endpoint = str(src.endpoint);
   const connectionOptionId = str(src.connectionOptionId);
@@ -208,6 +250,7 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
     ...(lim ? { limits: lim } : {}),
     ...(endpoint !== undefined ? { endpoint } : {}),
     ...(connectionOptionId !== undefined ? { connectionOptionId } : {}),
+    ...(ruleRecords.length ? { triggerRules: ruleRecords } : {}),
   };
   writeSidecar(cfg);
   ix.sidecarIds.add(id);
@@ -226,6 +269,7 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
     phase: code ? "built" : "draft",
     credentialKeys: Array.isArray(entry.credentialKeys) ? entry.credentialKeys.filter((k) => typeof k === "string") : [],
     ...(install ? { install } : {}),
+    ...(ruleRecords.length || ruleSkips.length ? { rules: { imported: ruleRecords.length, skipped: ruleSkips } } : {}),
   };
 }
 

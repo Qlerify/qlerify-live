@@ -125,15 +125,18 @@ describe("buildConnectorPrompt event-chain (FK) links", () => {
 });
 
 // Re-run economics are unconditional for entity targets: every connector re-runs
-// (manual pulls + scheduled polling) and ingest skips already-present ids, so the
-// author must self-gate expensive derived rows (incremental via ctx.readTable of
-// its OWN target table) instead of re-paying per-row AI/API cost each run. Value
+// (manual pulls + scheduled polling) and ingest upserts already-present ids
+// (changed fields updated, unchanged rows skipped), so the author must still
+// self-gate expensive derived rows (incremental via ctx.readTable of its OWN
+// target table) instead of re-paying per-row AI/API cost each run. Value
 // objects carry no connector-supplied id, so they get no id-diff guidance.
 describe("buildConnectorPrompt re-run behavior", () => {
   it("an entity target gets the re-run section with incremental self-gating against its own table", () => {
     const prompt = buildConnectorPrompt(demandInput([]));
     expect(prompt).toContain("## Re-runs");
-    expect(prompt).toContain("is SKIPPED — never updated, never duplicated");
+    expect(prompt).toContain("CHANGED fields are UPDATED in place");
+    // Partial rows are safe — the upsert never lets a null erase a stored value.
+    expect(prompt).toContain("NEVER erases a stored one");
     expect(prompt).toContain('ctx.readTable("MarketDemand")');
     expect(prompt).toContain("INCREMENTAL is the default whenever each row is EXPENSIVE to produce");
     // Backlog progress: the limit is taken AFTER the already-done filter, or a
@@ -141,7 +144,7 @@ describe("buildConnectorPrompt re-run behavior", () => {
     expect(prompt).toContain("Apply ctx.limit AFTER excluding already-present items");
     // The gate degrades silently past the snapshot cap — the author is warned.
     expect(prompt).toContain("do not trust the diff alone");
-    expect(prompt).toContain("REGENERATE-ALL only when the instructions explicitly ask for it");
+    expect(prompt).toContain("REGENERATE-ALL (recompute every row each run) only when the instructions explicitly ask for it");
     // Pass-through pulls are exempt — dedup by stable id suffices.
     expect(prompt).toContain("pass-through pull from a system of record needs no gating");
     // The _provisional merge exception exists only for cycle tables — a plain

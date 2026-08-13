@@ -19,6 +19,8 @@ import {
   connectorInfo, readConnectorCode, removeConnector,
 } from "../packs/connector/orchestrate.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
+import { previewRule } from "../packs/connector/rules.js";
+import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
 import { guardData } from "../platform/authz.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
@@ -40,6 +42,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   regenerate_adapter_body: "connector.build",
   create_connector: "connector.build",
   build_connector: "connector.build",
+  build_trigger_rules: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -59,7 +62,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 // likewise checked inside their own handlers.
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
-  "ingest_connector", "remove_connector",
+  "build_trigger_rules", "ingest_connector", "remove_connector",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -69,7 +72,7 @@ const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
 // the subsystem (QLERIFY_CONNECTORS_ENABLED=false).
 const TOOL_CONNECTOR_KILLSWITCH: ReadonlySet<string> = new Set([
   "get_adapter_config", "check_adapter_credential", "run_adapter_healthcheck", "adapter_dry_run",
-  "view_connector_code", "get_connector_history", "list_connector_credentials",
+  "view_connector_code", "get_connector_history", "list_connector_credentials", "preview_trigger_rule",
 ]);
 
 export const TOOLS: Anthropic.Tool[] = [
@@ -327,6 +330,45 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "build_trigger_rules",
+    description:
+      "WRITE — Have AI compile per-EVENT trigger rules for a connector: tiny deterministic predicates (from each event's Given/When/Then criteria + the operator's stated condition) that decide which domain event(s) an ingested row implies — replacing the platform's generic heuristics for exactly those events. Use when the operator states per-event conditions ('trigger Upsell Deal Created for upsell deals and Cross Sell Deal Created for cross sell deals') or one table drives sibling events that need discriminating. Compile the whole family of related events in ONE call so the conditions stay mutually consistent. Stop-and-show: rules are written + recorded, not executed — verify each with preview_trigger_rule next; if a preview is wrong or errors, call again with that report as errorReport (self-heal). Requires confirmation: state each event + its condition, ask 'Shall I compile these rules?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        rules: {
+          type: "array",
+          description: "One entry per event to rule.",
+          items: {
+            type: "object",
+            properties: {
+              event: { type: "string", description: "Event name or key (must be an event on the connector's target table)." },
+              condition: { type: "string", description: "The operator's natural-language condition for this event. Omit on a recompile to reuse the stored one." },
+            },
+            required: ["event"],
+          },
+        },
+        errorReport: { type: "string", description: "On a self-heal turn (single rule): what the preview got wrong, or the ruleError, so the AI can fix the code." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "rules", "confirmed"],
+    },
+  },
+  {
+    name: "preview_trigger_rule",
+    description:
+      "Dry-run one trigger rule against the live rows (nothing is emitted): how many rows it fires for, which would emit now, and per-row evidence samples — the oracle to check after build_trigger_rules and before ingest_connector. If the result is wrong or carries a ruleError, fix it via build_trigger_rules with an errorReport.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        event: { type: "string", description: "Event name or key of the rule to preview." },
+      },
+      required: ["adapterId", "event"],
+    },
+  },
+  {
     name: "ingest_connector",
     description:
       "WRITE — Run the connector for real and LAND its rows into the target table (gen_<kind>), so they appear in the explorer's Items pane. Only do this after a successful adapter_dry_run. Requires confirmation: state how many rows you'll pull into which table, ask 'Shall I populate it?', wait for yes, then call with confirmed:true.",
@@ -480,6 +522,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleSetConnectorCredentials(args);
       case "build_connector":
         return await handleBuildConnector(args);
+      case "build_trigger_rules":
+        return await handleBuildTriggerRules(args);
+      case "preview_trigger_rule":
+        return await handlePreviewTriggerRule(args);
       case "ingest_connector":
         return await handleIngestConnector(args);
       case "view_connector_code":
@@ -808,6 +854,58 @@ async function handleBuildConnector(args: Record<string, any>) {
   });
 }
 
+async function handleBuildTriggerRules(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. State each event + its condition, get the user's explicit yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  const rules = Array.isArray(args.rules) ? args.rules : [];
+  if (rules.length === 0) return err("rules must be a non-empty array of { event, condition? }");
+  const noKey = await requireAnthropicConfigured();
+  if (noKey) return noKey;
+  const errorReport = typeof args.errorReport === "string" && rules.length === 1 ? args.errorReport : undefined;
+  const compiled: Array<Record<string, unknown>> = [];
+  const failures: Array<{ event: string; error: string }> = [];
+  // Sequential on purpose: each compile records its condition on the sidecar, so
+  // later siblings in the same call see the earlier ones' conditions and the
+  // family stays mutually consistent (upsell vs cross sell).
+  for (const r of rules) {
+    const eventArg = String(r?.event ?? "");
+    if (!eventArg) {
+      failures.push({ event: "(missing)", error: "each rule needs an event name or key" });
+      continue;
+    }
+    try {
+      const res = await compileTriggerRule(
+        id, eventArg,
+        typeof r?.condition === "string" ? r.condition : undefined,
+        errorReport,
+      );
+      compiled.push({
+        event: res.rule.eventKey, eventRef: res.rule.eventRef, condition: res.rule.condition,
+        file: res.rule.file, bytes: res.bytes, durationMs: res.durationMs,
+      });
+    } catch (e: any) {
+      failures.push({ event: eventArg, error: String(e?.message ?? e) });
+    }
+  }
+  return ok({
+    built: compiled.length, compiled, ...(failures.length ? { failures } : {}),
+    note: compiled.length
+      ? "Rules compiled + recorded. Now VERIFY each with preview_trigger_rule against the live rows before ingesting; if a preview is wrong, call build_trigger_rules again with an errorReport describing what fired that shouldn't (or vice versa)."
+      : "No rules compiled — see failures.",
+  });
+}
+
+async function handlePreviewTriggerRule(args: Record<string, any>) {
+  const id = String(args.adapterId ?? "");
+  const event = String(args.event ?? "");
+  if (!id || !event) return err("adapterId and event are required");
+  if (!ownsAdapterId(id)) return err(`no connector "${id}"`); // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
+  return ok(await previewRule(id, event));
+}
+
 async function handleIngestConnector(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. Confirm the row count + target table with the user first, then call again with confirmed=true.");
@@ -822,7 +920,7 @@ async function handleIngestConnector(args: Record<string, any>) {
     : "";
   return ok({
     ingested: true, ...summary,
-    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity} in ${(summary.durationMs / 1000).toFixed(1)}s. They now appear in the explorer's Items pane.${ev}`,
+    note: `Landed ${summary.inserted} new row(s)${summary.updated ? `, updated ${summary.updated}` : ""} (${summary.skipped} unchanged) into ${summary.entity} in ${(summary.durationMs / 1000).toFixed(1)}s. They now appear in the explorer's Items pane.${ev}`,
   });
 }
 

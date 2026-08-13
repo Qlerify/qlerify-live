@@ -27,7 +27,12 @@ export interface IngestSummary {
   adapterId: string;
   entity: string;
   inserted: number;
+  /** Rows whose id already existed with no field changes — skipped untouched. */
   skipped: number;
+  /** Rows whose id already existed and whose source values drifted — the changed
+   * fields were updated in place (nulls never clobber), so re-pulls track the
+   * source and derivation can fire the LATER events the new state implies. */
+  updated: number;
   /** Rows merged into a provisional cycle row the engine had opened lazily
    * (twin/derive.ts) — the pull enriched the placeholder instead of skipping. */
   merged: number;
@@ -66,6 +71,45 @@ function hasValue(v: unknown): boolean {
   return v !== null && v !== undefined && String(v).trim() !== "";
 }
 
+/** Platform/identity columns an upsert must never touch: identity + optimistic
+ * lock + tenancy + the provisional marker (cleared only by the cycle merge). */
+const UPSERT_EXCLUDED = new Set(["id", "version", "organization_id", "_provisional"]);
+
+/** Diff an incoming mapped row against the stored one. Returns the columns to
+ * update, or null when the row is unchanged (the skip case). Semantics:
+ * - If the sidecar names a last-modified column (dateRoles.updated) and both
+ *   sides carry the same value, the row is unchanged by definition — no field
+ *   diff (the cheap watermark path).
+ * - Only connector-supplied values participate; a null/absent incoming value
+ *   NEVER clobbers a stored one (a source that stops returning a field must not
+ *   erase what an earlier pull witnessed).
+ * - createdAt may be FILLED when the stored row has none (a source can supply a
+ *   missing creation date) but never overwritten — a row's origin doesn't move. */
+function upsertChanges(
+  mapped: Record<string, unknown>,
+  existing: Record<string, unknown>,
+  dateRoles?: { created?: string; updated?: string },
+): Record<string, unknown> | null {
+  const uCol = dateRoles?.updated;
+  if (uCol && hasValue(mapped[uCol]) && hasValue(existing[uCol]) && String(mapped[uCol]) === String(existing[uCol])) {
+    return null;
+  }
+  const changes: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(mapped)) {
+    if (UPSERT_EXCLUDED.has(k)) continue;
+    if (!hasValue(v)) continue;
+    if (k === "createdAt" && hasValue(existing.createdAt)) continue;
+    // Compare in the STORED shape: a boolean persists as 1/0 (projection-store
+    // sqlValue), so a re-sent `true` reads back as `1` — comparing String(true)
+    // to String(1) would mark every boolean-carrying row "updated" on every pull
+    // forever. Coerce the incoming value the same way the write path will.
+    const stored = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    if (hasValue(existing[k]) && String(existing[k]) === String(stored)) continue;
+    changes[k] = v;
+  }
+  return Object.keys(changes).length ? changes : null;
+}
+
 /** Persist the pull stamp onto the adapter's sidecar (no-op for code-pack
  * adapters that have none). Fresh-read → write, the same pattern every other
  * config mutator uses, so neither side clobbers the other. */
@@ -101,8 +145,12 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
   let fetchMs = 0;
   let inserted = 0;
   let skipped = 0;
+  let updated = 0;
   let merged = 0;
   const warnings: string[] = [];
+  // dateRoles lives on the sidecar (code-pack adapters have none — undefined is
+  // fine: upsertChanges just falls back to the full field diff).
+  const dateRoles = readSidecar(adapterId)?.dateRoles;
   try {
     // The target may be an entity OR a value object (a value object populated
     // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
@@ -167,7 +215,19 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
           await store.update(adapter.targetEntity, id, changes, Number(existing.version ?? 0));
           merged++;
         } else {
-          skipped++; // idempotent: a row with this id already ingested
+          // Upsert: a re-pulled row whose source values drifted has its changed
+          // fields updated in place, so state advancement (NEW → SHIPPED) reaches
+          // the projection and derivation can fire the later events it implies.
+          // touchUpdatedAt:false — the row keeps the SOURCE's last-modified value
+          // (or none); stamping pull time here would fabricate a business date
+          // (see the PLATFORM_TIMESTAMP_COLS comment above).
+          const changes = upsertChanges(mapped, existing, dateRoles);
+          if (changes) {
+            await store.update(adapter.targetEntity, id, changes, Number(existing.version ?? 0), { touchUpdatedAt: false });
+            updated++;
+          } else {
+            skipped++; // unchanged: a row with this id already ingested, no drift
+          }
         }
         continue;
       }
@@ -206,7 +266,8 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
     // rows" button (every ingestPull caller is covered here — the single place).
     const mergedNote = merged ? `, ${merged} provisional cycle row(s) enriched` : "";
-    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present${mergedNote}) into ${adapter.targetEntity}.`, { durationMs });
+    const updatedNote = updated ? `, ${updated} updated` : "";
+    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s)${updatedNote} (${skipped} unchanged${mergedNote}) into ${adapter.targetEntity}.`, { durationMs });
     for (const w of warnings) appendNote(adapter.id, "note", `Cycle check: ${w}`);
   } catch { /* ignore bookkeeping errors */ }
 
@@ -230,6 +291,16 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
       if (r.totalEmitted > 0) {
         appendNote(adapter.id, "ingested", `Derived ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the data.`, { durationMs: r.durationMs });
       }
+      // A trigger rule that broke fell back to the STATIC heuristic this pass —
+      // whose over-broad emissions are permanent (the pairKey floor). That must
+      // not be silent on the dominant (auto-derive) path: journal each error/
+      // orphaned rule onto THIS connector's history where the operator sees it.
+      for (const e of r.rules?.errors ?? []) {
+        if (e.connector === adapter.id) appendNote(adapter.id, "rule", `Trigger rule for "${e.eventKey}" failed — the generic heuristic answered instead: ${e.error}`);
+      }
+      for (const d of r.rules?.disabled ?? []) {
+        if (d.connector === adapter.id) appendNote(adapter.id, "rule", `Trigger rule for "${d.eventKey}" is inactive: ${d.reason}`);
+      }
     } catch (e: any) {
       // The rows ARE committed, so this is not a pull failure ("failed" would
       // mislabel the run) — but it must not vanish either: a fully silent skip
@@ -247,6 +318,7 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     entity: adapter.targetEntity,
     inserted,
     skipped,
+    updated,
     merged,
     ...(warnings.length ? { warnings } : {}),
     mode: adapter.mode,

@@ -82,6 +82,38 @@ export interface AdapterSchedule {
   disabledReason?: string;
 }
 
+/** One AI-compiled (or hand-edited) per-event trigger rule owned by a connector.
+ * The rule is a tiny pure predicate module (deny-scanned, zero imports) that
+ * decides whether a row implies the event — replacing the kernel's static
+ * evidence heuristic for exactly that event (twin/derive.ts, kind "authored").
+ * Connector-owned by design: the rule is a build artifact of (the event's GWTs ×
+ * this connector's field shape) and dies with the connector; the GWTs in the
+ * model remain the durable truth a recreated connector recompiles from. */
+export interface TriggerRule {
+  /** OntologyEvent.key of the event this rule fires. */
+  eventKey: string;
+  /** OntologyEvent.ref — what the EventLog stores. */
+  eventRef: string;
+  /** The operator's natural-language condition the rule was compiled from
+   * ("upsell deals over 20 000 USD in the current quarter"). */
+  condition: string;
+  /** sha256 of the event's acceptanceCriteria at compile time — GWT drift in the
+   * model is surfaced (rule marked stale, still runs) by comparing against the
+   * live model's hash. */
+  gwtHash: string;
+  /** Workspace-relative rule module filename (content-hash suffixed: a new
+   * version is a NEW path — tsx caches modules by path, same as bodyPath). */
+  file: string;
+  /** The content hash embedded in `file`. */
+  codeHash: string;
+  builtAt: string;
+  author: "ai" | "human";
+  /** Soft-off: skipped at derive time but kept + surfaced (operator toggle, or
+   * auto when the event vanished from the model — never silently dropped). */
+  disabled?: boolean;
+  disabledReason?: string;
+}
+
 /** Persisted adapter config — `.qlerify/adapters/<id>.json`. `credentialsRef` is a
  * KEY (env var / vault handle), NEVER the secret itself. */
 export interface AdapterConfig {
@@ -134,6 +166,10 @@ export interface AdapterConfig {
    * instead of ingestion-time `now`. Values are MODEL field names on the target
    * schema; absent → derive uses its first-date-field heuristic (unchanged). */
   dateRoles?: { created?: string; updated?: string };
+  /** Per-event trigger rules this connector carries (see TriggerRule). Absent on
+   * every pre-existing sidecar — connectors without rules run the static
+   * evidence heuristics unchanged. */
+  triggerRules?: TriggerRule[];
 }
 
 /** Resolves a credentialsRef to the actual secret. Dev = env var; KeyVault later

@@ -20,13 +20,16 @@ import { currentWorkflowId } from "../platform/tenancy/context.js";
 import {
   connectorsInWorkflow, connectorForTarget, connectorOwner, connectorInfo,
   regenerateConnectorSummary, removeConnector, setConnectorDateRoles,
-  readConnectorCode, saveConnectorCode,
+  readConnectorCode, saveConnectorCode, eventsForTarget,
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
 import { readSidecar, writeSidecar } from "../packs/sidecar.js";
 import { SCHEDULE_MIN_MINUTES, nextRunAt } from "../packs/scheduler.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
+import { saveTriggerRuleCode, deleteTriggerRule, previewRule, ruleStatus } from "../packs/connector/rules.js";
+import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
+import { readRuleFile, deleteRuleFiles } from "../packs/connector/runtime.js";
 import { buildConnectorExport } from "../packs/connector/export.js";
 import { parseConnectorExport, importConnectors } from "../packs/connector/import.js";
 import { tableExists, countRows } from "../twin/projection-store.js";
@@ -39,6 +42,118 @@ function exportDisposition(stem: string): string {
   const safe = stem.replace(/[^A-Za-z0-9._-]/g, "_");
   const date = new Date().toISOString().slice(0, 10);
   return `attachment; filename="${safe}-${date}.json"`;
+}
+
+// --- Structured manifest ----------------------------------------------------
+// The connector overview's "what does this connector actually do" answer, as
+// DYNAMICALLY-SHAPED sections: only what applies to this connector appears. A
+// pure projection over the sidecar + journal facets + model + rule records —
+// no new source of truth (this file's charter).
+
+type ManifestSection =
+  | { kind: "credentials"; keys: string[] }
+  | { kind: "endpoint"; endpoint: string }
+  | { kind: "packages"; deps: string[] }
+  | { kind: "filters"; items: string[] }
+  | { kind: "incremental"; behavior: string }
+  | { kind: "timestamps"; created?: string; updated?: string }
+  | { kind: "schedule"; enabled: boolean; everyMinutes?: number; nextRunAt?: string | null }
+  | {
+      kind: "canTriggerEvents";
+      items: Array<{
+        eventKey: string;
+        eventName: string;
+        /** The rule's compiled-from condition; null = static heuristic. */
+        condition: string | null;
+        status: "ok" | "stale" | "error" | "disabled" | "orphaned" | "static";
+        statusDetail?: string;
+        builtAt?: string;
+        author?: "ai" | "human";
+        /** Set on satellite events (they complete with their predecessor and
+         * can never carry a rule of their own). */
+        coupledTo?: string;
+      }>;
+    };
+
+async function buildConnectorManifest(cfg: import("../packs/types.js").AdapterConfig) {
+  const o = getOntology();
+  const info = connectorInfo(cfg.id);
+  const doc = readDoc(cfg.id);
+  const live = !!resolveTargetSchema(cfg.targetEntity);
+  const rowCount = (await tableExists(cfg.targetEntity)) ? await countRows(cfg.targetEntity) : 0;
+  const sections: ManifestSection[] = [];
+  const keys = info?.credentialKeys ?? [];
+  if (keys.length) sections.push({ kind: "credentials", keys });
+  if (cfg.endpoint) sections.push({ kind: "endpoint", endpoint: cfg.endpoint });
+  if ((cfg.deps ?? []).length) sections.push({ kind: "packages", deps: cfg.deps! });
+  if (doc?.facets?.filters?.length) sections.push({ kind: "filters", items: doc.facets.filters });
+  if (doc?.facets?.incremental) sections.push({ kind: "incremental", behavior: doc.facets.incremental });
+  if (cfg.dateRoles?.created || cfg.dateRoles?.updated) {
+    sections.push({ kind: "timestamps", ...cfg.dateRoles });
+  }
+  if (cfg.schedule) {
+    sections.push({
+      kind: "schedule",
+      enabled: cfg.schedule.enabled,
+      everyMinutes: cfg.schedule.everyMinutes,
+      nextRunAt: nextRunAt(cfg),
+    });
+  }
+  // EVERY event rooted on the target, ruled or not — the overview answers "what
+  // can this connector trigger" completely, with the heuristic-covered events
+  // shown as "static" so an authored rule's absence is a visible default, not
+  // a blind spot. Only for live entity targets (events root on entities).
+  if (live && (cfg.targetKind ?? "entity") === "entity") {
+    const ruleByKey = new Map((cfg.triggerRules ?? []).map((r) => [r.eventKey, r]));
+    const items = eventsForTarget(cfg.targetEntity).map((e) => {
+      const rule = ruleByKey.get(e.key);
+      if (!rule) {
+        return {
+          eventKey: e.key,
+          eventName: e.name,
+          condition: null,
+          status: "static" as const,
+          ...(e.coupledTo ? { coupledTo: e.coupledTo } : {}),
+        };
+      }
+      const st = ruleStatus(rule, o, cfg);
+      return {
+        eventKey: e.key,
+        eventName: e.name,
+        condition: rule.condition || null,
+        status: st.status,
+        ...(st.detail ? { statusDetail: st.detail } : {}),
+        builtAt: rule.builtAt,
+        author: rule.author,
+      };
+    });
+    // An orphaned rule's event is gone from the model, so eventsForTarget missed
+    // it — surface it anyway (never silently dropped).
+    for (const rule of cfg.triggerRules ?? []) {
+      if (items.some((i) => i.eventKey === rule.eventKey)) continue;
+      const st = ruleStatus(rule, o, cfg);
+      items.push({
+        eventKey: rule.eventKey,
+        eventName: rule.eventKey,
+        condition: rule.condition || null,
+        status: st.status,
+        ...(st.detail ? { statusDetail: st.detail } : {}),
+        builtAt: rule.builtAt,
+        author: rule.author,
+      });
+    }
+    if (items.length) sections.push({ kind: "canTriggerEvents", items });
+  }
+  return {
+    id: cfg.id,
+    system: cfg.boundedContext,
+    target: { name: cfg.targetEntity, kind: cfg.targetKind ?? ("entity" as const), rowCount },
+    mode: cfg.mode,
+    phase: cfg.phase,
+    status: live ? "active" : "orphaned",
+    summary: doc?.summary ?? null,
+    sections,
+  };
 }
 
 export function registerConnectorRoutes(app: FastifyInstance): void {
@@ -76,6 +191,14 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           owned: !!cfg.workflowId, // false = legacy, adopted by model membership
           dateRoles: info?.dateRoles ?? null,
           dateFields: info?.dateFields ?? [],
+          triggerRules: (cfg.triggerRules ?? []).map((r) => ({
+            eventKey: r.eventKey,
+            eventName: o.eventByKey(r.eventKey)?.name ?? r.eventKey,
+            condition: r.condition,
+            builtAt: r.builtAt,
+            author: r.author,
+            ...ruleStatus(r, o, cfg),
+          })),
         };
       }));
       // The re-point target list: every table in the model, flagged with the
@@ -169,16 +292,24 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       const targetKind: "entity" | "valueObject" = getOntology().entity(target) ? "entity" : "valueObject";
       const previous = cfg.targetEntity;
       const owner = connectorOwner();
+      // Trigger rules were compiled for the OLD table's events + field shape;
+      // they are meaningless on the new table (derive would disable them, and
+      // every read surface would otherwise disagree). Drop them with the target —
+      // rules die with their table binding, exactly as they die with the connector.
+      const droppedRules = cfg.triggerRules ?? [];
       const next = {
         ...cfg, targetEntity: target, targetKind,
         workflowId: cfg.workflowId ?? owner.workflowId,
         organizationId: cfg.organizationId ?? owner.organizationId,
       };
+      delete next.triggerRules;
       writeSidecar(next);
+      for (const r of droppedRules) deleteRuleFiles(id, r.eventKey);
       registerAdapter(createConnectorAdapter(next));
       await regenerateConnectorSummary(id); // table + access changed → refresh the description
-      appendNote(id, "repointed", `Re-pointed from ${previous} to ${target}.`);
-      return { id, target, previousTarget: previous, targetKind };
+      const ruleNote = droppedRules.length ? ` ${droppedRules.length} trigger rule(s) were dropped (they belonged to ${previous}'s events).` : "";
+      appendNote(id, "repointed", `Re-pointed from ${previous} to ${target}.${ruleNote}`);
+      return { id, target, previousTarget: previous, targetKind, droppedRules: droppedRules.length };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;
@@ -241,6 +372,171 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       if (typeof code !== "string") return reply.code(400).send({ error: "NO_CODE", message: "code (string) required" });
       const result = await saveConnectorCode(id, code);
       return { id, ...result };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // The structured manifest behind the overview's dynamic sections (Credentials /
+  // Filters / Can trigger Events / …). `connector.read` — same disclosure class
+  // as the inventory + code routes.
+  app.get("/api/connectors/:id/manifest", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      return await buildConnectorManifest(cfg);
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Per-event trigger rules — the authored evidence kind (packs/connector/rules).
+  // Same scoping discipline as the code routes: workflow-scoped 404, read gated
+  // by `connector.read`, writes by `connector.build` (rule code runs in-process
+  // at derive time — authoring it is the same trust surface as connector code),
+  // preview by `connector.edit` (it EXECUTES the rule read-only, like /test).
+  // -------------------------------------------------------------------------
+
+  // Every rule on this connector, with live health (ok/stale/error/disabled/
+  // orphaned — computed against the current model on every read).
+  app.get("/api/connectors/:id/rules", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const o = getOntology();
+      return {
+        id,
+        rules: (cfg.triggerRules ?? []).map((r) => ({
+          eventKey: r.eventKey,
+          eventRef: r.eventRef,
+          eventName: o.eventByKey(r.eventKey)?.name ?? r.eventKey,
+          condition: r.condition,
+          builtAt: r.builtAt,
+          author: r.author,
+          codeHash: r.codeHash,
+          ...ruleStatus(r, o, cfg),
+        })),
+      };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  app.get("/api/connectors/:id/rules/:eventKey/code", async (req, reply) => {
+    try {
+      await guardData("connector.read");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const eventKey = String((req.params as any).eventKey ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const rule = (cfg.triggerRules ?? []).find((r) => r.eventKey === eventKey);
+      if (!rule) return reply.code(404).send({ error: "UNKNOWN_RULE", message: `no rule for event "${eventKey}"` });
+      const o = getOntology();
+      return {
+        id,
+        eventKey,
+        eventName: o.eventByKey(eventKey)?.name ?? eventKey,
+        condition: rule.condition,
+        builtAt: rule.builtAt,
+        author: rule.author,
+        code: readRuleFile(rule.file) ?? "",
+        ...ruleStatus(rule, o, cfg),
+      };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Save rule code (hand-edit, or a new rule authored straight in the editor).
+  // Stop-and-show like connector code: written + recorded, not executed — the
+  // operator previews it next.
+  app.post("/api/connectors/:id/rules/:eventKey/code", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const eventKey = String((req.params as any).eventKey ?? "");
+      const code = (req.body as any)?.code;
+      const condition = (req.body as any)?.condition;
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      if (typeof code !== "string") return reply.code(400).send({ error: "NO_CODE", message: "code (string) required" });
+      const result = saveTriggerRuleCode(id, eventKey, code, {
+        author: "human",
+        ...(typeof condition === "string" && condition.trim() ? { condition: condition.trim() } : {}),
+      });
+      return { id, ...result };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // AI-recompile the rule from its STORED condition against the CURRENT model —
+  // the stale badge's one-click fix (a fresh gwtHash clears the staleness).
+  // `connector.build`, like every path that authors rule code.
+  app.post("/api/connectors/:id/rules/:eventKey/recompile", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const eventKey = String((req.params as any).eventKey ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      if (!(cfg.triggerRules ?? []).some((r) => r.eventKey === eventKey)) {
+        return reply.code(404).send({ error: "UNKNOWN_RULE", message: `no rule for event "${eventKey}"` });
+      }
+      const condition = (req.body as any)?.condition;
+      const r = await compileTriggerRule(id, eventKey, typeof condition === "string" && condition.trim() ? condition.trim() : undefined);
+      return { id, ...r };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Dry-run the rule against the live rows (nothing emitted): fired/wouldEmitNow
+  // counts + per-row evidence samples — the oracle the operator (and the build
+  // flow) checks before ingesting.
+  app.post("/api/connectors/:id/rules/:eventKey/preview", async (req, reply) => {
+    try {
+      await guardData("connector.edit");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const eventKey = String((req.params as any).eventKey ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      return { id, ...(await previewRule(id, eventKey)) };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Remove one rule — the event's static heuristic answers again from the next
+  // derive. `connector.build`: it changes what authored code runs.
+  app.post("/api/connectors/:id/rules/:eventKey/delete", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const eventKey = String((req.params as any).eventKey ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const removed = deleteTriggerRule(id, eventKey);
+      return { id, eventKey, removed: true, condition: removed.condition };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

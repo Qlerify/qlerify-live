@@ -312,6 +312,50 @@ export type ConnectorSchedule = {
 
 export type ConnectorNote = { kind: string; text: string; at: string; durationMs?: number | null }
 
+/** One per-event trigger rule as the list/manifest routes report it. */
+export type TriggerRuleInfo = {
+  eventKey: string
+  eventName: string
+  condition: string
+  builtAt: string
+  author: "ai" | "human"
+  status: "ok" | "stale" | "error" | "disabled" | "orphaned"
+  detail?: string
+}
+
+export type ManifestSection =
+  | { kind: "credentials"; keys: string[] }
+  | { kind: "endpoint"; endpoint: string }
+  | { kind: "packages"; deps: string[] }
+  | { kind: "filters"; items: string[] }
+  | { kind: "incremental"; behavior: string }
+  | { kind: "timestamps"; created?: string; updated?: string }
+  | { kind: "schedule"; enabled: boolean; everyMinutes?: number; nextRunAt?: string | null }
+  | {
+      kind: "canTriggerEvents"
+      items: {
+        eventKey: string
+        eventName: string
+        condition: string | null
+        status: "ok" | "stale" | "error" | "disabled" | "orphaned" | "static"
+        statusDetail?: string
+        builtAt?: string
+        author?: "ai" | "human"
+        coupledTo?: string
+      }[]
+    }
+
+export type ConnectorManifest = {
+  id: string
+  system: string
+  target: { name: string; kind: string; rowCount: number }
+  mode: string
+  phase: string
+  status: string
+  summary: string | null
+  sections: ManifestSection[]
+}
+
 export type Connector = {
   id: string
   status: string
@@ -333,6 +377,7 @@ export type Connector = {
   notes?: ConnectorNote[]
   dateFields?: string[]
   dateRoles?: { created?: string; updated?: string }
+  triggerRules?: TriggerRuleInfo[]
 }
 
 export type ConnectorTable = { name: string; kind: string; occupiedBy?: string | null }

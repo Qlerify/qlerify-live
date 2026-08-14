@@ -1,3 +1,4 @@
+import { showOverlay, hideOverlay } from "@/components/Overlay.tsx"
 import { api, apiDownload } from "./api.ts"
 import { useStore } from "./store.ts"
 import type { Connector, ConnectorManifest, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
@@ -237,17 +238,27 @@ export const connImportFile = async (file: File) => {
   // Busy BEFORE the first await (file.text() can stall on a cloud-placeholder
   // file) — the same mutual exclusion every other handler here uses.
   useStore.getState().set({ connBusy: true })
+  // Blocking overlay: the import is server-synchronous and npm-installs each
+  // connector's dependencies, so it can run for minutes with no other signal.
+  showOverlay("Importing connectors…")
   try {
     let text: string
     try {
       text = await file.text()
       JSON.parse(text) // fail fast on a non-JSON pick, before any request
     } catch {
+      hideOverlay()
       alert(`"${file.name}" is not a valid JSON file.`)
       return
     }
     const r = await api<ImportResult>("/api/connectors/import", { method: "POST", body: text })
     await loadConnectors()
+    // Land on the first imported connector — the selection + detail-pane switch
+    // keeps the import visible after the summary dialog is dismissed.
+    if (r.imported.length) {
+      useStore.getState().set({ connSel: r.imported[0].id })
+    }
+    hideOverlay()
 
     const okLine = r.imported.length
       ? `Imported ${r.imported.length} connector(s): ${r.imported.map((c) => c.id + (c.originalId ? ` (renamed from ${c.originalId})` : "")).join(", ")}.`
@@ -265,6 +276,7 @@ export const connImportFile = async (file: File) => {
       : ""
     alert(okLine + skipLine + installLine + credLine)
   } catch (e) {
+    hideOverlay()
     alert("Import failed: " + (e as Error).message)
   } finally {
     useStore.getState().set({ connBusy: false })

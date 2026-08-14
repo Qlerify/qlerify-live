@@ -44,9 +44,12 @@ const DATA_ROOT = process.env.QLERIFY_DATA_DIR || join(homedir(), ".qlerify-data
 const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
 
 /** Per-table row ceiling for the ctx tables snapshot (RunRequest.tables) — a
- * safety cap on ctx-file size, far above any real projection table here. The
- * builder prompt surfaces it so truncation is never silent to the author AI. */
-export const SNAPSHOT_ROWS_PER_TABLE = 2000;
+ * safety cap on ctx-file size. Truncation is SILENT at run time (a connector
+ * diffing against a snapshot sees a table that ends at the cap), so this must
+ * stay above the largest projection table a connector reads via ctx.readTable;
+ * override with QLERIFY_SNAPSHOT_ROWS when a deployment outgrows the default.
+ * The builder prompt surfaces the value so the author AI knows the ceiling. */
+export const SNAPSHOT_ROWS_PER_TABLE = Number(process.env.QLERIFY_SNAPSHOT_ROWS) || 10_000;
 
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network

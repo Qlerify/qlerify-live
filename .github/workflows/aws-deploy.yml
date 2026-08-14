@@ -1,0 +1,91 @@
+name: Deploy to AWS
+
+on:
+  push:
+    # The feature-branch entry exists only to build the bootstrap image before
+    # the first merge; remove it (and its line in the deploy role's trust
+    # policy) at cutover.
+    branches: [main, feat/aws-migration-prep]
+  workflow_dispatch:
+
+# Never two deploys at once - single machine, single SQLite writer.
+concurrency:
+  group: aws-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPO: 658073733040.dkr.ecr.eu-central-1.amazonaws.com/qlerify-live
+  ECS_CLUSTER: qlerify-live
+  ECS_SERVICE: qlerify-live
+
+jobs:
+  # The app runs under tsx (no compile), so type errors would only surface at
+  # runtime. Fail the deploy here instead.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+
+  deploy:
+    needs: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::658073733040:role/qlerify-live-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          docker build -t $ECR_REPO:${{ github.sha }} -t $ECR_REPO:latest .
+          docker push $ECR_REPO:${{ github.sha }}
+          docker push $ECR_REPO:latest
+
+      # On the very first run the CloudFormation stack (and so the service)
+      # does not exist yet - build-and-push is all this workflow can do.
+      - name: Check service exists
+        id: svc
+        run: |
+          COUNT=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE \
+            --query 'length(services[?status==`ACTIVE`])' --output text 2>/dev/null || echo 0)
+          echo "exists=$([ "$COUNT" = "1" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Download current task definition
+        if: steps.svc.outputs.exists == 'true'
+        run: |
+          aws ecs describe-task-definition --task-definition qlerify-live \
+            --query taskDefinition > task-definition.json
+
+      - name: Set new image in task definition
+        if: steps.svc.outputs.exists == 'true'
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: qlerify-live
+          image: ${{ env.ECR_REPO }}:${{ github.sha }}
+
+      - name: Deploy task definition
+        if: steps.svc.outputs.exists == 'true'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true

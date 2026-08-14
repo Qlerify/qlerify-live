@@ -73,8 +73,31 @@ const CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
+// Behind a reverse proxy (Fly, an ALB) req.ip must come from X-Forwarded-For or
+// the per-IP login rate limit collapses into one bucket for every user. Trust a
+// NUMBER of hops (TRUST_PROXY=true means 1), never the whole client-supplied
+// chain: trusting it all would let a caller spoof X-Forwarded-For and rotate
+// out of the rate-limit bucket. Unset = off, for bare local dev.
+function trustProxyHops(): number | false {
+  const raw = process.env.TRUST_PROXY;
+  if (!raw) return false;
+  if (raw === "true") return 1;
+  const hops = Number(raw);
+  return Number.isInteger(hops) && hops > 0 ? hops : false;
+}
+
 export async function buildServer() {
-  const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" } });
+  // An ALB requires the target's keep-alive timeout to EXCEED the ALB idle
+  // timeout, or the server closes pooled connections the ALB still routes to
+  // and clients see sporadic 502s. Raise via env when fronted by an ALB (idle
+  // timeout + ~20s); headersTimeout must in turn exceed keepAliveTimeout.
+  const keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS) || 72_000;
+  const app = Fastify({
+    logger: { level: process.env.LOG_LEVEL ?? "info" },
+    trustProxy: trustProxyHops(),
+    keepAliveTimeout,
+  });
+  app.server.headersTimeout = keepAliveTimeout + 5_000;
   // CORS: the UI is served from this same origin (CSP pins connect-src 'self'),
   // so no cross-origin caller is allowed by default — browsers get no CORS
   // headers. CORS_ORIGIN (comma-separated origins) opts specific frontends in
@@ -119,6 +142,14 @@ export async function buildServer() {
       editorWorkerUrl: editorWorker ? `/vendor/monaco/vs/assets/${editorWorker}` : null,
     }));
   }
+
+  // Load-balancer health check. GET / only proves the static shell serves; this
+  // also proves the DB answers. Auth-exempt in the tenant plugin (health probes
+  // carry no credentials) and deliberately free of tenant data.
+  app.get("/healthz", async () => {
+    await prisma.$queryRaw`SELECT 1`;
+    return { ok: true };
+  });
 
   // Multi-tenant control plane: seed platform basics (built-in roles + the
   // superuser; remove any legacy system org) BEFORE serving, then bind a tenant
@@ -224,6 +255,18 @@ if (isMain) {
         await prisma.$disconnect();
         process.exit(1);
       }
+      // Docker/ECS stop delivers SIGTERM, then SIGKILL after the stop timeout.
+      // Drain in-flight requests and close SQLite cleanly instead of dying
+      // mid-write; requests still running at SIGKILL are accepted losses.
+      process.once("SIGTERM", async () => {
+        app.log.info("SIGTERM received, shutting down");
+        try {
+          await app.close();
+          await prisma.$disconnect();
+        } finally {
+          process.exit(0);
+        }
+      });
     })
     .catch(async (err) => {
       reportStartupFailure(err);

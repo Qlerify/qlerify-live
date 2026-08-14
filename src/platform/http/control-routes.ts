@@ -36,7 +36,7 @@ import { assignDomainRole, domainRolesFor, listDomainRoles, removeDomainRole } f
 import { loadOntologyFromStrings } from "../../ontology/model.js";
 import { requireIdentity, requireTenant, runWithTenant } from "../tenancy/context.js";
 import { applyWorkflowModel } from "../../twin/apply.js";
-import { deriveNameFromModel, fetchSpecificationFromUrl, fetchWorkflowModelFromUrl, sanitizeWorkflowName } from "../../ontology/sync.js";
+import { deriveNameFromModel, fetchStoredWorkflowModel, fetchWorkflowModelFromUrl, modellerLinkBase, sanitizeWorkflowName } from "../../ontology/sync.js";
 import {
   createVersion,
   currentContent,
@@ -146,6 +146,7 @@ export function registerControlRoutes(app: FastifyInstance) {
         isPlatformAdmin: !!ctx.isPlatformAdmin,
         actingAsPlatformAdmin: !!ctx.actingAsPlatformAdmin,
         mustChangePassword: !!idRow?.mustChangePassword,
+        modellerUrl: modellerLinkBase(),
         organizations: await accessibleOrgs(ctx),
       };
       // Authenticated but not a member of any org yet (fresh superadmin, or a user
@@ -933,8 +934,9 @@ export function registerControlRoutes(app: FastifyInstance) {
       });
       if (!cur?.sourceUrl) throw new DomainError("This model has no source link to reload — it was uploaded or pasted. Re-point it via Set model.");
       let workflow: string;
+      let modelName: string | null = null;
       try {
-        workflow = await fetchSpecificationFromUrl(cur.sourceUrl);
+        ({ workflow, name: modelName } = await fetchStoredWorkflowModel(cur.sourceUrl));
       } catch (e: any) {
         // Config problem (no Qlerify key/URL) → surface its DomainError verbatim;
         // only a real transport/HTTP failure becomes a 502 FetchError.
@@ -942,7 +944,14 @@ export function registerControlRoutes(app: FastifyInstance) {
         throw new FetchError(e?.message ?? String(e));
       }
       const result = await applyWorkflowModel(workflow, null, { source: "fetch", sourceUrl: cur.sourceUrl });
-      return { ok: true, ...result };
+      const renamed = sanitizeWorkflowName(modelName);
+      if (renamed) {
+        await prisma.platWorkflow.updateMany({
+          where: { id: ctx.workflowId, organizationId: ctx.organizationId },
+          data: { name: renamed },
+        });
+      }
+      return { ok: true, ...result, name: renamed ?? undefined };
     } catch (err) {
       return fail(reply, err);
     }

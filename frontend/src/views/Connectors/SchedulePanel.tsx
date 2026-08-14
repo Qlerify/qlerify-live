@@ -69,7 +69,7 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
       <div className="text-sm font-medium text-stone-800">Automatic polling</div>
       <div className="text-xs text-stone-500 mt-0.5">
         Fetch from the source on a schedule, without anyone pressing a button. Each run is the same pull as{" "}
-        <b>Fetch rows</b> — rows already present are skipped, and new domain events are derived automatically.
+        <b>Fetch rows</b> — changed rows are updated, unchanged rows are skipped, and new domain events are derived automatically.
       </div>
 
       <div className="flex items-center gap-2 mt-3 flex-wrap">

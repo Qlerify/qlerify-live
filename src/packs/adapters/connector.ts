@@ -8,6 +8,7 @@
 import { getOntology, type EntitySchema } from "../../ontology/model.js";
 import type { AdapterConfig, SourceAdapter } from "../types.js";
 import { runConnector, moduleExists, SNAPSHOT_ROWS_PER_TABLE } from "../connector/runtime.js";
+import { readSidecar } from "../sidecar.js";
 import * as store from "../../twin/projection-store.js";
 
 /** Resolve the connector's target schema — an entity, or a value object. */
@@ -47,6 +48,13 @@ export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
     targetEntity: cfg.targetEntity,
     mode: cfg.mode ?? "live",
     async introspect() {
+      // The SOURCE's discovered shape when a discovery sample has run
+      // (orchestrate discoverSourceFields — fresh-read so a sample taken after
+      // registration is picked up); the model schema as the fallback echo.
+      const discovered = readSidecar(cfg.id)?.discoveredFields;
+      if (discovered?.length) {
+        return { entity: cfg.targetEntity, fields: discovered.map((f) => ({ name: f.name, dataType: f.dataType, sample: f.sample })) };
+      }
       const e = target();
       return { entity: e.name, fields: e.fields.map((f) => ({ name: f.name, dataType: f.dataType, sample: f.exampleData?.[0] })) };
     },

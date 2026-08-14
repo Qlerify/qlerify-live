@@ -15,6 +15,8 @@ import {
 import type { Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { CodeEditor } from "./CodeEditor.tsx"
+import { RuleEditor } from "./RuleEditor.tsx"
+import { ManifestSections } from "./ManifestSections.tsx"
 import { SchedulePanel } from "./SchedulePanel.tsx"
 
 const Chip = ({ label, value }: { label: string; value: string }) => (
@@ -129,6 +131,8 @@ const DetailsBody = ({ c }: { c: Connector }) => {
         />
         {!c.owned && <Chip label="Owner" value="legacy (unassigned)" />}
       </div>
+
+      <ManifestSections connectorId={c.id} />
 
       <Diagnostics c={c} />
 
@@ -265,13 +269,30 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
 
   const name = connectorName(c)
   const orphan = c.status === "orphaned"
-  const tab = connTab === "code" ? "code" : "details"
+  const rules = c.triggerRules || []
+  // Tab state: "details" | "code" | "rule:<eventKey>". A rule tab whose rule was
+  // deleted (or another connector selected) falls back to details.
+  const tab =
+    connTab === "code"
+      ? "code"
+      : connTab.startsWith("rule:") && rules.some((r) => `rule:${r.eventKey}` === connTab)
+        ? connTab
+        : "details"
 
-  const TabBtn = ({ id, label }: { id: string; label: string }) => (
+  const RULE_DOT: Record<string, string> = {
+    ok: "bg-emerald-500",
+    stale: "bg-amber-500",
+    error: "bg-rose-500",
+    disabled: "bg-stone-400",
+    orphaned: "bg-rose-500",
+  }
+
+  const TabBtn = ({ id, label, dot }: { id: string; label: string; dot?: string }) => (
     <button
       onClick={() => set({ connTab: id })}
-      className={`px-3 py-1.5 text-sm rounded-md font-medium ${tab === id ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
+      className={`px-3 py-1.5 text-sm rounded-md font-medium inline-flex items-center gap-1.5 ${tab === id ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
     >
+      {dot && <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot}`} />}
       {label}
     </button>
   )
@@ -317,9 +338,17 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
             ingest until you <b>re-point</b> it at a current table (or delete it).
           </div>
         )}
-        <div className="flex items-center gap-1 mt-4">
+        <div className="flex items-center gap-1 mt-4 flex-wrap">
           <TabBtn id="details" label="Details" />
           <TabBtn id="code" label="Code" />
+          {rules.map((r) => (
+            <TabBtn
+              key={r.eventKey}
+              id={`rule:${r.eventKey}`}
+              label={r.eventName}
+              dot={RULE_DOT[r.status] || RULE_DOT.ok}
+            />
+          ))}
           <button
             onClick={connExport}
             disabled={connBusy}
@@ -331,7 +360,13 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
         </div>
       </div>
 
-      {tab === "code" ? <CodeEditor connector={c} /> : <DetailsBody c={c} />}
+      {tab === "code" ? (
+        <CodeEditor connector={c} />
+      ) : tab.startsWith("rule:") ? (
+        <RuleEditor connector={c} eventKey={tab.slice("rule:".length)} />
+      ) : (
+        <DetailsBody c={c} />
+      )}
     </div>
   )
 }

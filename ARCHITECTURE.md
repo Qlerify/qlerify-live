@@ -632,7 +632,8 @@ existing substrate (`ontologyView` filtered by BC, `listAdapters`, `provenanceMe
 `AdapterConfig`. `:bc` validated vs `getOntology().boundedContexts` (404 `UNKNOWN_BC`). Routes:
 `GET /api/bc` (index), `GET /api/bc/:bc` (overview), `POST /api/bc/:bc/adapter/:id/verify` (healthcheck),
 `POST .../test` (dry-run `pull()` + field-diff, NO insert), `GET .../raw` (gen_<Entity> rows w/
-`_provenance`), `GET .../history`. `web/app.js`: `#bcs` + `#bc/<Name>` routing before the dashboard
+`_provenance`; also `_raw` — undeclared source fields folded to one JSON column per row at ingest,
+the capture-everything default), `GET .../history`. `web/app.js`: `#bcs` + `#bc/<Name>` routing before the dashboard
 fallback; `bcListView` + `bcWorkbenchView` (tabs Overview / Connection / Test / Raw / Commands+Queries /
 Raw-as-Events); a header nav link. The existing `POST /api/adapters/:id/pull` is the "ingest for real"
 sink. *Det:* all of Slice 1. *AI:* none.

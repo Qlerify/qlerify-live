@@ -83,6 +83,8 @@ Every fact carries **provenance** (`simulated` / `recorded` / `live`) and **acto
 
 AI writes the integration code from a natural-language description of the source, **tests it on the fly**, and **self-heals**: a failed dry-run's error + redacted trace is fed back so the AI rewrites the code until it works. Operators can hand-edit any connector in an in-browser **Monaco** editor. The Given/When/Then acceptance criteria act as the test oracle.
 
+Connectors **capture the whole source record by default**: the model's fields land as real columns, and every other field the source exposes is preserved per row in a reserved `_raw` JSON column (merged no-clobber on re-pulls, visible to trigger rules and the raw explorer, ready to promote into the model later). The builder chat can also **ground itself before building**: `fetch_docs` reads a public API documentation page (SSRF-guarded, per-redirect-hop validation), and `discover_source_fields` samples the live source and records its actual field names/types on the connector — both feed the build prompt so the AI maps the source's real shape instead of guessing.
+
 A connector can also **simulate content** (ask the builder chat, or click the suggestion): it fabricates ~20 realistic rows spread evenly across the aggregate's lifecycle states — fields filled cumulatively per workflow event, `status` walked along its ladder — so the derive step turns them into cases spread along the whole workflow. Fields that hold a **related entity or value object** are treated as closed sets: fabricated values are drawn only from the related schema's example values in the model (the codegen prompt carries them as the allowed vocabulary), never invented lookalikes. Downstream aggregates are only simulated against **real upstream ids** (the case-id path); if the upstream table is empty, the assistant offers to simulate it first.
 
 ### 5. Multi-tenant control plane
@@ -228,6 +230,7 @@ All configuration is via environment variables (see `.env.example`). For **local
 | `PLATFORM_ENCRYPTION_KEY` | auto | 32-byte hex encrypting per-org BYOK secrets at rest — **auto-generated** by setup. **Do not change once set: rotating it invalidates stored per-org keys.** |
 | `QLERIFY_MCP_API_KEY` | optional | Platform-default Qlerify key for "Reload from link"; per-org keys set in Org Admin override it. In dev it falls back to `~/.claude.json`. |
 | `QLERIFY_MCP_URL` | rare | Qlerify Modeller endpoint. Defaults to `https://mcp.qlerify.com`; set only to point at a white-labelled Modeller. |
+| `QLERIFY_APP_URL` | rare | Modeller a pasted model **link** must be on (the link-side twin of `QLERIFY_MCP_URL`). Defaults to `https://app.qlerify.com`; **replaces** the default rather than adding to it. Must include the scheme (`http://localhost:8080`, not `localhost:8080`) — an invalid value is ignored with a warning. Set both when pointing at a local or white-labelled Modeller. |
 | `CHAT_MODEL` | optional | Override the default Claude model (`claude-sonnet-4-6`) |
 | `CHAT_EFFORT` | optional | Reasoning effort: `low` / `medium` (default) / `high` |
 | `NODE_ENV` | prod | `production` **disables the forgeable dev auth shim** — required for real auth |

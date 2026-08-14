@@ -1,7 +1,9 @@
 import type { EventDef, Instance, LogEntry, Meta, Row } from "./types.ts"
 
-// Platform/bookkeeping columns we never surface as business fields.
-export const GEN_HIDDEN = new Set(["version", "createdAt", "updatedAt", "_provenance"])
+// Platform/bookkeeping columns we never surface as business fields. `_raw` is
+// the ingest fold of undeclared source fields (a whole JSON blob per row) —
+// browsable in the raw explorer, never a business field here.
+export const GEN_HIDDEN = new Set(["version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id", "_raw"])
 
 export const parsePayload = (s?: string): Row => {
   try {

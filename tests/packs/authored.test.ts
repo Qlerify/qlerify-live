@@ -76,7 +76,8 @@ describe("writeBody — unique-path (Fix 1) + deny-scan gate", () => {
   it("writes a content-hash path, is idempotent, and refuses denied code", () => {
     const r1 = writeBody(cfg(), CLEAN_BODY);
     writtenPath = r1.bodyPath;
-    expect(r1.bodyPath).toContain("src/packs/sap/generated/test-authored-sap.");
+    // Compare separator-agnostically — bodyPath is native, so it is backslashed on Windows.
+    expect(r1.bodyPath.replaceAll("\\", "/")).toContain("src/packs/sap/generated/test-authored-sap.");
     expect(r1.skipped).toBe(false);
 
     const r2 = writeBody(cfg(), CLEAN_BODY);

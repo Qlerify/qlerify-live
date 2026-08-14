@@ -22,7 +22,7 @@ const JOURNAL_DIR = join(QLERIFY_DIR, "connector-journal");
 const MAX_NOTES = 100; // keep the doc bounded; oldest notes roll off
 
 type ConnectorNoteKind =
-  | "created" | "built" | "edited" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "failed" | "note";
+  | "created" | "built" | "edited" | "repaired" | "credentials" | "ingested" | "cleared" | "repointed" | "removed" | "failed" | "note" | "rule";
 
 export interface ConnectorNote {
   at: string;              // ISO timestamp
@@ -34,6 +34,14 @@ export interface ConnectorNote {
 export interface ConnectorDoc {
   id: string;
   summary?: string;        // one-line "what this connector does"
+  /** AI-extracted structured facets of the built code (refreshed with the
+   * summary on every build/save): the manifest's dynamic sections read these. */
+  facets?: {
+    /** Filters/sorts/limits actually baked into the code ("Deal value > 1000"). */
+    filters: string[];
+    /** The code's re-run behavior, when it has one (incremental gate, watermark). */
+    incremental?: string;
+  };
   notes: ConnectorNote[];  // newest last
   updatedAt: string;
 }
@@ -122,12 +130,15 @@ export function appendNote(id: string, kind: ConnectorNoteKind, text: string, ex
   return doc;
 }
 
-/** Set the one-line summary (what the connector does). No-op for empty input. */
-export function setConnectorSummary(id: string, summary: string): void {
+/** Set the one-line summary (what the connector does). No-op for empty input.
+ * `facets` (when given) replace the stored ones wholesale — they describe the
+ * same build of the code the summary does. */
+export function setConnectorSummary(id: string, summary: string, facets?: ConnectorDoc["facets"]): void {
   const s = (summary ?? "").trim();
   if (!s) return;
   const doc = readDoc(id) ?? { id, notes: [], updatedAt: "" };
   doc.summary = s;
+  if (facets) doc.facets = facets;
   doc.updatedAt = new Date().toISOString();
   writeDoc(doc);
 }

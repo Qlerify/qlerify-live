@@ -199,7 +199,7 @@ export const fetchRows = async () => {
   const adapter = adapters[0]!
   if (
     !confirm(
-      `Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; rows with an id already in the table are skipped.`,
+      `Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; changed rows are updated in place; unchanged rows are skipped.`,
     )
   ) {
     return
@@ -210,6 +210,7 @@ export const fetchRows = async () => {
     const r = await api<{
       inserted: number
       skipped: number
+      updated?: number
       durationMs?: number
       fetchMs?: number
       derived?: { events: number; instances: number; durationMs?: number }
@@ -227,7 +228,7 @@ export const fetchRows = async () => {
       r.durationMs != null
         ? `\nTook: ${formatDuration(r.durationMs)}${r.fetchMs != null ? ` (fetch ${formatDuration(r.fetchMs)})` : ""}`
         : ""
-    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}${took}`)
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nUpdated: ${r.updated ?? 0}\nUnchanged: ${r.skipped}${ev}${took}`)
   } catch (err) {
     hideOverlay()
     alert("Fetch failed: " + (err as Error).message)

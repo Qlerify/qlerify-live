@@ -125,15 +125,18 @@ describe("buildConnectorPrompt event-chain (FK) links", () => {
 });
 
 // Re-run economics are unconditional for entity targets: every connector re-runs
-// (manual pulls + scheduled polling) and ingest skips already-present ids, so the
-// author must self-gate expensive derived rows (incremental via ctx.readTable of
-// its OWN target table) instead of re-paying per-row AI/API cost each run. Value
+// (manual pulls + scheduled polling) and ingest upserts already-present ids
+// (changed fields updated, unchanged rows skipped), so the author must still
+// self-gate expensive derived rows (incremental via ctx.readTable of its OWN
+// target table) instead of re-paying per-row AI/API cost each run. Value
 // objects carry no connector-supplied id, so they get no id-diff guidance.
 describe("buildConnectorPrompt re-run behavior", () => {
   it("an entity target gets the re-run section with incremental self-gating against its own table", () => {
     const prompt = buildConnectorPrompt(demandInput([]));
     expect(prompt).toContain("## Re-runs");
-    expect(prompt).toContain("is SKIPPED — never updated, never duplicated");
+    expect(prompt).toContain("CHANGED fields are UPDATED in place");
+    // Partial rows are safe — the upsert never lets a null erase a stored value.
+    expect(prompt).toContain("NEVER erases a stored one");
     expect(prompt).toContain('ctx.readTable("MarketDemand")');
     expect(prompt).toContain("INCREMENTAL is the default whenever each row is EXPENSIVE to produce");
     // Backlog progress: the limit is taken AFTER the already-done filter, or a
@@ -141,7 +144,7 @@ describe("buildConnectorPrompt re-run behavior", () => {
     expect(prompt).toContain("Apply ctx.limit AFTER excluding already-present items");
     // The gate degrades silently past the snapshot cap — the author is warned.
     expect(prompt).toContain("do not trust the diff alone");
-    expect(prompt).toContain("REGENERATE-ALL only when the instructions explicitly ask for it");
+    expect(prompt).toContain("REGENERATE-ALL (recompute every row each run) only when the instructions explicitly ask for it");
     // Pass-through pulls are exempt — dedup by stable id suffices.
     expect(prompt).toContain("pass-through pull from a system of record needs no gating");
     // The _provisional merge exception exists only for cycle tables — a plain
@@ -205,5 +208,38 @@ describe("buildConnectorPrompt cycle guidance", () => {
     const prompt = buildConnectorPrompt(base());
     expect(prompt).not.toContain("Recurring-cycle table");
     expect(prompt).not.toContain("Cycle membership");
+  });
+});
+
+// Connectors default to capturing the WHOLE source record: model fields land as
+// columns, undeclared source fields are preserved in the row's _raw JSON at
+// ingest. The prompt must (a) instruct capture-everything, and (b) when a
+// discovery sample has run, show the source's REAL observed fields to map from.
+describe("buildConnectorPrompt capture-everything + discovered source fields", () => {
+  it("instructs capturing every source field by default, extras un-coerced", () => {
+    const prompt = buildConnectorPrompt(demandInput([]));
+    expect(prompt).toContain("Capture the WHOLE source record by default");
+    expect(prompt).toContain("The platform preserves the extra fields automatically");
+    expect(prompt).toContain("Extra (non-model) fields ride along AS-IS");
+  });
+
+  it("renders the discovered source fields with types and samples when discovery has run", () => {
+    const prompt = buildConnectorPrompt({
+      ...demandInput([]),
+      discoveredFields: [
+        { name: "deal_id", dataType: "string", sample: '"D-1001"' },
+        { name: "Deal Size (USD)", dataType: "integer", sample: "42000" },
+        { name: "owner", dataType: "json", sample: '{"name":"Kim"}' },
+      ],
+    });
+    expect(prompt).toContain("## Source fields observed on the LIVE source");
+    expect(prompt).toContain('deal_id: string — e.g. "D-1001"');
+    expect(prompt).toContain("Deal Size (USD): integer — e.g. 42000");
+    expect(prompt).toContain("include every remaining source field on your rows unchanged");
+  });
+
+  it("omits the discovered section when no discovery sample has run", () => {
+    const prompt = buildConnectorPrompt(demandInput([]));
+    expect(prompt).not.toContain("## Source fields observed on the LIVE source");
   });
 });

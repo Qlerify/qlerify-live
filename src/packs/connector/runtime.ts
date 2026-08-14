@@ -29,7 +29,8 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync,
 } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { connectorsEnabled } from "../../config/features.js";
@@ -43,9 +44,12 @@ const DATA_ROOT = process.env.QLERIFY_DATA_DIR || join(homedir(), ".qlerify-data
 const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
 
 /** Per-table row ceiling for the ctx tables snapshot (RunRequest.tables) — a
- * safety cap on ctx-file size, far above any real projection table here. The
- * builder prompt surfaces it so truncation is never silent to the author AI. */
-export const SNAPSHOT_ROWS_PER_TABLE = 2000;
+ * safety cap on ctx-file size. Truncation is SILENT at run time (a connector
+ * diffing against a snapshot sees a table that ends at the cap), so this must
+ * stay above the largest projection table a connector reads via ctx.readTable;
+ * override with QLERIFY_SNAPSHOT_ROWS when a deployment outgrows the default.
+ * The builder prompt surfaces the value so the author AI knows the ceiling. */
+export const SNAPSHOT_ROWS_PER_TABLE = Number(process.env.QLERIFY_SNAPSHOT_ROWS) || 10_000;
 
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network
@@ -255,14 +259,63 @@ export function credentialKeys(id: string): string[] {
   return Object.keys(readCredentials(id));
 }
 
-/** Remove a connector's files (module + creds + scratch). Shared deps are left in
- * place. Returns true if a module file existed. */
+/** Remove a connector's files (module + creds + scratch + trigger rules). Shared
+ * deps are left in place. Returns true if a module file existed. */
 export function deleteConnectorFiles(id: string): boolean {
   const had = moduleExists(id);
   for (const p of [modulePath(id), credPath(id), ctxPath(id), resultPath(id)]) {
     if (existsSync(p)) rmSync(p);
   }
+  deleteRuleFiles(id);
   return had;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger-rule modules — <id>.rule.<eventKey>.<hash12>.mjs in the same workspace.
+// Content-hash path per version (tsx caches modules by PATH — the bodyPath rule),
+// so a recompute is a NEW file and an identical write is an idempotent skip.
+// ---------------------------------------------------------------------------
+
+/** eventKey, made filesystem-safe (keys are identifier-shaped already; this is
+ * the defensive clamp, and it keeps the `.rule.` filename grammar parseable). */
+export function safeRuleKey(eventKey: string): string {
+  return String(eventKey).replace(/[^A-Za-z0-9_]/g, "_") || "event";
+}
+
+/** Absolute path of a workspace rule file. basename() so a hostile stored
+ * filename can never traverse out of the workspace. */
+export function ruleAbsPath(file: string): string {
+  return join(CONNECTORS_DIR, basename(file));
+}
+
+export function writeRuleFile(id: string, eventKey: string, code: string): { file: string; codeHash: string; skipped: boolean } {
+  mkdirSync(CONNECTORS_DIR, { recursive: true });
+  const codeHash = createHash("sha256").update(code).digest("hex").slice(0, 12);
+  const file = `${id}.rule.${safeRuleKey(eventKey)}.${codeHash}.mjs`;
+  const abs = join(CONNECTORS_DIR, file);
+  if (existsSync(abs)) return { file, codeHash, skipped: true };
+  writeFileSync(abs, code);
+  return { file, codeHash, skipped: false };
+}
+
+export function readRuleFile(file: string): string | null {
+  const abs = ruleAbsPath(file);
+  return existsSync(abs) ? readFileSync(abs, "utf8") : null;
+}
+
+/** Delete a connector's rule files — all of them, or one event's every version
+ * (recompiles leave prior content-hash files behind; delete sweeps them). */
+export function deleteRuleFiles(id: string, eventKey?: string): number {
+  if (!existsSync(CONNECTORS_DIR)) return 0;
+  const prefix = eventKey === undefined ? `${id}.rule.` : `${id}.rule.${safeRuleKey(eventKey)}.`;
+  let n = 0;
+  for (const f of readdirSync(CONNECTORS_DIR)) {
+    if (f.startsWith(prefix) && f.endsWith(".mjs")) {
+      rmSync(join(CONNECTORS_DIR, f));
+      n++;
+    }
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -445,10 +498,11 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
   });
 }
 
-/** List connector ids that have a module on disk (diagnostics). */
+/** List connector ids that have a module on disk (diagnostics). Trigger-rule
+ * files share the workspace + extension but are not connectors. */
 export function listConnectorIds(): string[] {
   if (!existsSync(CONNECTORS_DIR)) return [];
   return readdirSync(CONNECTORS_DIR)
-    .filter((f) => f.endsWith(".mjs") && f !== "runner.mjs")
+    .filter((f) => f.endsWith(".mjs") && f !== "runner.mjs" && !f.includes(".rule."))
     .map((f) => f.slice(0, -4));
 }

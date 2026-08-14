@@ -145,7 +145,7 @@ export async function expFetchRows() {
     return;
   }
   const adapter = adapters[0];
-  if (!confirm(`Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; rows with an id already in the table are skipped.`)) return;
+  if (!confirm(`Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; changed rows are updated in place; unchanged rows are skipped.`)) return;
   e.busy = true; render();
   showOverlay("Refreshing data…");
   try {
@@ -154,7 +154,7 @@ export async function expFetchRows() {
     hideOverlay(); // drop the scrim before the blocking result alert
     const ev = r.derived && r.derived.events ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s)${r.derived.durationMs != null ? `, ${formatDuration(r.derived.durationMs)}` : ""})` : "";
     const took = r.durationMs != null ? `\nTook: ${formatDuration(r.durationMs)}${r.fetchMs != null ? ` (fetch ${formatDuration(r.fetchMs)})` : ""}` : "";
-    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nSkipped (already present): ${r.skipped}${ev}${took}`);
+    alert(`Fetched from source.\n\nInserted: ${r.inserted}\nUpdated: ${r.updated ?? 0}\nUnchanged: ${r.skipped}${ev}${took}`);
   } catch (err) {
     hideOverlay();
     alert("Fetch failed: " + err.message);

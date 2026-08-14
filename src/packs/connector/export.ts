@@ -15,7 +15,7 @@
 // an orphaned connector — target table renamed away — still exports.
 
 import type { AdapterConfig } from "../types.js";
-import { readModule, credentialKeys } from "./runtime.js";
+import { readModule, readRuleFile, credentialKeys } from "./runtime.js";
 
 export const CONNECTOR_EXPORT_FORMAT = "qlerify-connector-export";
 export const CONNECTOR_EXPORT_VERSION = 1;
@@ -27,7 +27,21 @@ export const CONNECTOR_EXPORT_VERSION = 1;
 export type ExportedConnectorConfig = Pick<AdapterConfig,
   | "id" | "kind" | "boundedContext" | "targetEntity" | "targetKind"
   | "phase" | "mode" | "instructions" | "deps" | "dateRoles"
-  | "fieldMap" | "limits" | "endpoint" | "connectionOptionId">;
+  | "fieldMap" | "limits" | "endpoint" | "connectionOptionId"
+  | "discoveredFields" | "discoveredAt">;
+
+/** A per-event trigger rule, portable form: the code travels inline; the
+ * content-hash file name + builtAt are re-derived on import. gwtHash is the
+ * COMPILE-TIME hash — the destination compares it to its own model's GWTs, so
+ * drift across environments surfaces as "stale" exactly like local drift. */
+export interface ExportedTriggerRule {
+  eventKey: string;
+  eventRef: string;
+  condition: string;
+  gwtHash: string;
+  author: "ai" | "human";
+  code: string;
+}
 
 export interface ConnectorExportEntry {
   config: ExportedConnectorConfig;
@@ -35,6 +49,9 @@ export interface ConnectorExportEntry {
   code: string | null;
   /** Credential FIELD NAMES only — never values. */
   credentialKeys: string[];
+  /** Per-event trigger rules (absent when the connector has none). Rules whose
+   * module file is missing on disk are dropped — they were already broken. */
+  rules?: ExportedTriggerRule[];
 }
 
 export interface ConnectorExportEnvelope {
@@ -60,11 +77,24 @@ export function exportConnectorEntry(cfg: AdapterConfig): ConnectorExportEntry {
     limits: cfg.limits,
     endpoint: cfg.endpoint,
     connectionOptionId: cfg.connectionOptionId,
+    discoveredFields: cfg.discoveredFields,
+    discoveredAt: cfg.discoveredAt,
   };
   for (const k of Object.keys(config) as (keyof ExportedConnectorConfig)[]) {
     if (config[k] === undefined) delete config[k];
   }
-  return { config, code: readModule(cfg.id), credentialKeys: credentialKeys(cfg.id) };
+  const rules: ExportedTriggerRule[] = [];
+  for (const r of cfg.triggerRules ?? []) {
+    const code = readRuleFile(r.file);
+    if (code === null) continue;
+    rules.push({ eventKey: r.eventKey, eventRef: r.eventRef, condition: r.condition, gwtHash: r.gwtHash, author: r.author, code });
+  }
+  return {
+    config,
+    code: readModule(cfg.id),
+    credentialKeys: credentialKeys(cfg.id),
+    ...(rules.length ? { rules } : {}),
+  };
 }
 
 export function buildConnectorExport(cfgs: AdapterConfig[]): ConnectorExportEnvelope {

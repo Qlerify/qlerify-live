@@ -16,9 +16,12 @@ import { applyFieldMap } from "../packs/types.js";
 import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js";
 import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
-  connectorInfo, readConnectorCode, removeConnector,
+  connectorInfo, readConnectorCode, removeConnector, discoverSourceFields,
 } from "../packs/connector/orchestrate.js";
+import { fetchDocs } from "./fetch-docs.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
+import { previewRule } from "../packs/connector/rules.js";
+import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
 import { guardData } from "../platform/authz.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
@@ -40,6 +43,12 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   regenerate_adapter_body: "connector.build",
   create_connector: "connector.build",
   build_connector: "connector.build",
+  build_trigger_rules: "connector.build",
+  // Discovery executes connector code AND persists the observed shape on the
+  // sidecar; docs fetching is an AI-driven outbound network request. Both ride
+  // the connector-authoring capability (and its kill-switch, via guardData).
+  discover_source_fields: "connector.build",
+  fetch_docs: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -59,7 +68,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 // likewise checked inside their own handlers.
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
-  "ingest_connector", "remove_connector",
+  "build_trigger_rules", "ingest_connector", "remove_connector", "discover_source_fields",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -69,7 +78,7 @@ const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
 // the subsystem (QLERIFY_CONNECTORS_ENABLED=false).
 const TOOL_CONNECTOR_KILLSWITCH: ReadonlySet<string> = new Set([
   "get_adapter_config", "check_adapter_credential", "run_adapter_healthcheck", "adapter_dry_run",
-  "view_connector_code", "get_connector_history", "list_connector_credentials",
+  "view_connector_code", "get_connector_history", "list_connector_credentials", "preview_trigger_rule",
 ]);
 
 export const TOOLS: Anthropic.Tool[] = [
@@ -223,7 +232,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "adapter_dry_run",
     description:
-      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
+      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, the extra source fields beyond the model (extraFields — informational, NOT an error: ingest preserves them in the row's _raw JSON column), or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
     input_schema: {
       type: "object",
       properties: {
@@ -231,6 +240,30 @@ export const TOOLS: Anthropic.Tool[] = [
         limit: { type: "number", description: "Rows to attempt (default 3)." },
       },
       required: ["adapterId"],
+    },
+  },
+  {
+    name: "discover_source_fields",
+    description:
+      "Sample the LIVE source through the built connector (a few rows, nothing written to any table) and RECORD the source's actual field shape on the connector — names, inferred types, one example value each. Call it after a build_connector succeeds when the source's schema is unknown, or when adapter_dry_run shows missing required fields or surprising extras: the discovered shape is threaded into every later build_connector prompt automatically, so a repair maps the source's REAL fields instead of guessing. Returns the fields split into modelFields (land as columns) and extraFields (preserved in the row's _raw JSON at ingest).",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+      },
+      required: ["adapterId"],
+    },
+  },
+  {
+    name: "fetch_docs",
+    description:
+      "Fetch one PUBLIC documentation web page (an API reference, developer guide, or schema description) and return its readable text. Call this BEFORE build_connector when you are unsure which endpoints, fields, auth scheme, or pagination a source system's API exposes — ground the build instructions in the vendor's real documentation instead of guessing, trying a few likely URLs if the first misses. HTTPS/HTTP to public hosts only (private and internal addresses are blocked); HTML is stripped to text and long pages are truncated.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The documentation page URL, e.g. https://developers.pipedrive.com/docs/api/v1" },
+      },
+      required: ["url"],
     },
   },
   {
@@ -324,6 +357,45 @@ export const TOOLS: Anthropic.Tool[] = [
         confirmed: { type: "boolean" },
       },
       required: ["adapterId", "confirmed"],
+    },
+  },
+  {
+    name: "build_trigger_rules",
+    description:
+      "WRITE — Have AI compile per-EVENT trigger rules for a connector: tiny deterministic predicates (from each event's Given/When/Then criteria + the operator's stated condition) that decide which domain event(s) an ingested row implies — replacing the platform's generic heuristics for exactly those events. Use when the operator states per-event conditions ('trigger Upsell Deal Created for upsell deals and Cross Sell Deal Created for cross sell deals') or one table drives sibling events that need discriminating. Compile the whole family of related events in ONE call so the conditions stay mutually consistent. Stop-and-show: rules are written + recorded, not executed — verify each with preview_trigger_rule next; if a preview is wrong or errors, call again with that report as errorReport (self-heal). Requires confirmation: state each event + its condition, ask 'Shall I compile these rules?', wait for yes, then call with confirmed:true.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        rules: {
+          type: "array",
+          description: "One entry per event to rule.",
+          items: {
+            type: "object",
+            properties: {
+              event: { type: "string", description: "Event name or key (must be an event on the connector's target table)." },
+              condition: { type: "string", description: "The operator's natural-language condition for this event. Omit on a recompile to reuse the stored one." },
+            },
+            required: ["event"],
+          },
+        },
+        errorReport: { type: "string", description: "On a self-heal turn (single rule): what the preview got wrong, or the ruleError, so the AI can fix the code." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "rules", "confirmed"],
+    },
+  },
+  {
+    name: "preview_trigger_rule",
+    description:
+      "Dry-run one trigger rule against the live rows (nothing is emitted): how many rows it fires for, which would emit now, and per-row evidence samples — the oracle to check after build_trigger_rules and before ingest_connector. If the result is wrong or carries a ruleError, fix it via build_trigger_rules with an errorReport.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        event: { type: "string", description: "Event name or key of the rule to preview." },
+      },
+      required: ["adapterId", "event"],
     },
   },
   {
@@ -436,7 +508,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
     // ownership inside their handlers with the unknown-id shape, so they don't leak
     // an existence oracle.)
     if (TOOL_OWNED_ID.has(name)) {
-      const idArg = typeof args.adapterId === "string" ? args.adapterId : "";
+      // Coerce EXACTLY like the handlers do (String(...)), so a non-string
+      // adapterId (an array, a number) can't slip past the gate and reach a
+      // foreign tenant's connector via the handler's own String() coercion.
+      const idArg = args.adapterId == null ? "" : String(args.adapterId);
       if (idArg && !ownsAdapterId(idArg)) return err(`no adapter "${idArg}" in this workflow`);
     }
     switch (name) {
@@ -466,6 +541,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return ok(await handleRunAdapterHealthcheck(String(args.adapterId ?? "")));
       case "adapter_dry_run":
         return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3)));
+      case "discover_source_fields":
+        return await handleDiscoverSourceFields(String(args.adapterId ?? ""));
+      case "fetch_docs":
+        return ok(await fetchDocs(String(args.url ?? "")));
       case "regenerate_adapter_body":
         return await handleRegenerateAdapterBody(args);
       case "reset_adapter":
@@ -480,6 +559,10 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleSetConnectorCredentials(args);
       case "build_connector":
         return await handleBuildConnector(args);
+      case "build_trigger_rules":
+        return await handleBuildTriggerRules(args);
+      case "preview_trigger_rule":
+        return await handlePreviewTriggerRule(args);
       case "ingest_connector":
         return await handleIngestConnector(args);
       case "view_connector_code":
@@ -659,11 +742,22 @@ async function handleRunAdapterHealthcheck(adapterId: string) {
   }
 }
 
+/** Sample the live source and record its observed field shape (orchestrate
+ * discoverSourceFields). Defense-in-depth ownership recheck like the sibling
+ * exec tools, on top of the TOOL_OWNED_ID gate. */
+async function handleDiscoverSourceFields(adapterId: string): Promise<ToolResult> {
+  if (!adapterId) return err("adapterId required");
+  if (!ownsAdapterId(adapterId)) return err(`no adapter "${adapterId}" in this workflow`); // foreign ≡ unknown (no oracle)
+  return ok(await discoverSourceFields(adapterId));
+}
+
 async function handleAdapterDryRun(adapterId: string, limit: number) {
   if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
   const a = getAdapter(adapterId);
   if (!a) return { error: `no adapter "${adapterId}"` };
-  const entity = getOntology().entity(a.targetEntity);
+  // Entity OR value object — VO targets are first-class (ingest and the /test
+  // oracle resolve both), so their required/extras grading must work too.
+  const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
   try {
     const fieldMap = await a.mapping();
     const { rows } = await a.pull({ limit: limit > 0 ? limit : 3 });
@@ -671,7 +765,15 @@ async function handleAdapterDryRun(adapterId: string, limit: number) {
     const missingRequired = entity
       ? entity.required.filter((f) => mapped.length === 0 || mapped.some((r) => r[f] === undefined || r[f] === null || r[f] === ""))
       : [];
-    return { ok: true, count: mapped.length, sample: mapped.slice(0, 2), missingRequired };
+    // Source fields beyond the model — informational, not an error: ingest folds
+    // them into the row's `_raw` JSON column (packs/ingest.ts), nothing is lost.
+    const platformCols = new Set(store.PLATFORM_ROW_COLS);
+    const extraFields = entity
+      ? [...new Set(mapped.flatMap((r) => Object.keys(r).filter((k) => !platformCols.has(k))))].filter(
+          (k) => !entity.fields.some((f) => f.name === k),
+        )
+      : [];
+    return { ok: true, count: mapped.length, sample: mapped.slice(0, 2), missingRequired, extraFields };
   } catch (e: any) {
     // The error report the doctor reasons about (and can pass to regenerate).
     return { ok: false, error: e?.message ?? String(e) };
@@ -808,6 +910,58 @@ async function handleBuildConnector(args: Record<string, any>) {
   });
 }
 
+async function handleBuildTriggerRules(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. State each event + its condition, get the user's explicit yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) return err("adapterId required");
+  const rules = Array.isArray(args.rules) ? args.rules : [];
+  if (rules.length === 0) return err("rules must be a non-empty array of { event, condition? }");
+  const noKey = await requireAnthropicConfigured();
+  if (noKey) return noKey;
+  const errorReport = typeof args.errorReport === "string" && rules.length === 1 ? args.errorReport : undefined;
+  const compiled: Array<Record<string, unknown>> = [];
+  const failures: Array<{ event: string; error: string }> = [];
+  // Sequential on purpose: each compile records its condition on the sidecar, so
+  // later siblings in the same call see the earlier ones' conditions and the
+  // family stays mutually consistent (upsell vs cross sell).
+  for (const r of rules) {
+    const eventArg = String(r?.event ?? "");
+    if (!eventArg) {
+      failures.push({ event: "(missing)", error: "each rule needs an event name or key" });
+      continue;
+    }
+    try {
+      const res = await compileTriggerRule(
+        id, eventArg,
+        typeof r?.condition === "string" ? r.condition : undefined,
+        errorReport,
+      );
+      compiled.push({
+        event: res.rule.eventKey, eventRef: res.rule.eventRef, condition: res.rule.condition,
+        file: res.rule.file, bytes: res.bytes, durationMs: res.durationMs,
+      });
+    } catch (e: any) {
+      failures.push({ event: eventArg, error: String(e?.message ?? e) });
+    }
+  }
+  return ok({
+    built: compiled.length, compiled, ...(failures.length ? { failures } : {}),
+    note: compiled.length
+      ? "Rules compiled + recorded. Now VERIFY each with preview_trigger_rule against the live rows before ingesting; if a preview is wrong, call build_trigger_rules again with an errorReport describing what fired that shouldn't (or vice versa)."
+      : "No rules compiled — see failures.",
+  });
+}
+
+async function handlePreviewTriggerRule(args: Record<string, any>) {
+  const id = String(args.adapterId ?? "");
+  const event = String(args.event ?? "");
+  if (!id || !event) return err("adapterId and event are required");
+  if (!ownsAdapterId(id)) return err(`no connector "${id}"`); // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
+  return ok(await previewRule(id, event));
+}
+
 async function handleIngestConnector(args: Record<string, any>) {
   if (args.confirmed !== true) {
     return err("write tool refused: confirmed=false. Confirm the row count + target table with the user first, then call again with confirmed=true.");
@@ -822,7 +976,7 @@ async function handleIngestConnector(args: Record<string, any>) {
     : "";
   return ok({
     ingested: true, ...summary,
-    note: `Landed ${summary.inserted} new row(s) (${summary.skipped} already present) into ${summary.entity} in ${(summary.durationMs / 1000).toFixed(1)}s. They now appear in the explorer's Items pane.${ev}`,
+    note: `Landed ${summary.inserted} new row(s)${summary.updated ? `, updated ${summary.updated}` : ""} (${summary.skipped} unchanged) into ${summary.entity} in ${(summary.durationMs / 1000).toFixed(1)}s. They now appear in the explorer's Items pane.${ev}`,
   });
 }
 

@@ -27,7 +27,12 @@ export interface IngestSummary {
   adapterId: string;
   entity: string;
   inserted: number;
+  /** Rows whose id already existed with no field changes — skipped untouched. */
   skipped: number;
+  /** Rows whose id already existed and whose source values drifted — the changed
+   * fields were updated in place (nulls never clobber), so re-pulls track the
+   * source and derivation can fire the LATER events the new state implies. */
+  updated: number;
   /** Rows merged into a provisional cycle row the engine had opened lazily
    * (twin/derive.ts) — the pull enriched the placeholder instead of skipping. */
   merged: number;
@@ -55,7 +60,7 @@ export interface IngestSummary {
  * JSON-stringified so they land in the TEXT column verbatim — this is the
  * "embed the VO as JSON on the row" path, free because gen_ columns are TEXT. */
 function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   for (const [k, v] of Object.entries(row)) {
     out[k] = v !== null && typeof v === "object" ? JSON.stringify(v) : v;
   }
@@ -64,6 +69,90 @@ function flattenValues(row: Record<string, unknown>): Record<string, unknown> {
 
 function hasValue(v: unknown): boolean {
   return v !== null && v !== undefined && String(v).trim() !== "";
+}
+
+/** Platform/identity columns an upsert must never touch: identity + optimistic
+ * lock + tenancy + the provisional marker (cleared only by the cycle merge). */
+const UPSERT_EXCLUDED = new Set(["id", "version", "organization_id", "_provisional"]);
+
+/** The ONLY platform columns a source row may supply values for: identity plus
+ * the witnessed source timestamps. Every OTHER platform column on a gen_ table
+ * (projection-store PLATFORM_ROW_COLS) is ENGINE-OWNED — version is the
+ * optimistic lock, organization_id the tenant stamp, _provenance the adapter
+ * mode, _provisional the cycle-placeholder marker, _raw the fold itself — so a
+ * source field carrying one of those names is just DATA and folds into `_raw`
+ * like any other undeclared key. Letting them through would let a source seed
+ * the lock with garbage (every later upsert dies as a stale write), pick its
+ * own tenant, or trip the provisional wholesale merge. */
+const SOURCE_SUPPLIABLE_COLS = ["id", "createdAt", "updatedAt"];
+
+/** Merge newly witnessed extra fields over a row's stored `_raw` JSON. Per-key:
+ * an incoming value wins, but a null/absent incoming value never erases what an
+ * earlier pull witnessed — the same rule the declared-column upsert applies.
+ * Null-prototype accumulator so a source key named "__proto__" is stored like
+ * any other instead of hitting the Object.prototype accessor. */
+function mergeRawJson(storedRaw: unknown, extras: Record<string, unknown>): string {
+  const base: Record<string, unknown> = Object.create(null);
+  if (typeof storedRaw === "string" && storedRaw) {
+    try {
+      const parsed = JSON.parse(storedRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.assign(base, parsed);
+    } catch { /* unparseable stored value — rebuild from the incoming extras */ }
+  }
+  // Purge empties from the stored fold too: folds written before the
+  // only-witnessed-values filter existed (below) carry hundreds of nulls from
+  // return-every-property sources — this self-heals them on the next merge.
+  for (const k of Object.keys(base)) {
+    if (!hasValue(base[k])) delete base[k];
+  }
+  for (const [k, v] of Object.entries(extras)) {
+    if (hasValue(v)) base[k] = v;
+  }
+  return JSON.stringify(base);
+}
+
+/** Diff an incoming mapped row against the stored one. Returns the columns to
+ * update, or null when the row is unchanged (the skip case). Semantics:
+ * - If the sidecar names a last-modified column (dateRoles.updated) and both
+ *   sides carry the same value, the row is unchanged by definition — no field
+ *   diff (the cheap watermark path).
+ * - Only connector-supplied values participate; a null/absent incoming value
+ *   NEVER clobbers a stored one (a source that stops returning a field must not
+ *   erase what an earlier pull witnessed).
+ * - createdAt may be FILLED when the stored row has none (a source can supply a
+ *   missing creation date) but never overwritten — a row's origin doesn't move. */
+function upsertChanges(
+  mapped: Record<string, unknown>,
+  existing: Record<string, unknown>,
+  dateRoles?: { created?: string; updated?: string },
+): Record<string, unknown> | null {
+  const uCol = dateRoles?.updated;
+  if (uCol && hasValue(mapped[uCol]) && hasValue(existing[uCol]) && String(mapped[uCol]) === String(existing[uCol])) {
+    // The watermark certifies the SOURCE RECORD didn't drift — but `_raw` is
+    // platform bookkeeping the watermark doesn't cover: a connector rebuilt to
+    // capture-everything starts returning extras whose records' last-modified
+    // never moved, and those must still land or existing rows would never gain
+    // their fold. The merged JSON is byte-stable, so an identical re-pull still
+    // converges to null (the skip).
+    if (hasValue(mapped._raw) && String(mapped._raw) !== String(existing._raw ?? "")) {
+      return { _raw: mapped._raw };
+    }
+    return null;
+  }
+  const changes: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(mapped)) {
+    if (UPSERT_EXCLUDED.has(k)) continue;
+    if (!hasValue(v)) continue;
+    if (k === "createdAt" && hasValue(existing.createdAt)) continue;
+    // Compare in the STORED shape: a boolean persists as 1/0 (projection-store
+    // sqlValue), so a re-sent `true` reads back as `1` — comparing String(true)
+    // to String(1) would mark every boolean-carrying row "updated" on every pull
+    // forever. Coerce the incoming value the same way the write path will.
+    const stored = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    if (hasValue(existing[k]) && String(existing[k]) === String(stored)) continue;
+    changes[k] = v;
+  }
+  return Object.keys(changes).length ? changes : null;
 }
 
 /** Persist the pull stamp onto the adapter's sidecar (no-op for code-pack
@@ -101,8 +190,12 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
   let fetchMs = 0;
   let inserted = 0;
   let skipped = 0;
+  let updated = 0;
   let merged = 0;
   const warnings: string[] = [];
+  // dateRoles lives on the sidecar (code-pack adapters have none — undefined is
+  // fine: upsertChanges just falls back to the full field diff).
+  const dateRoles = readSidecar(adapterId)?.dateRoles;
   try {
     // The target may be an entity OR a value object (a value object populated
     // directly gets its own gen_<VO> table). Both share the EntitySchema shape.
@@ -111,6 +204,13 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     if (!entity) throw new Error(`adapter "${adapterId}": "${adapter.targetEntity}" is not an entity or value object in the loaded model`);
 
     await store.ensureTable(entity);
+    // Tables created before overflow capture existed lack `_raw` — add it
+    // additively (a fresh createTableSql already carries it).
+    await store.ensureColumn(adapter.targetEntity, "_raw");
+    // Keys a row may land as real columns: the model's declared fields plus the
+    // source-suppliable platform columns. Everything else — undeclared business
+    // fields AND engine-owned platform names — folds into `_raw`.
+    const declaredCols = new Set<string>([...entity.fields.map((f) => f.name), ...SOURCE_SUPPLIABLE_COLS]);
     // Period-scoped cycle target (twin/period.ts): the ENGINE owns the row id —
     // canonical subject@period — so connectors never hand-compose composite keys
     // and a next-period pull creates the next cycle instead of skipping on a
@@ -127,7 +227,33 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     const incoming = rows[adapter.targetEntity] ?? [];
 
     for (const raw of incoming) {
-      const mapped = flattenValues(applyFieldMap(raw, fieldMap));
+      // Partition the (field-mapped) row: keys the table has columns for vs.
+      // EXTRAS the model doesn't declare. Extras are witnessed, not dropped —
+      // folded into the `_raw` JSON column — so a connector may return every
+      // field the source exposes without the model declaring each one first
+      // (and a source field named unlike a SQL identifier can't break the
+      // INSERT). Nested extra values stay real JSON here, not double-encoded
+      // strings, which is why the fold happens before flattenValues.
+      const renamed = applyFieldMap(raw, fieldMap);
+      // Null-prototype accumulators: a source key named "__proto__" must land
+      // as an own property (and reach the fold), not hit the prototype accessor.
+      const kept: Record<string, unknown> = Object.create(null);
+      const extras: Record<string, unknown> = Object.create(null);
+      for (const [k, v] of Object.entries(renamed)) {
+        if (declaredCols.has(k)) {
+          kept[k] = v;
+          continue;
+        }
+        // Only witnessed VALUES enter the fold. Sources that return EVERY field
+        // with null/"" for the unset ones (HubSpot returns the whole property
+        // catalog per record) would otherwise drown the real extras in noise
+        // and bloat every row — and the merge already treats empty incoming
+        // values as absent, so keeping them here bought nothing.
+        if (hasValue(v)) extras[k] = v;
+      }
+      const mapped = flattenValues(kept);
+      const hasExtras = Object.keys(extras).length > 0;
+      if (hasExtras) mapped._raw = JSON.stringify(extras);
       // Ingested rows carry ONLY timestamps the source actually recorded: a
       // createdAt/updatedAt the record doesn't supply lands as NULL, never as
       // insert's ingestion-time default. A fabricated "when we pulled" sits
@@ -157,6 +283,12 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
       mapped._provenance = adapter.mode; // current-state provenance on the row
       const existing = await store.findById(adapter.targetEntity, id);
       if (existing) {
+        // Extras MERGE over the stored `_raw` (per-key, incoming wins): a pull
+        // that returns fewer extra fields must not erase what an earlier pull
+        // witnessed — the declared-column no-clobber rule, applied to the fold.
+        if (hasExtras && hasValue(existing._raw)) {
+          mapped._raw = mergeRawJson(existing._raw, extras);
+        }
         if (existing._provisional) {
           // A cycle row the engine opened lazily before this pull: ENRICH it
           // with the source's real values instead of skipping on the id.
@@ -167,7 +299,19 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
           await store.update(adapter.targetEntity, id, changes, Number(existing.version ?? 0));
           merged++;
         } else {
-          skipped++; // idempotent: a row with this id already ingested
+          // Upsert: a re-pulled row whose source values drifted has its changed
+          // fields updated in place, so state advancement (NEW → SHIPPED) reaches
+          // the projection and derivation can fire the later events it implies.
+          // touchUpdatedAt:false — the row keeps the SOURCE's last-modified value
+          // (or none); stamping pull time here would fabricate a business date
+          // (see the PLATFORM_TIMESTAMP_COLS comment above).
+          const changes = upsertChanges(mapped, existing, dateRoles);
+          if (changes) {
+            await store.update(adapter.targetEntity, id, changes, Number(existing.version ?? 0), { touchUpdatedAt: false });
+            updated++;
+          } else {
+            skipped++; // unchanged: a row with this id already ingested, no drift
+          }
         }
         continue;
       }
@@ -206,7 +350,8 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     // notes timeline, whether triggered by the AI tool or the explorer's "Fetch
     // rows" button (every ingestPull caller is covered here — the single place).
     const mergedNote = merged ? `, ${merged} provisional cycle row(s) enriched` : "";
-    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s) (${skipped} already present${mergedNote}) into ${adapter.targetEntity}.`, { durationMs });
+    const updatedNote = updated ? `, ${updated} updated` : "";
+    appendNote(adapter.id, "ingested", `Ingested ${inserted} new row(s)${updatedNote} (${skipped} unchanged${mergedNote}) into ${adapter.targetEntity}.`, { durationMs });
     for (const w of warnings) appendNote(adapter.id, "note", `Cycle check: ${w}`);
   } catch { /* ignore bookkeeping errors */ }
 
@@ -230,6 +375,16 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
       if (r.totalEmitted > 0) {
         appendNote(adapter.id, "ingested", `Derived ${r.totalEmitted} event(s) across ${r.instances} instance(s) from the data.`, { durationMs: r.durationMs });
       }
+      // A trigger rule that broke fell back to the STATIC heuristic this pass —
+      // whose over-broad emissions are permanent (the pairKey floor). That must
+      // not be silent on the dominant (auto-derive) path: journal each error/
+      // orphaned rule onto THIS connector's history where the operator sees it.
+      for (const e of r.rules?.errors ?? []) {
+        if (e.connector === adapter.id) appendNote(adapter.id, "rule", `Trigger rule for "${e.eventKey}" failed — the generic heuristic answered instead: ${e.error}`);
+      }
+      for (const d of r.rules?.disabled ?? []) {
+        if (d.connector === adapter.id) appendNote(adapter.id, "rule", `Trigger rule for "${d.eventKey}" is inactive: ${d.reason}`);
+      }
     } catch (e: any) {
       // The rows ARE committed, so this is not a pull failure ("failed" would
       // mislabel the run) — but it must not vanish either: a fully silent skip
@@ -247,6 +402,7 @@ async function runIngestPull(adapterId: string, opts: { limit?: number | null; d
     entity: adapter.targetEntity,
     inserted,
     skipped,
+    updated,
     merged,
     ...(warnings.length ? { warnings } : {}),
     mode: adapter.mode,

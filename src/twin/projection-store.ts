@@ -96,6 +96,15 @@ export function tableFor(entity: EntitySchema): string {
   return entity.name;
 }
 
+/** Every platform column createTableSql adds beyond a model's declared fields.
+ * KEEP IN SYNC with createTableSql below — the DDL and this list co-evolve in
+ * this one file; every other reader (the ingest partition, derive's skip-list,
+ * the dry-run/test oracles) imports it instead of hand-copying (bc-routes' copy
+ * had already drifted two columns behind before this existed). */
+export const PLATFORM_ROW_COLS: readonly string[] = [
+  "id", "version", "createdAt", "updatedAt", "_provenance", "_provisional", "organization_id", "_raw",
+];
+
 function createTableSql(entity: EntitySchema): string {
   // Guard the workflow namespace: a model entity named "_p…" could otherwise
   // collide with another workflow's gen__p<hex>_… tables.
@@ -124,6 +133,14 @@ function createTableSql(entity: EntitySchema): string {
   // connector pulled it: a placeholder the next ingest MERGES into (instead of
   // skipping on the existing id) and then clears.
   if (!declared.has("_provisional")) cols.push(`${ident("_provisional")} INTEGER`);
+  // Overflow capture: source fields the model does NOT declare, folded into one
+  // JSON object per row by ingest (packs/ingest.ts). Connectors may emit every
+  // field the source exposes; the undeclared ones are witnessed here instead of
+  // failing the INSERT on an unknown column. Never business evidence (derive
+  // iterates model fields only) — but visible to authored trigger rules,
+  // ctx.readTable snapshots, and the raw explorer, and available to promote
+  // into the model later.
+  if (!declared.has("_raw")) cols.push(`${ident("_raw")} TEXT`);
   // Multi-tenant owner. Snake-cased so it never collides with a model field
   // named `organizationId`; stamped on insert, filtered on read.
   if (!declared.has("organization_id")) cols.push(`${ident("organization_id")} TEXT`);
@@ -369,20 +386,29 @@ export async function insert(table: string, data: Record<string, unknown>): Prom
   return (await findById(table, String(full.id)))!;
 }
 
-/** Optimistic-locked update: bumps version, fails if the row changed under us. */
+/** Optimistic-locked update: bumps version, fails if the row changed under us.
+ * `touchUpdatedAt: false` suppresses the wall-clock updatedAt stamp — ingestion
+ * upserts pass it because a pull is not a business change: the row must keep the
+ * source's own last-modified value (or none), never the time we happened to
+ * pull, which a dateRole pointing at the column would certify as business time. */
 export async function update(
   table: string,
   id: string,
   changes: Record<string, unknown>,
   expectedVersion: number,
+  opts: { touchUpdatedAt?: boolean } = {},
 ): Promise<Record<string, unknown>> {
   const cols = Object.keys(changes);
   const sets = cols.map((c) => `${ident(c)} = ?`);
   sets.push(`${ident("version")} = ${ident("version")} + 1`);
-  sets.push(`${ident("updatedAt")} = ?`);
+  const stamp: unknown[] = [];
+  if (opts.touchUpdatedAt !== false) {
+    sets.push(`${ident("updatedAt")} = ?`);
+    stamp.push(new Date().toISOString());
+  }
   const f = await orgFilterSql(table);
   const extra = f.clause ? ` AND ${f.clause}` : "";
-  const values = [...cols.map((c) => sqlValue(changes[c])), new Date().toISOString(), id, expectedVersion, ...f.params];
+  const values = [...cols.map((c) => sqlValue(changes[c])), ...stamp, id, expectedVersion, ...f.params];
   const affected = await prisma.$executeRawUnsafe(
     `UPDATE ${phys(table)} SET ${sets.join(", ")} WHERE ${ident("id")} = ? AND ${ident("version")} = ?${extra}`,
     ...values,

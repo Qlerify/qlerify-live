@@ -184,12 +184,14 @@ describe("exportConnectorEntry allow-list", () => {
       lastPullAt: "2026-01-01T00:00:00.000Z", lastPullDurationMs: 1234, fixturesDir: "/x", bodyPath: "b.ts", bodyPromptHash: "h",
       connectionOptionId: "opt", fieldMap: { a: "b" }, limits: { pageSize: 1 },
       endpoint: "https://e", instructions: "i", deps: ["d"], dateRoles: { created: "c" },
+      discoveredFields: [{ name: "src_field", dataType: "string", sample: '"x"' }],
+      discoveredAt: "2026-02-02T00:00:00.000Z",
     };
     const entry = exportConnectorEntry(cfg);
     expect(Object.keys(entry.config).sort()).toEqual([
-      "boundedContext", "connectionOptionId", "dateRoles", "deps", "endpoint",
-      "fieldMap", "id", "instructions", "kind", "limits", "mode", "phase",
-      "targetEntity", "targetKind",
+      "boundedContext", "connectionOptionId", "dateRoles", "deps", "discoveredAt",
+      "discoveredFields", "endpoint", "fieldMap", "id", "instructions", "kind",
+      "limits", "mode", "phase", "targetEntity", "targetKind",
     ]);
     // No module/creds on disk for this id: the entry degrades to null/[].
     expect(entry.code).toBeNull();

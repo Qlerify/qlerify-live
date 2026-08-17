@@ -566,7 +566,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
         return { id, schedule: setConnectorSchedule(id, { enabled: body.enabled === true, everyMinutes: body.everyMinutes }) };
       } catch (e) {
         if (e instanceof ScheduleError) {
-          return reply.code(400).send({ error: "BAD_INTERVAL", message: e.message });
+          return reply.code(e.code === "UNKNOWN_CONNECTOR" ? 404 : 400).send({ error: e.code, message: e.message });
         }
         throw e;
       }

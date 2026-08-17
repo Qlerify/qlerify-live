@@ -9,7 +9,7 @@ import { newId } from "../../src/platform/ids.js";
 import { prisma } from "../../src/db.js";
 import { readSidecar, writeSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
 import { deleteConnectorFiles } from "../../src/packs/connector/runtime.js";
-import { SCHEDULE_MIN_MINUTES } from "../../src/packs/scheduler.js";
+import { SCHEDULE_MIN_MINUTES, ScheduleError, setConnectorSchedule } from "../../src/packs/scheduler.js";
 import { readDoc } from "../../src/packs/connector/journal.js";
 import type { TenantContext } from "../../src/platform/types.js";
 
@@ -107,6 +107,27 @@ describe("set_connector_schedule", () => {
     const notes = readDoc(ID)?.notes ?? [];
     expect(notes.some((n: any) => /Polling enabled — every 360 min/.test(n.text))).toBe(true);
     expect(notes.some((n: any) => /Polling disabled/.test(n.text))).toBe(true);
+  });
+
+  // A missing connector and a bad interval are different failures: the HTTP route
+  // maps them to 404 and 400, so they must stay distinguishable at the source.
+  it("distinguishes an unknown connector from an invalid interval", () => {
+    let unknown: unknown;
+    try {
+      setConnectorSchedule(`no-such-${SFX}`, { enabled: true, everyMinutes: 60 });
+    } catch (e) {
+      unknown = e;
+    }
+    expect(unknown).toBeInstanceOf(ScheduleError);
+    expect((unknown as ScheduleError).code).toBe("UNKNOWN_CONNECTOR");
+
+    let bad: unknown;
+    try {
+      setConnectorSchedule(ID, { enabled: true, everyMinutes: 1 });
+    } catch (e) {
+      bad = e;
+    }
+    expect((bad as ScheduleError).code).toBe("BAD_INTERVAL");
   });
 
   it("cannot schedule another workflow's connector", async () => {

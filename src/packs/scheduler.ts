@@ -46,7 +46,16 @@ export function nextRunAt(cfg: AdapterConfig): string | null {
   return new Date(lastMs + s.everyMinutes * 60_000 * backoffFactor(s.failures)).toISOString();
 }
 
-export class ScheduleError extends Error {}
+export type ScheduleErrorCode = "BAD_INTERVAL" | "UNKNOWN_CONNECTOR";
+
+export class ScheduleError extends Error {
+  readonly code: ScheduleErrorCode;
+
+  constructor(message: string, code: ScheduleErrorCode = "BAD_INTERVAL") {
+    super(message);
+    this.code = code;
+  }
+}
 
 export function setConnectorSchedule(
   id: string,
@@ -54,7 +63,7 @@ export function setConnectorSchedule(
 ): NonNullable<AdapterConfig["schedule"]> {
   const cur = readSidecar(id);
   if (!cur) {
-    throw new ScheduleError(`no connector "${id}"`);
+    throw new ScheduleError(`no connector "${id}"`, "UNKNOWN_CONNECTOR");
   }
   const raw = Number(input.everyMinutes);
   const submitted = Number.isFinite(raw) && raw >= SCHEDULE_MIN_MINUTES ? Math.floor(raw) : null;

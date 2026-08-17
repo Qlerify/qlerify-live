@@ -164,7 +164,7 @@ export const ChatPanel = ({ view }: { view: string }) => {
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3 text-sm">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3 text-sm">
         {empty ? (
           <div className="text-stone-500 text-sm">
             {builder ? (

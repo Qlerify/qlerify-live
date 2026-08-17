@@ -20,6 +20,8 @@ const DETAIL_EXAMPLES = [
   "Move this case forward one step.",
 ]
 
+const MAX_INPUT_PX = 260
+
 const BUILDER_EXAMPLES = [
   "Simulate content",
   "Fill this table from our DynamoDB users table",
@@ -52,6 +54,15 @@ export const ChatPanel = ({ view }: { view: string }) => {
       inputRef.current?.focus()
     }
   }, [chatOpen, mode])
+
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) {
+      return
+    }
+    el.style.height = "auto"
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_PX)}px`
+  }, [chatInput, chatOpen, mode])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -203,12 +214,11 @@ export const ChatPanel = ({ view }: { view: string }) => {
       <div className="border-t border-stone-200 p-3">
         <textarea
           ref={inputRef}
-          rows={2}
           value={chatInput}
           onChange={(e) => set({ chatInput: e.target.value })}
           onKeyDown={onKeyDown}
           placeholder="Ask anything about cases or the workflow…"
-          className="w-full text-sm border border-stone-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400 resize-none"
+          className="w-full text-sm border border-stone-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400 resize-none min-h-[96px] overflow-y-auto"
         />
         <div className="flex items-center gap-2 mt-2">
           <div className="flex-1 text-[10px] text-stone-400">Enter to send · Shift+Enter for new line</div>

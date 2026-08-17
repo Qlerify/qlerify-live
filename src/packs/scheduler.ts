@@ -46,6 +46,44 @@ export function nextRunAt(cfg: AdapterConfig): string | null {
   return new Date(lastMs + s.everyMinutes * 60_000 * backoffFactor(s.failures)).toISOString();
 }
 
+export type ScheduleErrorCode = "BAD_INTERVAL" | "UNKNOWN_CONNECTOR";
+
+export class ScheduleError extends Error {
+  readonly code: ScheduleErrorCode;
+
+  constructor(message: string, code: ScheduleErrorCode = "BAD_INTERVAL") {
+    super(message);
+    this.code = code;
+  }
+}
+
+export function setConnectorSchedule(
+  id: string,
+  input: { enabled: boolean; everyMinutes?: unknown },
+): NonNullable<AdapterConfig["schedule"]> {
+  const cur = readSidecar(id);
+  if (!cur) {
+    throw new ScheduleError(`no connector "${id}"`, "UNKNOWN_CONNECTOR");
+  }
+  const raw = Number(input.everyMinutes);
+  const submitted = Number.isFinite(raw) && raw >= SCHEDULE_MIN_MINUTES ? Math.floor(raw) : null;
+  if (input.enabled && submitted == null) {
+    throw new ScheduleError(`everyMinutes must be a number >= ${SCHEDULE_MIN_MINUTES}`);
+  }
+  // Turning polling OFF keeps the chosen interval, so switching back on restores it.
+  const everyMinutes = submitted ?? cur.schedule?.everyMinutes ?? SCHEDULE_MIN_MINUTES;
+  const schedule = { enabled: input.enabled, everyMinutes, failures: 0, lastAttemptAt: cur.schedule?.lastAttemptAt };
+  writeSidecar({ ...cur, schedule });
+
+  const wasEnabled = cur.schedule?.enabled ?? false;
+  if (input.enabled !== wasEnabled) {
+    appendNote(id, "note", input.enabled ? `Polling enabled — every ${everyMinutes} min.` : "Polling disabled.");
+  } else if (input.enabled && everyMinutes !== cur.schedule?.everyMinutes) {
+    appendNote(id, "note", `Polling interval changed to every ${everyMinutes} min.`);
+  }
+  return schedule;
+}
+
 function patchSchedule(id: string, patch: Partial<AdapterConfig["schedule"] & object>): void {
   const cfg = readSidecar(id);
   if (!cfg?.schedule) return;

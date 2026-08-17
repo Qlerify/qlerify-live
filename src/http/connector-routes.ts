@@ -24,8 +24,8 @@ import {
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
-import { readSidecar, writeSidecar } from "../packs/sidecar.js";
-import { SCHEDULE_MIN_MINUTES, nextRunAt } from "../packs/scheduler.js";
+import { writeSidecar } from "../packs/sidecar.js";
+import { ScheduleError, nextRunAt, setConnectorSchedule } from "../packs/scheduler.js";
 import { readDoc, appendNote } from "../packs/connector/journal.js";
 import { saveTriggerRuleCode, deleteTriggerRule, previewRule, ruleStatus } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
@@ -562,29 +562,14 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
 
       const body = (req.body ?? {}) as { enabled?: unknown; everyMinutes?: unknown };
-      const enabled = body.enabled === true;
-      const raw = Number(body.everyMinutes);
-      const submitted = Number.isFinite(raw) && raw >= SCHEDULE_MIN_MINUTES ? Math.floor(raw) : null;
-      if (enabled && submitted == null) {
-        return reply.code(400).send({
-          error: "BAD_INTERVAL",
-          message: `everyMinutes must be a number >= ${SCHEDULE_MIN_MINUTES}`,
-        });
+      try {
+        return { id, schedule: setConnectorSchedule(id, { enabled: body.enabled === true, everyMinutes: body.everyMinutes }) };
+      } catch (e) {
+        if (e instanceof ScheduleError) {
+          return reply.code(e.code === "UNKNOWN_CONNECTOR" ? 404 : 400).send({ error: e.code, message: e.message });
+        }
+        throw e;
       }
-      const cur = readSidecar(id);
-      if (!cur) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no sidecar for "${id}"` });
-      const everyMinutes = submitted ?? cur.schedule?.everyMinutes ?? SCHEDULE_MIN_MINUTES;
-      const schedule = { enabled, everyMinutes, failures: 0, lastAttemptAt: cur.schedule?.lastAttemptAt };
-      writeSidecar({ ...cur, schedule });
-
-      const wasEnabled = cur.schedule?.enabled ?? false;
-      const wasEvery = cur.schedule?.everyMinutes;
-      if (enabled !== wasEnabled) {
-        appendNote(id, "note", enabled ? `Polling enabled — every ${everyMinutes} min.` : "Polling disabled.");
-      } else if (enabled && everyMinutes !== wasEvery) {
-        appendNote(id, "note", `Polling interval changed to every ${everyMinutes} min.`);
-      }
-      return { id, schedule };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

@@ -24,7 +24,7 @@ import {
 import {
   appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatKey,
 } from "./journal.js";
-import type { AdapterConfig } from "../types.js";
+import type { AdapterBehavior, AdapterConfig } from "../types.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
@@ -108,6 +108,7 @@ interface CreateConnectorInput {
   /** Entity or value-object name the connector populates. */
   target: string;
   id?: string;
+  behavior?: AdapterBehavior;
 }
 
 /** Bootstrap a connector for a system + kind. No code yet — build it next. */
@@ -130,11 +131,13 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   }
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: bc, targetEntity: input.target, targetKind,
+    behavior: input.behavior ?? "sync",
     phase: "draft", mode: "live", workflowId, organizationId,
   };
   writeSidecar(cfg);
   registerAdapter(createConnectorAdapter(cfg));
-  appendNote(id, "created", `Created connector targeting ${input.target} (${targetKind}) in ${bc}.`);
+  const behaviorNote = cfg.behavior === "sync" ? "" : ` It ${cfg.behavior === "actuator" ? "performs actions in another system" : "computes its rows"}.`;
+  appendNote(id, "created", `Created connector targeting ${input.target} (${targetKind}) in ${bc}.${behaviorNote}`);
   return cfg;
 }
 
@@ -260,7 +263,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   }
   const targetEvents = targetKind === "entity" ? eventsForTarget(target.name) : [];
   const gen = await generateConnectorModule({
-    target, targetKind, instructions: instr,
+    target, targetKind, behavior: cfg.behavior, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
     ...(cfg.discoveredFields?.length ? { discoveredFields: cfg.discoveredFields } : {}),

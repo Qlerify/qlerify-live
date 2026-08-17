@@ -23,6 +23,7 @@ import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { previewRule } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
+import type { AdapterBehavior } from "../packs/types.js";
 import { ScheduleError, nextRunAt, setConnectorSchedule } from "../packs/scheduler.js";
 import { guardData } from "../platform/authz.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
@@ -37,6 +38,8 @@ import * as store from "../twin/projection-store.js";
 // map are reads (no state change) and stay membership-scoped. This server-side
 // gate — not the model-asserted `confirmed:true` flag — is the security boundary,
 // so a prompt-injected turn can never escalate past the caller's own grants.
+const BEHAVIORS: ReadonlySet<string> = new Set(["sync", "generator", "actuator", "extractor"]);
+
 const TOOL_WRITE_ACTIONS: Record<string, string> = {
   next_step: "workflow.sim.write",
   create_case: "workflow.sim.write",
@@ -331,6 +334,12 @@ export const TOOLS: Anthropic.Tool[] = [
         boundedContext: { type: "string", description: "The system / bounded context name." },
         target: { type: "string", description: "The entity or value-object name this connector populates." },
         id: { type: "string", description: "Optional explicit connector id; defaults to <system>-<target>." },
+        behavior: {
+          type: "string",
+          enum: ["sync", "generator", "actuator", "extractor"],
+          description:
+            "What running this connector COSTS. sync (default) = it mirrors a system of record; re-running is free. generator = it computes its rows (an AI call, a paid API per row); re-running costs money. actuator = it PERFORMS AN ACTION in another system (creates a record there, sends a message) and then lands the result; re-running changes the outside world. extractor = it reads an unstructured source (a document, a sheet) and interprets it with AI; re-running is safe but pays for the extraction again. If the connector will write anything anywhere, it is actuator — ASK the user to confirm that before creating, never infer it silently.",
+        },
         confirmed: { type: "boolean" },
       },
       required: ["boundedContext", "target", "confirmed"],
@@ -896,11 +905,25 @@ function handleCreateConnector(args: Record<string, any>) {
   }
   const boundedContext = String(args.boundedContext ?? "");
   const target = String(args.target ?? "");
-  if (!boundedContext || !target) return err("boundedContext and target are required");
-  const cfg = createConnector({ boundedContext, target, id: typeof args.id === "string" ? args.id : undefined });
+  if (!boundedContext || !target) {
+    return err("boundedContext and target are required");
+  }
+  const behavior = args.behavior;
+  if (behavior !== undefined && !BEHAVIORS.has(behavior)) {
+    return err(`behavior must be one of: ${[...BEHAVIORS].join(", ")}`);
+  }
+  const cfg = createConnector({
+    boundedContext,
+    target,
+    id: typeof args.id === "string" ? args.id : undefined,
+    behavior: behavior as AdapterBehavior | undefined,
+  });
   return ok({
     created: true, adapterId: cfg.id, boundedContext: cfg.boundedContext, target: cfg.targetEntity, targetKind: cfg.targetKind,
-    note: "Empty connector created. Next: if the source needs auth, collect the fields and call set_connector_credentials; then build_connector with a description of the source.",
+    behavior: cfg.behavior,
+    note: cfg.behavior === "actuator"
+      ? "Connector created as an ACTUATOR: a model rebuild will NOT re-run it, because its pull performs real actions. Next: credentials if needed, then build_connector."
+      : "Empty connector created. Next: if the source needs auth, collect the fields and call set_connector_credentials; then build_connector with a description of the source.",
   });
 }
 

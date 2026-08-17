@@ -422,6 +422,9 @@ export interface ReingestSummary {
   /** Connectors whose pull threw (missing credentials, a target the new model
    * dropped, a code/runtime error) — reported, not fatal. */
   failures: Array<{ id: string; entity: string; error: string }>;
+  /** Connectors deliberately NOT run: an actuator's pull performs an action in
+   * another system, so a rebuild must never fire it. Pull them by hand. */
+  skipped: Array<{ id: string; entity: string; reason: string }>;
   /** Events derived from the combined restored data (single final pass). null
    * only if that derivation itself errored. */
   derived: { events: number; instances: number; durationMs: number } | null;
@@ -453,7 +456,16 @@ export async function reingestAll(opts: { limit?: number | null } = {}): Promise
   const connectors = connectorsInWorkflow(currentWorkflowId());
   const pulls: IngestSummary[] = [];
   const failures: ReingestSummary["failures"] = [];
+  const skipped: ReingestSummary["skipped"] = [];
   for (const cfg of connectors) {
+    // An actuator's pull PERFORMS the action it then reads back (creates the deal,
+    // sends the mail). A rebuild is triggered by editing a model — nobody asked for
+    // the side effect to happen again, so it is never fired automatically.
+    if (cfg.behavior === "actuator") {
+      skipped.push({ id: cfg.id, entity: cfg.targetEntity, reason: "performs actions in another system — pull it manually to re-run them" });
+      appendNote(cfg.id, "note", "Skipped by the model rebuild: this connector performs actions. Pull it manually when you want them re-run.");
+      continue;
+    }
     try {
       pulls.push(await ingestPull(cfg.id, { limit, derive: false }));
     } catch (e: any) {
@@ -474,6 +486,7 @@ export async function reingestAll(opts: { limit?: number | null } = {}): Promise
     inserted: pulls.reduce((n, p) => n + p.inserted, 0),
     pulls,
     failures,
+    skipped,
     derived,
     durationMs: Date.now() - t0,
   };

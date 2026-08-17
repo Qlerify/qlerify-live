@@ -80,7 +80,9 @@ export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
       try {
         if (!moduleExists(cfg.id)) return { ok: false, detail: "no connector code yet — build it first" };
         const e = target();
-        const r = await runConnector(cfg.id, { entity: e, limit: 1, op: "probe" });
+        // An actuator's fetchRows performs its action, and healthcheck runs on
+        // every connector detail read — so it must never be the fallback here.
+        const r = await runConnector(cfg.id, { entity: e, limit: 1, op: "probe", probeOnly: cfg.behavior === "actuator" });
         if (r.probe) return r.probe;
         if (!r.ok) return { ok: false, detail: r.error };
         return { ok: true, detail: `reached the source, fetched ${r.count ?? r.rows?.length ?? 0} row(s)` };

@@ -194,8 +194,11 @@ const ctx = {
 };
 async function main() {
   const mod = await import(modUrl);
-  if (input.op === "probe" && typeof mod.probe === "function") {
-    return { ok: true, probe: await mod.probe(ctx), trace };
+  if (input.op === "probe") {
+    if (typeof mod.probe === "function") return { ok: true, probe: await mod.probe(ctx), trace };
+    if (input.probeOnly) {
+      return { ok: true, probe: { ok: true, detail: "not checked: this connector performs actions and exports no probe(), so running fetchRows would have performed them" }, trace };
+    }
   }
   if (typeof mod.fetchRows !== "function") throw new Error("connector must export 'async fetchRows(ctx)'");
   const rows = await mod.fetchRows(ctx);
@@ -401,6 +404,10 @@ interface RunRequest {
   limit: number | null;
   endpoint?: string;
   op?: "fetchRows" | "probe";
+  /** With op "probe": refuse to fall back to fetchRows when the module exports no
+   * probe(). For an actuator, fetchRows PERFORMS the action, so a reachability
+   * check must never reach it. */
+  probeOnly?: boolean;
   /** Read-only snapshot of the workflow's projection tables (entity name → rows),
    * exposed to the module as ctx.tables / ctx.readTable(name). These are COPIES
    * serialized into the ctx file — the child still cannot reach the real DB, so
@@ -436,6 +443,7 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
     limit: req.limit ?? UNCAPPED_PULL_ROWS,
     endpoint: req.endpoint,
     op: req.op ?? "fetchRows",
+    probeOnly: req.probeOnly === true,
     // Always present (empty when the caller sends none) so a run can never see a
     // previous run's snapshot — the ctx file is rewritten wholesale each time.
     tables: req.tables ?? {},

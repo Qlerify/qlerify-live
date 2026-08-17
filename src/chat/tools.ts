@@ -23,6 +23,7 @@ import { readDoc, connectorChatId } from "../packs/connector/journal.js";
 import { previewRule } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
+import { ScheduleError, nextRunAt, setConnectorSchedule } from "../packs/scheduler.js";
 import { guardData } from "../platform/authz.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
 import { ownsAdapterId } from "../packs/ownership.js";
@@ -49,6 +50,9 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   // the connector-authoring capability (and its kill-switch, via guardData).
   discover_source_fields: "connector.build",
   fetch_docs: "connector.build",
+  // Same capability the Schedule panel's route guards: enabling polling starts
+  // unattended runs against a live source, so the chat is never the softer path.
+  set_connector_schedule: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -69,6 +73,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
   "build_trigger_rules", "ingest_connector", "remove_connector", "discover_source_fields",
+  "set_connector_schedule",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -467,6 +472,21 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["adapterId", "confirmed"],
     },
   },
+  {
+    name: "set_connector_schedule",
+    description:
+      "WRITE — Turn a connector's scheduled polling on or off, and set how often it runs. Use whenever the user asks to fetch/refresh/sync on a schedule ('poll this every 6 hours', 'run it nightly', 'stop polling'). everyMinutes is the interval in MINUTES (6 hours = 360, daily = 1440) and must be at least 5; convert the user's words yourself. Enabling means the connector runs unattended against the live source from then on, so it requires confirmation: state the interval you are about to set, ask 'Shall I turn that on?', wait for yes, then call with confirmed:true. Read the current schedule with get_adapter_config.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        enabled: { type: "boolean", description: "true starts scheduled polling, false stops it" },
+        everyMinutes: { type: "number", description: "Interval in minutes, minimum 5. Required when enabling; ignored when disabling (the stored interval is kept)." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "enabled", "confirmed"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -575,6 +595,8 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return await handleCopyConnectorCredentials(args);
       case "remove_connector":
         return handleRemoveConnector(args);
+      case "set_connector_schedule":
+        return handleSetConnectorSchedule(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -719,6 +741,9 @@ function handleGetAdapterConfig(adapterId: string) {
     id: cfg.id, kind: cfg.kind, boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity,
     mode: cfg.mode, endpoint: cfg.endpoint ?? null, credentialsRef: cfg.credentialsRef ?? null,
     hasBody: !!cfg.bodyPath, bodyPath: cfg.bodyPath ?? null,
+    schedule: cfg.schedule ?? null,
+    nextRunAt: nextRunAt(cfg),
+    lastPullAt: cfg.lastPullAt ?? null,
     // The secret is NEVER returned by this tool.
   };
 }
@@ -1033,4 +1058,34 @@ function handleRemoveConnector(args: Record<string, any>) {
   if (!id) return err("adapterId required");
   removeConnector(id);
   return ok({ removed: true, adapterId: id, note: "Connector code, credentials, and config deleted. Ingested rows (if any) were left in the table." });
+}
+
+function handleSetConnectorSchedule(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Tell the user the interval you would set, get a yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) {
+    return err("adapterId required");
+  }
+  if (typeof args.enabled !== "boolean") {
+    return err("enabled must be true or false");
+  }
+  try {
+    const schedule = setConnectorSchedule(id, { enabled: args.enabled, everyMinutes: args.everyMinutes });
+    const cfg = adapterCfg(id);
+    return ok({
+      adapterId: id,
+      schedule,
+      nextRunAt: cfg ? nextRunAt(cfg) : null,
+      note: schedule.enabled
+        ? `Polling is on — this connector now runs every ${schedule.everyMinutes} minute(s) on its own.`
+        : "Polling is off — the connector only runs when pulled manually.",
+    });
+  } catch (e: any) {
+    if (e instanceof ScheduleError) {
+      return err(e.message);
+    }
+    throw e;
+  }
 }

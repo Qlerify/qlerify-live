@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  qlerify-live: single-task ECS Fargate service with EFS-backed state behind an
+  ALB. The app is a single-writer SQLite deployment: desiredCount is 1 and
+  minimumHealthyPercent 0 guarantees the old task fully stops (releasing the DB)
+  before a new one starts. Deploy with CreateDnsRecord=false first and verify on
+  the ALB DNS name; flip it to true for the live.qlerify.com cutover.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI (repo:tag) for the qlerify-live container
+  CertificateArn:
+    Type: String
+    Default: arn:aws:acm:eu-central-1:658073733040:certificate/93568120-f243-4191-a3db-5e64a78cac5a
+    Description: Existing *.qlerify.com ACM cert in eu-central-1
+  HostedZoneId:
+    Type: String
+    Default: Z03573363E689KTZWEOX9
+    Description: Route 53 public zone for qlerify.com
+  DomainName:
+    Type: String
+    Default: live.qlerify.com
+  CreateDnsRecord:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Create the Route 53 alias. Keep false until verified on the ALB DNS name.
+  DesiredCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [0, 1]
+    Description: 1 normally, 0 to stop the service (never more - single SQLite writer)
+  BedrockModel:
+    Type: String
+    Default: eu.anthropic.claude-sonnet-4-6
+  PlatformEncryptionKeySecretArn:
+    Type: String
+    Description: Secrets Manager ARN of the 64-hex PLATFORM_ENCRYPTION_KEY (stable forever - rotating it invalidates every org's stored BYOK secret)
+  SuperadminPasswordSecretArn:
+    Type: String
+    Description: Secrets Manager ARN of SUPERADMIN_PASSWORD
+  McpApiKeySecretArn:
+    Type: String
+    Default: ""
+    Description: Optional Secrets Manager ARN of the platform-default QLERIFY_MCP_API_KEY
+
+Conditions:
+  WantDns: !Equals [!Ref CreateDnsRecord, "true"]
+  HasMcpKey: !Not [!Equals [!Ref McpApiKeySecretArn, ""]]
+
+Resources:
+  # ---------- Network: 2 public subnets, no NAT (the task gets a public IP;
+  # inbound is closed to everything except the ALB security group) ----------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: qlerify-live }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: qlerify-live }]
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.0.0/20
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: qlerify-live-a }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.16.0/20
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: qlerify-live-b }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: qlerify-live-public }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------- Load balancer ----------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: qlerify-live ALB - public HTTP/HTTPS
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: qlerify-live task - inbound only from the ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3001
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: qlerify-live
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      LoadBalancerAttributes:
+        # POST /chat is a blocking agent loop (up to 14 model calls, no bytes
+        # until it finishes). The container's KEEP_ALIVE_TIMEOUT_MS must stay
+        # ABOVE this value or pooled connections race into sporadic 502s.
+        - { Key: idle_timeout.timeout_seconds, Value: "900" }
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: qlerify-live
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: HTTP
+      Port: 3001
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        # Single task, old one must die fast on deploys.
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates: [{ CertificateArn: !Ref CertificateArn }]
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref TargetGroup }
+
+  # ---------- Durable state: EFS holds the SQLite DB, CAS blobs and the
+  # connector workspace. This IS the control plane - it must survive any stack
+  # operation, hence Retain + backups. ----------
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Encrypted: true
+      # Bursting baseline scales with stored bytes; a ~1 GB filesystem throttles
+      # hard once burst credits drain. Elastic has no such cliff.
+      ThroughputMode: elastic
+      FileSystemTags: [{ Key: Name, Value: qlerify-live }]
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: qlerify-live EFS - NFS only from the task
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref TaskSecurityGroup
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  AccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser: { Uid: "0", Gid: "0" }
+      RootDirectory:
+        Path: /qlerify-live
+        CreationInfo: { OwnerUid: "0", OwnerGid: "0", Permissions: "0755" }
+
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupVaultName: qlerify-live
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: qlerify-live-backup
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: backup.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: qlerify-live-daily
+        BackupPlanRule:
+          - RuleName: daily-35d
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 3 * * ? *)
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle: { DeleteAfterDays: 35 }
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: qlerify-live-efs
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !GetAtt FileSystem.Arn
+
+  # ---------- ECS ----------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: qlerify-live
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/qlerify-live
+      RetentionInDays: 30
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: qlerify-live-execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !If
+                  - HasMcpKey
+                  - [!Ref PlatformEncryptionKeySecretArn, !Ref SuperadminPasswordSecretArn, !Ref McpApiKeySecretArn]
+                  - [!Ref PlatformEncryptionKeySecretArn, !Ref SuperadminPasswordSecretArn]
+
+  # Deliberately minimal: the connector subsystem executes AI-authored code, and
+  # a sandbox escape reaches these credentials via the task metadata endpoint.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: qlerify-live-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/eu.anthropic.*
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.anthropic.*
+                  # Profiles fan out across regions, so the underlying models
+                  # must be allowed with a wildcard region.
+                  - arn:aws:bedrock:*::foundation-model/anthropic.*
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+        - PolicyName: efs-client
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt FileSystem.Arn
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: qlerify-live
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref FileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref AccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: qlerify-live
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings: [{ ContainerPort: 3001, Protocol: tcp }]
+          MountPoints: [{ SourceVolume: data, ContainerPath: /data }]
+          # Sandboxed connector child processes need PID 1 reaping.
+          LinuxParameters: { InitProcessEnabled: true }
+          StopTimeout: 30
+          Environment:
+            - { Name: NODE_ENV, Value: production }
+            - { Name: PORT, Value: "3001" }
+            - { Name: HOST, Value: 0.0.0.0 }
+            - { Name: DATABASE_URL, Value: file:/data/dev.db }
+            # Connector workspace on the volume, or installed connectors and
+            # their credentials vanish on every redeploy.
+            - { Name: QLERIFY_DATA_DIR, Value: /data/qlerify-data }
+            - { Name: TRUST_PROXY, Value: "true" }
+            # Must exceed the ALB idle timeout (900 s).
+            - { Name: KEEP_ALIVE_TIMEOUT_MS, Value: "920000" }
+            - { Name: LLM_PROVIDER, Value: bedrock }
+            - { Name: BEDROCK_REGION, Value: !Ref "AWS::Region" }
+            - { Name: BEDROCK_MODEL, Value: !Ref BedrockModel }
+          Secrets: !If
+            - HasMcpKey
+            - - { Name: PLATFORM_ENCRYPTION_KEY, ValueFrom: !Ref PlatformEncryptionKeySecretArn }
+              - { Name: SUPERADMIN_PASSWORD, ValueFrom: !Ref SuperadminPasswordSecretArn }
+              - { Name: QLERIFY_MCP_API_KEY, ValueFrom: !Ref McpApiKeySecretArn }
+            - - { Name: PLATFORM_ENCRYPTION_KEY, ValueFrom: !Ref PlatformEncryptionKeySecretArn }
+              - { Name: SUPERADMIN_PASSWORD, ValueFrom: !Ref SuperadminPasswordSecretArn }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: app
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpsListener, MountTargetA, MountTargetB]
+    Properties:
+      ServiceName: qlerify-live
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      # THE load-bearing setting: 0/100 stops the old task (releasing SQLite and
+      # EFS) before the new one starts. Never raise minimumHealthyPercent.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      HealthCheckGracePeriodSeconds: 180
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: qlerify-live
+          ContainerPort: 3001
+          TargetGroupArn: !Ref TargetGroup
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: WantDns
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+
+Outputs:
+  AlbDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+    Description: Test here (with Host header) before flipping CreateDnsRecord
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
+  FileSystemId:
+    Value: !Ref FileSystem
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+  Url:
+    Value: !Sub https://${DomainName}

@@ -37,6 +37,8 @@ function isPublicPath(req: FastifyRequest, webRoot: string | undefined): boolean
   // Auth endpoints must stay reachable even with a stale/expired/garbage bearer
   // token: they run their own credential check and never read requireTenant().
   if (url.startsWith("/v1/auth/")) return true;
+  // Load-balancer health probes carry no credentials.
+  if (url === "/healthz" && (req.method === "GET" || req.method === "HEAD")) return true;
   // Self-hosted Monaco editor assets (the connector Code tab). Static third-party
   // library code + a worker-URL manifest, no tenant data. Must be public because
   // the browser fetches them as <script>/Worker subresources, which never carry

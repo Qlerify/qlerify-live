@@ -12,6 +12,9 @@ primary_region = "arn"  # Stockholm
   PORT = "3001"
   # Bind all interfaces inside the machine — Fly's proxy fronts it (force_https).
   HOST = "0.0.0.0"
+  # Fly's proxy is one hop; without this every request's req.ip is the proxy's
+  # address and the per-IP login rate limit is one shared bucket.
+  TRUST_PROXY = "true"
   # SQLite file lives on the mounted volume so it survives restarts/redeploys.
   DATABASE_URL = "file:/data/dev.db"
 
@@ -28,11 +31,11 @@ primary_region = "arn"  # Stockholm
   auto_start_machines = true
   min_machines_running = 1
 
-  # Health check hits "/" — the tenant plugin is deny-by-default, so /sim/health
-  # would 401; the static shell at "/" is the one auth-exempt GET that returns 200.
+  # /healthz is auth-exempt and proves the DB answers, not just that the
+  # static shell serves.
   [[http_service.checks]]
     method = "GET"
-    path = "/"
+    path = "/healthz"
     interval = "30s"
     timeout = "5s"
     grace_period = "30s"

@@ -12,6 +12,8 @@ import { getOntology, type EntitySchema, type OntologyEvent } from "../ontology/
 import { eventsForBc, entitiesForBc, valueObjectsForBc, defaultEntityForBc } from "../ontology/bc-helpers.js";
 import { listAdapters, getAdapter } from "../packs/registry.js";
 import { applyFieldMap } from "../packs/types.js";
+import { assertActionsConfirmed } from "../packs/behavior.js";
+import { readSidecar } from "../packs/sidecar.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatKey, appendNote } from "../packs/connector/journal.js";
 import { ownsAdapterId, listOwnedAdapters } from "../packs/ownership.js";
 import { purgeEntityData } from "../twin/purge.js";
@@ -46,7 +48,16 @@ function slimEvent(e: OntologyEvent) {
 function serializeAdapter(a: ReturnType<typeof listAdapters>[number]) {
   // The doc (summary + update notes) rides along so the explorer's Configure
   // Adapter sidebar can show it with no extra request. null when none recorded.
-  return { id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode, doc: readDoc(a.id) };
+  // `behavior` decides what the explorer's run button is allowed to promise.
+  return {
+    id: a.id,
+    kind: a.kind,
+    boundedContext: a.boundedContext,
+    targetEntity: a.targetEntity,
+    mode: a.mode,
+    behavior: readSidecar(a.id)?.behavior ?? "sync",
+    doc: readDoc(a.id),
+  };
 }
 
 /** Grade a pulled batch against the model entity: per-required-field coverage,
@@ -173,16 +184,20 @@ export function registerBcRoutes(app: FastifyInstance): void {
     }
   });
 
-  // Test — a DRY-RUN pull + field-map diff. Nothing is inserted; "ingest for real"
-  // is the existing POST /api/adapters/:id/pull.
+  // Test — a pull + field-map diff, landing nothing in the target table. On an
+  // ACTUATOR that is not a dry run in any sense: the pull performs the action,
+  // so it is gated on confirmActions and only the write stays suppressed.
   app.post("/api/bc/:bc/adapter/:id/test", async (req, reply) => {
     const id = (req.params as any).id;
     const limit = Math.max(1, Math.min(50, Number((req.body as any)?.limit ?? 5)));
+    const confirmActions = (req.body as any)?.confirmActions === true;
     try {
       await guardData("connector.edit"); // a dry-run executes tenant connector code
       if (!ownsAdapterId(id)) return reply.code(404).send({ error: "NOT_FOUND" });
       const a = getAdapter(id);
       if (!a) return reply.code(404).send({ error: "NOT_FOUND" });
+      const cfg = readSidecar(id);
+      if (cfg) assertActionsConfirmed(cfg, "a test pull", confirmActions);
       // getOntology() is inside the try so a workflow with no model yet yields a
       // clean ModelNotLoadedError (409) rather than an unhandled throw.
       const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);

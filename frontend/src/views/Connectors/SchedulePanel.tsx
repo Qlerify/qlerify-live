@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { connSaveSchedule } from "@/lib/connectorsData.ts"
+import { performsActions, pullLabel, scheduleTickText } from "@/lib/connectorBehavior.ts"
 import { formatVersionDate } from "@/lib/modelData.ts"
 import { useStore } from "@/lib/store.ts"
 import type { Connector } from "@/lib/types.ts"
@@ -67,9 +68,9 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
   return (
     <div className="mt-5 rounded-lg border border-stone-200 p-4">
       <div className="text-sm font-medium text-stone-800">Automatic polling</div>
-      <div className="text-xs text-stone-500 mt-0.5">
-        Fetch from the source on a schedule, without anyone pressing a button. Each run is the same pull as{" "}
-        <b>Fetch rows</b> — changed rows are updated, unchanged rows are skipped, and new domain events are derived automatically.
+      <div className={`text-xs mt-0.5 ${performsActions(c) ? "text-amber-700" : "text-stone-500"}`}>
+        Run this connector on a schedule, without anyone pressing a button. Each run is the same as pressing{" "}
+        <b>{pullLabel(c)}</b> — {scheduleTickText(c)}
       </div>
 
       <div className="flex items-center gap-2 mt-3 flex-wrap">

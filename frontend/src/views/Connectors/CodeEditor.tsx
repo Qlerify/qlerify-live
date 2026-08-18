@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { loadMonaco } from "@/lib/monaco.ts"
 import { connectorName, fetchConnectorCode, loadConnectors, saveConnectorCode } from "@/lib/connectorsData.ts"
+import { performsActions, pullLabel, testLabel } from "@/lib/connectorBehavior.ts"
 import { useStore } from "@/lib/store.ts"
 import type { Connector } from "@/lib/types.ts"
 
@@ -101,7 +102,10 @@ export const CodeEditor = ({ connector }: { connector: Connector }) => {
         ? `Installed/checked packages: ${(r.deps || []).join(", ")}.`
         : "No external packages imported."
       const failed = r.install && r.install.ok === false ? `\n\n⚠ Package install reported a problem:\n${r.install.log || ""}` : ""
-      alert(`Saved ${r.bytes} byte(s). ${pkgs}${failed}\n\nTest it (Details → Test, or Fetch rows) to run it.`)
+      const next = performsActions(connector)
+        ? `\n\nThis connector performs actions in ${connector.boundedContext}, so there is no way to try it without doing them. "${pullLabel(connector)}" runs it for real.`
+        : `\n\nRun it with Details → ${testLabel(connector)}, or "${pullLabel(connector)}" to land the rows.`
+      alert(`Saved ${r.bytes} byte(s). ${pkgs}${failed}${next}`)
     } catch (e) {
       alert("Save failed: " + (e as Error).message)
     } finally {

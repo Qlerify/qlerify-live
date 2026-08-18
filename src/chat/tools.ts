@@ -24,6 +24,7 @@ import { previewRule } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
 import type { AdapterBehavior } from "../packs/types.js";
+import { assertActionsConfirmed, performsActions } from "../packs/behavior.js";
 import { ScheduleError, nextRunAt, setConnectorSchedule } from "../packs/scheduler.js";
 import { guardData } from "../platform/authz.js";
 import { resolveAnthropicStatus } from "../llm/anthropic.js";
@@ -240,12 +241,17 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "adapter_dry_run",
     description:
-      "Dry-run the adapter: pull a few rows WITHOUT writing anything, returning a small sample, any missing required fields vs the model, the extra source fields beyond the model (extraFields — informational, NOT an error: ingest preserves them in the row's _raw JSON column), or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body).",
+      "Dry-run the adapter: pull a few rows and land NOTHING in the target table, returning a small sample, any missing required fields vs the model, the extra source fields beyond the model (extraFields — informational, NOT an error: ingest preserves them in the row's _raw JSON column), or the thrown error + redacted trace. This is how you obtain the error report to diagnose (and to feed into regenerate_adapter_body). NOT read-only on an `actuator`: there the pull IS the action, so it creates records in the other system for real and the platform refuses unless confirmActions is set. On an actuator prefer run_adapter_healthcheck to check reachability, and ingest_connector when the user wants the actions performed.",
     input_schema: {
       type: "object",
       properties: {
         adapterId: { type: "string" },
         limit: { type: "number", description: "Rows to attempt (default 3)." },
+        confirmActions: {
+          type: "boolean",
+          description:
+            "Only for an `actuator`, and only after the user agreed that running it now should perform its real actions. Never set it to get past the refusal on your own.",
+        },
       },
       required: ["adapterId"],
     },
@@ -253,11 +259,16 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "discover_source_fields",
     description:
-      "Sample the LIVE source through the built connector (a few rows, nothing written to any table) and RECORD the source's actual field shape on the connector — names, inferred types, one example value each. Call it after a build_connector succeeds when the source's schema is unknown, or when adapter_dry_run shows missing required fields or surprising extras: the discovered shape is threaded into every later build_connector prompt automatically, so a repair maps the source's REAL fields instead of guessing. Returns the fields split into modelFields (land as columns) and extraFields (preserved in the row's _raw JSON at ingest).",
+      "Sample the LIVE source through the built connector (a few rows, nothing landed in any table) and RECORD the source's actual field shape on the connector — names, inferred types, one example value each. Call it after a build_connector succeeds when the source's schema is unknown, or when adapter_dry_run shows missing required fields or surprising extras: the discovered shape is threaded into every later build_connector prompt automatically, so a repair maps the source's REAL fields instead of guessing. Returns the fields split into modelFields (land as columns) and extraFields (preserved in the row's _raw JSON at ingest). Sampling an `actuator` performs its action, so the platform refuses unless confirmActions is set — describe the source in `instructions` instead of discovering it there.",
     input_schema: {
       type: "object",
       properties: {
         adapterId: { type: "string" },
+        confirmActions: {
+          type: "boolean",
+          description:
+            "Only for an `actuator`, and only after the user agreed that sampling it now should perform its real actions.",
+        },
       },
       required: ["adapterId"],
     },
@@ -415,7 +426,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "ingest_connector",
     description:
-      "WRITE — Run the connector for real and LAND its rows into the target table (gen_<kind>), so they appear in the explorer's Items pane. Only do this after a successful adapter_dry_run. Requires confirmation: state how many rows you'll pull into which table, ask 'Shall I populate it?', wait for yes, then call with confirmed:true.",
+      "WRITE — Run the connector for real and LAND its rows into the target table (gen_<kind>), so they appear in the explorer's Items pane. Do this after a successful adapter_dry_run — or, on an `actuator` where no dry run exists, as the FIRST run, since its pull is the action. Requires confirmation: state how many rows you'll pull into which table (for an actuator, what it will DO and where), ask 'Shall I populate it?', wait for yes, then call with confirmed:true.",
     input_schema: {
       type: "object",
       properties: {
@@ -569,9 +580,9 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
       case "run_adapter_healthcheck":
         return ok(await handleRunAdapterHealthcheck(String(args.adapterId ?? "")));
       case "adapter_dry_run":
-        return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3)));
+        return ok(await handleAdapterDryRun(String(args.adapterId ?? ""), Number(args.limit ?? 3), args.confirmActions === true));
       case "discover_source_fields":
-        return await handleDiscoverSourceFields(String(args.adapterId ?? ""));
+        return await handleDiscoverSourceFields(String(args.adapterId ?? ""), args.confirmActions === true);
       case "fetch_docs":
         return ok(await fetchDocs(String(args.url ?? "")));
       case "regenerate_adapter_body":
@@ -779,16 +790,24 @@ async function handleRunAdapterHealthcheck(adapterId: string) {
 /** Sample the live source and record its observed field shape (orchestrate
  * discoverSourceFields). Defense-in-depth ownership recheck like the sibling
  * exec tools, on top of the TOOL_OWNED_ID gate. */
-async function handleDiscoverSourceFields(adapterId: string): Promise<ToolResult> {
+async function handleDiscoverSourceFields(adapterId: string, confirmActions?: boolean): Promise<ToolResult> {
   if (!adapterId) return err("adapterId required");
   if (!ownsAdapterId(adapterId)) return err(`no adapter "${adapterId}" in this workflow`); // foreign ≡ unknown (no oracle)
-  return ok(await discoverSourceFields(adapterId));
+  return ok(await discoverSourceFields(adapterId, confirmActions));
 }
 
-async function handleAdapterDryRun(adapterId: string, limit: number) {
+async function handleAdapterDryRun(adapterId: string, limit: number, confirmActions?: boolean) {
   if (!ownsAdapterId(adapterId)) return { error: `no adapter "${adapterId}"` }; // foreign ≡ unknown (no oracle); also blocks cross-tenant exec
   const a = getAdapter(adapterId);
   if (!a) return { error: `no adapter "${adapterId}"` };
+  const cfg = adapterCfg(adapterId);
+  if (cfg) {
+    try {
+      assertActionsConfirmed(cfg, "a dry run", confirmActions);
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  }
   // Entity OR value object — VO targets are first-class (ingest and the /test
   // oracle resolve both), so their required/extras grading must work too.
   const entity = getOntology().entity(a.targetEntity) ?? getOntology().valueObject(a.targetEntity);
@@ -949,12 +968,16 @@ async function handleBuildConnector(args: Record<string, any>) {
     typeof args.instructions === "string" ? args.instructions : undefined,
     typeof args.errorReport === "string" ? args.errorReport : undefined,
   );
+  const acts = performsActions(adapterCfg(id));
+  const nextStep = acts
+    ? "Code written + packages installed. This connector performs actions, so there is NO dry run to try first — say plainly what the first run will DO and where, get a yes, then call ingest_connector."
+    : "Code written + packages installed. Now TEST it with adapter_dry_run before ingesting. If it errors, call build_connector again with the errorReport to fix it.";
   return ok({
     built: true, adapterId: id, targetKind: r.targetKind, dependencies: r.deps, codeBytes: r.bytes, durationMs: r.durationMs,
     install: { ok: r.install.ok, installed: r.install.installed, skipped: r.install.skipped, ...(r.install.ok ? {} : { log: r.install.log }) },
     note: r.install.ok
-      ? "Code written + packages installed. Now TEST it with adapter_dry_run before ingesting. If it errors, call build_connector again with the errorReport to fix it."
-      : "Code written but some npm packages failed to install (see install.log). The dry-run will likely fail until deps resolve.",
+      ? nextStep
+      : "Code written but some npm packages failed to install (see install.log). The first run will likely fail until deps resolve.",
   });
 }
 

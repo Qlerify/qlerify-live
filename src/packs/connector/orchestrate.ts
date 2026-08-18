@@ -25,6 +25,7 @@ import {
   appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatKey,
 } from "./journal.js";
 import type { AdapterBehavior, AdapterConfig } from "../types.js";
+import { assertActionsConfirmed } from "../behavior.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
@@ -504,11 +505,13 @@ export interface DiscoverSourceResult {
 
 /** Run the connector against the live source with a small limit and persist the
  * observed field shape. Executes connector code — callers gate it exactly like
- * a dry run (ownership + connector capability + kill-switch). */
-export async function discoverSourceFields(id: string): Promise<DiscoverSourceResult> {
+ * a dry run (ownership + connector capability + kill-switch). Sampling an
+ * ACTUATOR means performing its action, so that needs confirming first. */
+export async function discoverSourceFields(id: string, confirmActions?: boolean): Promise<DiscoverSourceResult> {
   const cfg = readSidecar(id);
   const adapter = getAdapter(id);
   if (!cfg || !adapter) throw new Error(`no connector "${id}"`);
+  assertActionsConfirmed(cfg, "sampling its fields", confirmActions);
   const { rows } = await adapter.pull({ limit: DISCOVER_SAMPLE_ROWS });
   const sample = rows[cfg.targetEntity] ?? [];
   if (!sample.length) throw new Error("the source returned no rows to sample — nothing to discover (an incremental connector with no new items returns []; discovery needs a pull that yields rows)");

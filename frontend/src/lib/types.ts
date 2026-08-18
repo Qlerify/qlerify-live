@@ -246,6 +246,7 @@ export type ExpAdapter = {
   mode: string
   targetEntity: string
   boundedContext?: string
+  behavior?: AdapterBehavior
   doc?: { summary?: string; notes?: { kind: string; text: string; at: string }[] }
 }
 
@@ -356,6 +357,8 @@ export type ConnectorManifest = {
   sections: ManifestSection[]
 }
 
+export type AdapterBehavior = "sync" | "generator" | "actuator" | "extractor"
+
 export type Connector = {
   id: string
   status: string
@@ -363,6 +366,7 @@ export type Connector = {
   targetEntity: string
   targetKind: string
   mode: string
+  behavior?: AdapterBehavior
   rowCount: number
   hasCode: boolean
   credentialKeys: string[]

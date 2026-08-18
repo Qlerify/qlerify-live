@@ -1,4 +1,5 @@
 import { showOverlay, hideOverlay } from "@/components/Overlay.tsx"
+import { pullConfirmText } from "@/lib/connectorBehavior.ts"
 import { api } from "./api.ts"
 import { formatDuration } from "./format.ts"
 import { useStore } from "./store.ts"
@@ -197,11 +198,7 @@ export const fetchRows = async () => {
     return
   }
   const adapter = adapters[0]!
-  if (
-    !confirm(
-      `Fetch rows from the data source via connector "${adapter.id}"?\n\nNew rows are inserted; changed rows are updated in place; unchanged rows are skipped.`,
-    )
-  ) {
+  if (!confirm(pullConfirmText({ ...adapter, boundedContext: adapter.boundedContext || e.system || "the source system" }))) {
     return
   }
   patch({ busy: true })
@@ -263,47 +260,6 @@ export const clearRows = async () => {
   } catch (err) {
     hideOverlay()
     alert("Delete failed: " + (err as Error).message)
-  } finally {
-    patch({ busy: false })
-  }
-}
-
-export const reimportAll = async () => {
-  const e = exp()
-  if (e.busy) {
-    return
-  }
-  if (
-    !confirm(
-      "Empty ALL base-data tables and the entire event log, then reimport the base data from every configured connector?\n\nThis clears every ingested row and derived event across all systems, then re-pulls each connector from its source. Connectors and the model are kept.",
-    )
-  ) {
-    return
-  }
-  patch({ busy: true })
-  showOverlay("Resetting & reimporting…")
-  try {
-    const r = await api<{
-      connectors: number
-      inserted: number
-      derived?: { events: number; instances: number }
-      failures?: { id: string }[]
-      durationMs?: number
-      // no limit = uncapped: a full restore re-pulls everything
-    }>("/api/data/reimport-all", { method: "POST", body: "{}" })
-    await refreshExplorer()
-    hideOverlay()
-    const ev = r.derived ? `\nEvents derived: ${r.derived.events} (${r.derived.instances} instance(s))` : ""
-    const failed = r.failures?.length
-      ? `\nConnectors that failed: ${r.failures.length} (${r.failures.map((f) => f.id).join(", ")})`
-      : ""
-    const took = r.durationMs != null ? `\nTook: ${formatDuration(r.durationMs)}` : ""
-    alert(
-      `Reset & reimport complete.\n\nConnectors pulled: ${r.connectors}\nRows inserted: ${r.inserted}${ev}${failed}${took}`,
-    )
-  } catch (err) {
-    hideOverlay()
-    alert("Reset & reimport failed: " + (err as Error).message)
   } finally {
     patch({ busy: false })
   }

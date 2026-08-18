@@ -114,11 +114,24 @@ export interface TriggerRule {
   disabledReason?: string;
 }
 
+/** What re-running a connector COSTS — the axis the platform has to behave
+ * differently about. `kind` is the source technology (rest / dynamodb / …); this
+ * is what the run DOES:
+ *   sync      — mirrors a system of record. Re-running is free and changes nothing.
+ *   generator — computes its rows (an AI call, a paid API). Re-running costs money.
+ *   actuator  — performs an action in another system (creates a deal, sends mail)
+ *               and lands the result. Re-running changes the outside world.
+ *   extractor — reads an unstructured source (a doc, a sheet) and interprets it
+ *               with AI. Re-running is safe but pays for the extraction again.
+ * Absent = sync: every connector written before this existed only reads. */
+export type AdapterBehavior = "sync" | "generator" | "actuator" | "extractor";
+
 /** Persisted adapter config — `.qlerify/adapters/<id>.json`. `credentialsRef` is a
  * KEY (env var / vault handle), NEVER the secret itself. */
 export interface AdapterConfig {
   id: string;
   kind: string;
+  behavior?: AdapterBehavior;
   boundedContext: string;
   targetEntity: string;
   phase: AdapterPhase;

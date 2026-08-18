@@ -176,6 +176,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           targetKind: cfg.targetKind ?? "entity",
           mode: cfg.mode,
           phase: cfg.phase,
+          behavior: cfg.behavior ?? "sync",
           status: live ? "active" : "orphaned",
           hasCode: info?.hasCode ?? false,
           credentialKeys: info?.credentialKeys ?? [],

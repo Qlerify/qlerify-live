@@ -11,11 +11,11 @@ import {
   resetExpFilters,
   setExpPage,
   loadExplorer,
-  reimportAll,
   selectEntity,
   selectSystem,
 } from "@/lib/explorerData.ts"
 import type { ColState } from "@/lib/explorerData.ts"
+import { performsActions, pullLabel } from "@/lib/connectorBehavior.ts"
 import { activateConnectorChat, openChat } from "@/lib/chatData.ts"
 import type { ExpState, ExpSystem, ExpTable } from "@/lib/types.ts"
 import { TableGlyph } from "./TableGlyph.tsx"
@@ -118,7 +118,9 @@ export const Explorer = () => {
   const pages = Math.max(1, Math.ceil(matched / EXP_PAGE))
   const page = Math.min(e.page, pages - 1)
   const tableAdapters = adaptersForEntity(e)
-
+  const runner = tableAdapters[0] ?? null
+  const runLabel = runner ? pullLabel({ ...runner, boundedContext: runner.boundedContext || e.system || "the source" }) : "Fetch rows"
+  const runActs = performsActions(runner)
 
   const clickTable = (systemName: string, tableName: string) => {
     if (systemName !== e.system) {
@@ -267,13 +269,19 @@ export const Explorer = () => {
                 onClick={fetchRows}
                 disabled={e.busy || !tableAdapters.length}
                 title={
-                  tableAdapters.length
-                    ? `Pull all rows from ${tableAdapters[0]!.id}`
+                  runner
+                    ? runActs
+                      ? `Run ${runner.id} — performs real actions in ${runner.boundedContext || e.system}`
+                      : `Pull all rows from ${runner.id}`
                     : "No connector configured for this table"
                 }
-                className="px-4 py-1.5 text-sm rounded-full border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 disabled:opacity-40 font-medium"
+                className={`px-4 py-1.5 text-sm rounded-full border bg-white disabled:opacity-40 font-medium ${
+                  runActs
+                    ? "border-amber-400 text-amber-800 hover:bg-amber-50"
+                    : "border-emerald-300 text-emerald-800 hover:bg-emerald-50"
+                }`}
               >
-                Fetch rows
+                {runLabel}
               </button>
               <button
                 onClick={clearRows}
@@ -282,14 +290,6 @@ export const Explorer = () => {
                 className="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium"
               >
                 Delete all rows
-              </button>
-              <button
-                onClick={reimportAll}
-                disabled={e.busy}
-                title="Empty EVERY base-data table and the entire event log (all systems), then re-pull every connector to reimport the base data from source"
-                className="px-4 py-1.5 text-sm rounded-full border border-rose-300 bg-white text-rose-800 hover:bg-rose-50 disabled:opacity-40 font-medium"
-              >
-                Reset &amp; reimport base data
               </button>
               <button
                 onClick={toggleConnectorPanel}

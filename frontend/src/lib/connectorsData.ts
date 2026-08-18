@@ -135,7 +135,7 @@ export const connRepoint = async (target: string) => {
   }
   if (
     !confirm(
-      `Re-point connector "${name}" to table "${target}"?\n\nIt will fill "${target}" on the next Fetch. Existing rows in "${cur?.targetEntity}" are left untouched.`,
+      `Re-point connector "${name}" to table "${target}"?\n\nIt will fill "${target}" on its next run. Existing rows in "${cur?.targetEntity}" are left untouched.`,
     )
   ) {
     return

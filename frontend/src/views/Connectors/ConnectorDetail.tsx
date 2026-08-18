@@ -12,6 +12,7 @@ import {
   connVerify,
   connectorName,
 } from "@/lib/connectorsData.ts"
+import { nothingWrittenText, performsActions, testHint, testLabel } from "@/lib/connectorBehavior.ts"
 import type { Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { CodeEditor } from "./CodeEditor.tsx"
@@ -29,14 +30,13 @@ const Diagnostics = ({ c }: { c: Connector }) => {
   const { connBusy, connVerify: v, connTest: t } = useStore()
   const verify = v?.id === c.id ? v : null
   const test = t?.id === c.id ? t : null
+  const label = testLabel(c)
+  const acts = performsActions(c)
 
   return (
     <div className="mt-5 rounded-lg border border-stone-200 p-4">
       <div className="text-sm font-medium text-stone-800">Connection</div>
-      <div className="text-xs text-stone-500 mt-0.5">
-        Check the live source is reachable, and dry-run a pull to grade the data against the model — without writing
-        anything.
-      </div>
+      <div className={`text-xs mt-0.5 ${acts ? "text-amber-700" : "text-stone-500"}`}>{testHint(c)}</div>
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <button
           onClick={connVerify}
@@ -45,13 +45,15 @@ const Diagnostics = ({ c }: { c: Connector }) => {
         >
           Verify connection
         </button>
-        <button
-          onClick={connTest}
-          disabled={connBusy}
-          className="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium"
-        >
-          Test (dry run)
-        </button>
+        {label && (
+          <button
+            onClick={connTest}
+            disabled={connBusy}
+            className="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium"
+          >
+            {label}
+          </button>
+        )}
         <span className="text-sm">
           {!verify ? (
             <span className="text-stone-400">not checked</span>
@@ -75,7 +77,9 @@ const Diagnostics = ({ c }: { c: Connector }) => {
             ) : (
               <span className="text-rose-600 font-medium">✗ shape mismatch</span>
             )}{" "}
-            <span className="text-stone-500">· {test.count} row(s) pulled, nothing written</span>
+            <span className="text-stone-500">
+              · {test.count} row(s) pulled, {nothingWrittenText(c)}
+            </span>
           </div>
           {!!test.diff?.requiredStatus?.length && (
             <div>
@@ -142,7 +146,7 @@ const DetailsBody = ({ c }: { c: Connector }) => {
         <div className="text-sm font-medium text-stone-800">Re-point</div>
         <div className="text-xs text-stone-500 mt-0.5">
           Point this connector at a different table. Going forward only — existing rows in the old table stay put; the
-          connector fills the new table on the next Fetch.
+          connector fills the new table on its next run.
         </div>
         <div className="flex items-center gap-2 mt-3">
           <select
@@ -216,7 +220,7 @@ const DetailsBody = ({ c }: { c: Connector }) => {
             Save timestamps
           </button>
           <div className="text-[11px] text-stone-400 mt-2">
-            New rows pick these up on the next Fetch. Events already in the log keep their old timestamps until you
+            New rows pick these up on the next run. Events already in the log keep their old timestamps until you
             rebuild from data (clears &amp; re-derives the event log).
           </div>
         </div>

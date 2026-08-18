@@ -24,7 +24,8 @@ import {
 import {
   appendNote, setConnectorSummary, deleteChat, deleteDoc, connectorChatKey,
 } from "./journal.js";
-import type { AdapterConfig } from "../types.js";
+import type { AdapterBehavior, AdapterConfig } from "../types.js";
+import { assertActionsConfirmed } from "../behavior.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
@@ -108,6 +109,7 @@ interface CreateConnectorInput {
   /** Entity or value-object name the connector populates. */
   target: string;
   id?: string;
+  behavior?: AdapterBehavior;
 }
 
 /** Bootstrap a connector for a system + kind. No code yet — build it next. */
@@ -130,11 +132,13 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   }
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: bc, targetEntity: input.target, targetKind,
+    behavior: input.behavior ?? "sync",
     phase: "draft", mode: "live", workflowId, organizationId,
   };
   writeSidecar(cfg);
   registerAdapter(createConnectorAdapter(cfg));
-  appendNote(id, "created", `Created connector targeting ${input.target} (${targetKind}) in ${bc}.`);
+  const behaviorNote = cfg.behavior === "sync" ? "" : ` It ${cfg.behavior === "actuator" ? "performs actions in another system" : "computes its rows"}.`;
+  appendNote(id, "created", `Created connector targeting ${input.target} (${targetKind}) in ${bc}.${behaviorNote}`);
   return cfg;
 }
 
@@ -260,7 +264,7 @@ export async function buildConnector(id: string, instructions?: string, errorRep
   }
   const targetEvents = targetKind === "entity" ? eventsForTarget(target.name) : [];
   const gen = await generateConnectorModule({
-    target, targetKind, instructions: instr,
+    target, targetKind, behavior: cfg.behavior, instructions: instr,
     credentialKeys: credentialKeys(id), endpoint: cfg.endpoint, errorReport,
     related: relatedSchemasFor(target),
     ...(cfg.discoveredFields?.length ? { discoveredFields: cfg.discoveredFields } : {}),
@@ -501,11 +505,13 @@ export interface DiscoverSourceResult {
 
 /** Run the connector against the live source with a small limit and persist the
  * observed field shape. Executes connector code — callers gate it exactly like
- * a dry run (ownership + connector capability + kill-switch). */
-export async function discoverSourceFields(id: string): Promise<DiscoverSourceResult> {
+ * a dry run (ownership + connector capability + kill-switch). Sampling an
+ * ACTUATOR means performing its action, so that needs confirming first. */
+export async function discoverSourceFields(id: string, confirmActions?: boolean): Promise<DiscoverSourceResult> {
   const cfg = readSidecar(id);
   const adapter = getAdapter(id);
   if (!cfg || !adapter) throw new Error(`no connector "${id}"`);
+  assertActionsConfirmed(cfg, "sampling its fields", confirmActions);
   const { rows } = await adapter.pull({ limit: DISCOVER_SAMPLE_ROWS });
   const sample = rows[cfg.targetEntity] ?? [];
   if (!sample.length) throw new Error("the source returned no rows to sample — nothing to discover (an incremental connector with no new items returns []; discovery needs a pull that yields rows)");

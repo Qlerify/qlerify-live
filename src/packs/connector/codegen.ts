@@ -23,6 +23,9 @@ interface ConnectorGenInput {
   target: EntitySchema;
   /** "entity" | "valueObject" — affects whether an id is expected. */
   targetKind: "entity" | "valueObject";
+  /** What running this connector costs (packs/types AdapterBehavior). Absent =
+   * "sync". Only "actuator" changes the CODE the author must write. */
+  behavior?: "sync" | "generator" | "actuator" | "extractor";
   /** The user's natural-language description of the source ("our DynamoDB users
    * table", "Pipedrive persons via REST", "the Google Sheet at …"). */
   instructions: string;
@@ -108,7 +111,7 @@ function exampleVocab(f: SchemaField, max = 10): string[] {
 
 /** Exported for unit tests — pure (no I/O, no ontology reads). */
 export function buildConnectorPrompt(input: ConnectorGenInput): string {
-  const { target, targetKind, instructions, credentialKeys, endpoint, errorReport, related, discoveredFields, cycle, cycleChild, fkLinks, workflowTables, events } = input;
+  const { target, targetKind, behavior, instructions, credentialKeys, endpoint, errorReport, related, discoveredFields, cycle, cycleChild, fkLinks, workflowTables, events } = input;
   const fields = target.fields
     .map((f) => {
       const req = (target.required ?? []).includes(f.name) ? " (required)" : "";
@@ -225,6 +228,24 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
       ]
     : [];
 
+  // An actuator's fetchRows PERFORMS the action it then returns. Everything the
+  // read-only guidance takes for granted (re-running is free, returning [] is
+  // cheap) inverts here, so the rules are emitted only for this behavior.
+  const actuatorSection = behavior === "actuator"
+    ? [
+        ``,
+        `## This connector PERFORMS ACTIONS — read this before writing any code`,
+        `Your fetchRows does not just read: it makes something happen in another system (creates a record there, sends a message), then returns the resulting rows so the platform can land them. That inverts the usual rules:`,
+        `- **Never act blindly.** Before performing anything, establish what has ALREADY been done: check the target system itself (search by a natural key — the id, reference or email you are about to use), and cross-check ctx.readTable("${target.name}") for rows this connector previously landed. Act only on what is genuinely missing from BOTH.`,
+        `- **The table snapshot is not proof.** It is capped at ${SNAPSHOT_ROWS_PER_TABLE} rows and taken when the run starts, so it can be stale or partial. The source system is the authority on what exists; the snapshot is only a cheap first filter.`,
+        `- **ctx.limit bounds ACTIONS, not just rows.** Perform at most ctx.limit of them per run and return what you did. A run that finds nothing to do returns [] — that is a success, not an error.`,
+        `- **Log every action you perform** with ctx.log (what you did, and to which record), so the operator can audit the run. Never log a secret.`,
+        `- **Return the real result.** The rows you return must carry the ids the OTHER system assigned, so a later run recognises its own work and the platform can correlate it. Never invent an id for something you created remotely.`,
+        `- **Expect to be re-run.** Manual pulls repeat, and the operator may schedule this connector. Your own idempotency — search before create — is the only thing preventing duplicates in the other system.`,
+        `- **Export a read-only probe(ctx).** For every other connector it is optional; for this one it is REQUIRED, because the platform's reachability check falls back to fetchRows when there is no probe — which would perform your action. probe must only read (authenticate, or fetch one record) and must never create, update or send anything.`,
+      ]
+    : [];
+
   const creds = credentialKeys.length
     ? `The operator has configured these credential fields (available at ctx.credentials.<name>; values are secret and not shown here): ${credentialKeys.map((k) => `\`${k}\``).join(", ")}.`
     : `No credentials are configured yet. If the source needs auth, read it from ctx.credentials.<name> and tell the operator which fields to set — do NOT hardcode secrets.`;
@@ -251,6 +272,7 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     ...cycleChildSection,
     ...fkSection,
     ...rerunSection,
+    ...actuatorSection,
     ``,
     `## How to reach the source — you have FULL power`,
     `You MAY import ANY npm package (e.g. @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, pg, mysql2, mongodb, googleapis, soap, ldapjs, snowflake-sdk) and use ANY protocol. Just \`import\` what you need with ESM syntax — the runtime detects your imports and installs them automatically before running. Plain HTTP/REST: use the global \`fetch\` (also available as ctx.fetch).`,

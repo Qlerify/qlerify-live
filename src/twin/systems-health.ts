@@ -12,7 +12,8 @@
 
 import { getOntology, type Ontology } from "../ontology/model.js";
 import { entitiesForBc, valueObjectsForBc } from "../ontology/bc-helpers.js";
-import type { ProvMode, SourceAdapter } from "../packs/types.js";
+import type { AdapterBehavior, ProvMode, SourceAdapter } from "../packs/types.js";
+import { readSidecar } from "../packs/sidecar.js";
 import { listOwnedAdapters } from "../packs/ownership.js";
 import * as store from "./projection-store.js";
 
@@ -29,6 +30,10 @@ interface TableHealth {
   mode: ProvMode | null;
   /** The adapter whose status this row reflects, or null when none is wired. */
   adapterId: string | null;
+  /** That adapter's type. Carried here because this payload spans EVERY system,
+   * while the per-system adapter list does not — a table fed by an actuator has
+   * to be flagged even when a different system is selected. */
+  behavior: AdapterBehavior | null;
   /** Pre-formatted right-aligned detail, e.g. "live · 1,200 rows". */
   detail: string;
 }
@@ -66,18 +71,19 @@ function classify(
 ): TableHealth {
   const wired = adapters.filter((a) => a.boundedContext === bc && a.targetEntity === name);
   if (wired.length === 0) {
-    return { name, kind, status: "no_adapter", rows, mode: null, adapterId: null, detail: "no adapter" };
+    return { name, kind, status: "no_adapter", rows, mode: null, adapterId: null, behavior: null, detail: "no adapter" };
   }
   // Several adapters can target one table; the highest mode wins the dot.
   const top = wired.reduce((best, a) => (MODE_RANK[a.mode] > MODE_RANK[best.mode] ? a : best));
+  const behavior = readSidecar(top.id)?.behavior ?? null;
   if (rows === 0) {
-    return { name, kind, status: "wired_empty", rows: 0, mode: top.mode, adapterId: top.id, detail: "adapter set · no data" };
+    return { name, kind, status: "wired_empty", rows: 0, mode: top.mode, adapterId: top.id, behavior, detail: "adapter set · no data" };
   }
   if (top.mode === "live") {
-    return { name, kind, status: "live", rows, mode: "live", adapterId: top.id, detail: `live · ${fmt(rows)} rows` };
+    return { name, kind, status: "live", rows, mode: "live", adapterId: top.id, behavior, detail: `live · ${fmt(rows)} rows` };
   }
   // simulated or recorded — real rows, but synthetic/replayed (the ◐ dot).
-  return { name, kind, status: "simulated", rows, mode: top.mode, adapterId: top.id, detail: `${top.mode} · ${fmt(rows)} rows` };
+  return { name, kind, status: "simulated", rows, mode: top.mode, adapterId: top.id, behavior, detail: `${top.mode} · ${fmt(rows)} rows` };
 }
 
 /** PURE: classify every bounded context's entities + value objects into the

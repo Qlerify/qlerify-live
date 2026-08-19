@@ -453,6 +453,33 @@ export function setConnectorDateRoles(
   return clean;
 }
 
+export const BEHAVIORS: readonly AdapterBehavior[] = ["sync", "generator", "actuator", "extractor"];
+
+/** Reclassify what re-running this connector costs. Write-once at create time
+ * was the original rule, which left every connector built before the axis
+ * existed permanently untyped and unfixable except by deleting it — and for an
+ * actuator, deleting it destroys the record of the actions it already performed. */
+export function setConnectorBehavior(id: string, behavior: AdapterBehavior): AdapterBehavior {
+  if (!BEHAVIORS.includes(behavior)) {
+    throw new Error(`behavior must be one of: ${BEHAVIORS.join(", ")}`);
+  }
+  const cfg = readSidecar(id);
+  if (!cfg) throw new Error(`no connector "${id}"`);
+  const from = cfg.behavior ?? "sync";
+  if (from === behavior) return behavior;
+  const next: AdapterConfig = { ...cfg, behavior };
+  writeSidecar(next);
+  registerAdapter(createConnectorAdapter(next));
+  const consequence =
+    behavior === "actuator"
+      ? " A model rebuild will no longer re-run it, and the read-only affordances now refuse."
+      : from === "actuator"
+        ? " It is no longer protected: a model rebuild will re-run it, and the read-only affordances will run its code."
+        : "";
+  appendNote(id, "note", `Type changed from ${from} to ${behavior}.${consequence}`);
+  return behavior;
+}
+
 // --- Source-field discovery (the introspect() seam, made real) ---------------
 // Sample the LIVE source through the built connector and record which fields it
 // actually exposes — the union of row keys, an inferred dataType, one truncated

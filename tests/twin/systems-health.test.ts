@@ -3,7 +3,8 @@
 // PURE builder (buildSystemsHealth) against an inline two-BC model so it needs no
 // DB / disk / tenant context — the same shape as derive.test.ts.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { writeSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
 import { loadOntologyFromStrings } from "../../src/ontology/model.js";
 import { buildSystemsHealth, type AdapterRef } from "../../src/twin/systems-health.js";
 
@@ -126,5 +127,55 @@ describe("buildSystemsHealth — multiple adapters on one table", () => {
     const order = tbl(sys(b, "Sales"), "Order");
     expect(order.status).toBe("live");
     expect(order.adapterId).toBe("order-live");
+  });
+});
+
+// The Systems sidebar lists tables from EVERY system, but the per-system adapter
+// list it used to read only ever holds the SELECTED one — so an actuator in any
+// other system silently lost its badge, and a missing badge reads as "safe".
+// Carrying the type on this board, which already spans every system, is the fix.
+describe("buildSystemsHealth — the connector's type travels with the table", () => {
+  const IDS = ["hs-actuator", "sales-sync"];
+
+  beforeAll(() => {
+    writeSidecar({
+      id: "hs-actuator", kind: "connector", behavior: "actuator",
+      boundedContext: "Billing", targetEntity: "Receipt", phase: "built", mode: "live",
+    } as any);
+    writeSidecar({
+      id: "sales-sync", kind: "connector", behavior: "sync",
+      boundedContext: "Sales", targetEntity: "Order", phase: "built", mode: "live",
+    } as any);
+  });
+
+  afterAll(() => {
+    for (const id of IDS) { deleteSidecar(id); }
+  });
+
+  const adapters: AdapterRef[] = [
+    { id: "sales-sync", boundedContext: "Sales", targetEntity: "Order", mode: "live" },
+    { id: "hs-actuator", boundedContext: "Billing", targetEntity: "Receipt", mode: "live" },
+  ];
+  // Built per test, not in the describe body — the sidecars it reads only exist
+  // once beforeAll has run.
+  const build = () => buildSystemsHealth(ont, adapters, new Map([["Order", 5], ["Receipt", 7]]));
+
+  it("reports the type for every system in one payload, not just one", () => {
+    const board = build();
+    expect(tbl(sys(board, "Sales"), "Order").behavior).toBe("sync");
+    expect(tbl(sys(board, "Billing"), "Receipt").behavior).toBe("actuator");
+  });
+
+  it("reports null where no adapter is wired", () => {
+    expect(tbl(sys(build(), "Sales"), "Invoice").behavior).toBeNull();
+  });
+
+  it("reports null for a connector that predates the type, never a guess", () => {
+    const b = buildSystemsHealth(
+      ont,
+      [{ id: "no-sidecar-at-all", boundedContext: "Sales", targetEntity: "Order", mode: "live" }],
+      new Map([["Order", 1]]),
+    );
+    expect(tbl(sys(b, "Sales"), "Order").behavior).toBeNull();
   });
 });

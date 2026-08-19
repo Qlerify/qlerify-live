@@ -16,6 +16,7 @@ import {
 } from "@/lib/explorerData.ts"
 import type { ColState } from "@/lib/explorerData.ts"
 import { performsActions, pullLabel } from "@/lib/connectorBehavior.ts"
+import { BehaviorBadge } from "@/views/Connectors/BehaviorBadge.tsx"
 import { activateConnectorChat, openChat } from "@/lib/chatData.ts"
 import type { ExpState, ExpSystem, ExpTable } from "@/lib/types.ts"
 import { TableGlyph } from "./TableGlyph.tsx"
@@ -246,6 +247,11 @@ export const Explorer = () => {
                     <span className={`flex-1 truncate ${sel ? "text-sky-700 font-medium" : "text-stone-700"}`}>
                       {t.name}
                     </span>
+                    {/* Only the acting ones are flagged here — this is a nav list, and
+                        the badge is a warning rather than a label. Read off the health
+                        payload, which spans every system: e.adapters holds only the
+                        SELECTED one, so it would drop the badge on all the others. */}
+                    {t.behavior === "actuator" && <BehaviorBadge behavior="actuator" />}
                   </button>
                 )
               })

@@ -17,6 +17,7 @@ import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js"
 import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
   connectorInfo, readConnectorCode, removeConnector, discoverSourceFields,
+  setConnectorBehavior,
 } from "../packs/connector/orchestrate.js";
 import { fetchDocs } from "./fetch-docs.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
@@ -57,6 +58,9 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   // Same capability the Schedule panel's route guards: enabling polling starts
   // unattended runs against a live source, so the chat is never the softer path.
   set_connector_schedule: "connector.build",
+  // Reclassifying is the same class of consequence: marking something NOT an
+  // actuator lets a model rebuild fire its writes again.
+  set_connector_behavior: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -77,7 +81,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
   "build_trigger_rules", "ingest_connector", "remove_connector", "discover_source_fields",
-  "set_connector_schedule",
+  "set_connector_schedule", "set_connector_behavior",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -507,6 +511,20 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["adapterId", "enabled", "confirmed"],
     },
   },
+  {
+    name: "set_connector_behavior",
+    description:
+      "WRITE — Change what re-running an EXISTING connector costs: `sync` (mirrors a system of record, re-running is free), `generator` (computes each row at a real cost), `actuator` (PERFORMS AN ACTION in another system, then lands the result), `extractor` (interprets an unstructured source with AI). Use when the user says a connector was classified wrongly, or when its code has changed so that it now writes where it only read before — that reclassification is not automatic, so if you edit a connector into performing actions you must offer to retype it. Marking something `actuator` makes model rebuilds skip it and makes the read-only affordances refuse; marking it anything else REMOVES those protections. Requires confirmation: say what changes as a result, ask, wait for yes, then call with confirmed:true. Read the current type with get_adapter_config.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        behavior: { type: "string", enum: ["sync", "generator", "actuator", "extractor"] },
+        confirmed: { type: "boolean" },
+      },
+      required: ["adapterId", "behavior", "confirmed"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -617,6 +635,8 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return handleRemoveConnector(args);
       case "set_connector_schedule":
         return handleSetConnectorSchedule(args);
+      case "set_connector_behavior":
+        return handleSetConnectorBehavior(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -749,6 +769,7 @@ function handleListAdapters() {
   return {
     adapters: listAdapters().filter((a) => ownsAdapterId(a.id)).map((a) => ({
       id: a.id, kind: a.kind, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+      behavior: adapterCfg(a.id)?.behavior ?? "sync",
     })),
   };
 }
@@ -759,6 +780,7 @@ function handleGetAdapterConfig(adapterId: string) {
   if (!cfg) return { error: `no adapter "${adapterId}"` };
   return {
     id: cfg.id, kind: cfg.kind, boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity,
+    behavior: cfg.behavior ?? "sync",
     mode: cfg.mode, endpoint: cfg.endpoint ?? null, credentialsRef: cfg.credentialsRef ?? null,
     hasBody: !!cfg.bodyPath, bodyPath: cfg.bodyPath ?? null,
     schedule: cfg.schedule ?? null,
@@ -1133,5 +1155,32 @@ function handleSetConnectorSchedule(args: Record<string, any>) {
       return err(e.message);
     }
     throw e;
+  }
+}
+
+function handleSetConnectorBehavior(args: Record<string, any>) {
+  if (args.confirmed !== true) {
+    return err("write tool refused: confirmed=false. Tell the user what changes when the type changes, get a yes, then call again with confirmed=true.");
+  }
+  const id = String(args.adapterId ?? "");
+  if (!id) {
+    return err("adapterId required");
+  }
+  const was = adapterCfg(id)?.behavior ?? "sync";
+  try {
+    const behavior = setConnectorBehavior(id, args.behavior);
+    return ok({
+      adapterId: id,
+      was,
+      behavior,
+      note:
+        behavior === "actuator"
+          ? "Typed as an actuator: model rebuilds now skip it, and the dry-run and field-discovery tools refuse rather than performing its action. This changed what the PLATFORM does, not what the code does — code written for a read-only connector still lacks the actuator disciplines (check the other system before acting, bound actions by ctx.limit, export a read-only probe()). Tell the user, and offer a build_connector rebuild so its code matches its type."
+          : was === "actuator"
+            ? "No longer an actuator: model rebuilds will re-run it, and the dry-run and field-discovery tools will execute its code."
+            : `Typed as ${behavior}.`,
+    });
+  } catch (e: any) {
+    return err(e?.message ?? String(e));
   }
 }

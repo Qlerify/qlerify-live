@@ -1,7 +1,7 @@
 import { showOverlay, hideOverlay } from "@/components/Overlay.tsx"
 import { api, apiDownload } from "./api.ts"
 import { useStore } from "./store.ts"
-import type { Connector, ConnectorManifest, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
+import type { AdapterBehavior, Connector, ConnectorManifest, ConnectorsData, TestResult, VerifyResult } from "./types.ts"
 
 // Colour chip per update-note kind (connector doc timeline).
 export const NOTE_BADGE: Record<string, string> = {
@@ -116,6 +116,26 @@ export const connSaveDateRoles = async (created: string | null, updated: string 
     await loadConnectors()
   } catch (e) {
     alert("Couldn't save timestamps: " + (e as Error).message)
+  } finally {
+    useStore.getState().set({ connBusy: false })
+  }
+}
+
+export const connSaveBehavior = async (behavior: AdapterBehavior) => {
+  const s = useStore.getState()
+  const id = s.connSel
+  if (!id || s.connBusy) {
+    return
+  }
+  s.set({ connBusy: true })
+  try {
+    await api(`/api/connectors/${encodeURIComponent(id)}/behavior`, {
+      method: "POST",
+      body: JSON.stringify({ behavior }),
+    })
+    await loadConnectors()
+  } catch (e) {
+    alert("Couldn't change the type: " + (e as Error).message)
   } finally {
     useStore.getState().set({ connBusy: false })
   }

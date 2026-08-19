@@ -58,6 +58,17 @@ const WORDING: Record<AdapterBehavior, Wording> = {
 
 const wordingFor = (behavior?: AdapterBehavior) => WORDING[behavior ?? "sync"]
 
+const VERB: Record<AdapterBehavior, string> = {
+  sync: "mirrors a system of record, so re-running it is free and changes nothing",
+  generator: "computes each row at a real cost, so re-running it spends money again",
+  actuator: "performs actions in another system, so re-running it repeats them",
+  extractor: "interprets an unstructured source with AI, so re-running it pays for the extraction again",
+}
+
+export const behaviorVerb = (behavior?: AdapterBehavior) => VERB[behavior ?? "sync"]
+
+export const BEHAVIORS: readonly AdapterBehavior[] = ["sync", "generator", "actuator", "extractor"]
+
 export const performsActions = (c: { behavior?: AdapterBehavior } | null | undefined) => c?.behavior === "actuator"
 
 export const pullLabel = (c: Pick<Connector, "behavior" | "boundedContext">) =>

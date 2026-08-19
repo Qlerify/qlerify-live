@@ -387,7 +387,7 @@ export function chatMessageHtml(m) {
     if (b.type === "tool_use") {
       const args = JSON.stringify(b.input, null, 2);
       const argsPreview = args.length > 120 ? args.slice(0, 120) + "…" : args;
-      const WRITE_TOOLS = ["next_step", "create_case", "regenerate_adapter_body", "reset_adapter", "create_connector", "build_connector", "ingest_connector", "remove_connector"];
+      const WRITE_TOOLS = ["next_step", "create_case", "regenerate_adapter_body", "reset_adapter", "create_connector", "build_connector", "ingest_connector", "set_connector_schedule", "set_connector_behavior", "remove_connector"];
       const writeTone = WRITE_TOOLS.includes(b.name) ? "border-amber-300 bg-amber-50" : "border-stone-200 bg-stone-50";
       return `
         <details class="text-[11px] ${writeTone} border rounded px-2 py-1 my-1">

@@ -107,14 +107,10 @@ const Diagnostics = ({ c }: { c: Connector }) => {
 const BehaviorPanel = ({ c }: { c: Connector }) => {
   const connBusy = useStore((s) => s.connBusy)
   const current = c.behavior ?? "sync"
-  const [picked, setPicked] = useState<AdapterBehavior>(current)
-
-  // A pending choice must not survive selecting a different connector.
-  const [seen, setSeen] = useState(c.id)
-  if (seen !== c.id) {
-    setSeen(c.id)
-    setPicked(current)
-  }
+  // Stamped with the connector it belongs to, so selecting a different one falls
+  // back to that connector's saved type without resetting state during render.
+  const [pending, setPending] = useState<{ id: string; behavior: AdapterBehavior } | null>(null)
+  const picked = pending?.id === c.id ? pending.behavior : current
 
   const losingProtection = current === "actuator" && picked !== "actuator"
   const gainingProtection = current !== "actuator" && picked === "actuator"
@@ -129,7 +125,7 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <select
           value={picked}
-          onChange={(e) => setPicked(e.target.value as AdapterBehavior)}
+          onChange={(e) => setPending({ id: c.id, behavior: e.target.value as AdapterBehavior })}
           disabled={connBusy}
           className="text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white disabled:opacity-40"
         >

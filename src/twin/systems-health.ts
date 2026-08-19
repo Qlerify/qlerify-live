@@ -54,7 +54,12 @@ interface SystemsHealth {
 
 /** Just the adapter fields the board needs — SourceAdapter is assignable to it,
  * and tests can pass plain objects. */
-export type AdapterRef = Pick<SourceAdapter, "id" | "boundedContext" | "targetEntity" | "mode">;
+/** What the health board needs of an adapter. `behavior` is NOT on SourceAdapter
+ * (it lives on the sidecar), so the async orchestrator resolves it and passes it
+ * in — keeping buildSystemsHealth free of I/O. */
+export type AdapterRef = Pick<SourceAdapter, "id" | "boundedContext" | "targetEntity" | "mode"> & {
+  behavior?: AdapterBehavior | null;
+};
 
 const MODE_RANK: Record<ProvMode, number> = { live: 3, recorded: 2, simulated: 1 };
 
@@ -75,7 +80,7 @@ function classify(
   }
   // Several adapters can target one table; the highest mode wins the dot.
   const top = wired.reduce((best, a) => (MODE_RANK[a.mode] > MODE_RANK[best.mode] ? a : best));
-  const behavior = readSidecar(top.id)?.behavior ?? null;
+  const behavior = top.behavior ?? null;
   if (rows === 0) {
     return { name, kind, status: "wired_empty", rows: 0, mode: top.mode, adapterId: top.id, behavior, detail: "adapter set · no data" };
   }
@@ -110,7 +115,13 @@ export function buildSystemsHealth(
  * build the board. Used by GET /api/bc/health. */
 export async function computeSystemsHealth(): Promise<SystemsHealth> {
   const ont = getOntology();
-  const adapters = listOwnedAdapters(); // tenant-scoped: never surface another tenant's connector ids/modes
+  // One read per OWNED adapter, not per table (several tables can share one) and
+  // not the whole sidecar directory (which spans every tenant). This runs on
+  // every GET /api/bc/health, so the builder itself stays free of it.
+  const adapters: AdapterRef[] = listOwnedAdapters().map((a) => ({
+    id: a.id, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+    behavior: readSidecar(a.id)?.behavior ?? null,
+  }));
   const rowCounts = new Map<string, number>();
   for (const bc of ont.boundedContexts) {
     for (const t of [...entitiesForBc(ont, bc), ...valueObjectsForBc(ont, bc)]) {

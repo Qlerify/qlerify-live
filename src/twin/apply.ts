@@ -18,6 +18,8 @@ import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { createVersion, ensureOntologyResource } from "../platform/ontology-store/ontology-store.js";
 import { getOntology, loadOntologyFromStrings, setWorkflowModel } from "../ontology/model.js";
 import { reingestAll, type ReingestSummary } from "../packs/ingest.js";
+import { connectorsInWorkflow } from "../packs/connector/orchestrate.js";
+import { performsActions } from "../packs/behavior.js";
 import { applyModelTables } from "./projection-store.js";
 
 /** A short, human label for a version's source link: the model's primary bounded
@@ -56,7 +58,16 @@ export async function applyWorkflowModel(
   workflow: string,
   overlay: string | null,
   opts: ApplyModelOpts = {},
-): Promise<{ versionId: string; seq: number; changed: boolean; rebuild: ReingestSummary }> {
+): Promise<{
+  versionId: string;
+  seq: number;
+  changed: boolean;
+  rebuild: ReingestSummary;
+  /** table → rows carried across the rebuild (actuator evidence). */
+  preserved: Record<string, number>;
+  /** Preserved tables whose entity left the model, left standing rather than dropped. */
+  orphaned: string[];
+}> {
   const ctx = requireTenant();
   if (isSystemWorkflow() || !ctx.workflowId) {
     throw new DomainError("Setting a workflow model applies to a real (non-system) workflow — create or select one first.");
@@ -91,7 +102,11 @@ export async function applyWorkflowModel(
   // plane for it: drop the workflow's old projection tables, create the new
   // model's, and clear the workflow's run history. All workflow-scoped.
   setWorkflowModel(ctx.workflowId, workflow, overlay, v.manifestHash);
-  await applyModelTables(getOntology());
+  // An actuator's rows are the record that it already acted in another system.
+  // reingestAll deliberately refuses to re-run it, so nothing would put them
+  // back — wiping them makes the connector announce/create everything again.
+  const preserve = connectorsInWorkflow(ctx.workflowId).filter(performsActions).map((c) => c.targetEntity);
+  const tables = await applyModelTables(getOntology(), { preserve });
   await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() });
 
   // The rebuild above left every projection table empty and wiped the event log.
@@ -101,5 +116,9 @@ export async function applyWorkflowModel(
   // connector that can't pull doesn't fail the model update (see reingestAll).
   const rebuild = await reingestAll();
 
-  return { versionId: v.versionId, seq: v.seq, changed: v.changed, rebuild };
+  return {
+    versionId: v.versionId, seq: v.seq, changed: v.changed, rebuild,
+    preserved: tables.preserved,
+    orphaned: tables.orphaned,
+  };
 }

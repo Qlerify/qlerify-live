@@ -164,25 +164,101 @@ export async function listProjectionTables(): Promise<string[]> {
 interface ApplyResult {
   dropped: string[];
   created: string[];
+  /** Preserved tables this apply will not recreate — the entity left the model,
+   * or it is a value object (those are created lazily, not here). Left standing
+   * rather than dropped, so their rows survive. */
+  orphaned: string[];
+  /** table → rows carried across the drop/recreate. */
+  preserved: Record<string, number>;
+}
+
+/** SQLite's default host-parameter ceiling is 999; stay under it whatever the
+ * column count. */
+function chunkSize(colCount: number): number {
+  return Math.max(1, Math.floor(900 / Math.max(1, colCount)));
+}
+
+/** Re-insert rows VERBATIM after a rebuild — no version reset, no fresh
+ * createdAt, no findById round-trip. These are restored facts, not new ones. */
+async function restoreRows(table: string, rows: Array<Record<string, unknown>>, keep: Set<string>): Promise<number> {
+  if (!rows.length) return 0;
+  const cols = Object.keys(rows[0]!).filter((c) => keep.has(c));
+  if (!cols.length) return 0;
+  const tuple = `(${cols.map(() => "?").join(", ")})`;
+  let done = 0;
+  for (let i = 0; i < rows.length; i += chunkSize(cols.length)) {
+    const batch = rows.slice(i, i + chunkSize(cols.length));
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO ${phys(table)} (${cols.map(ident).join(", ")}) VALUES ${batch.map(() => tuple).join(", ")}`,
+      ...batch.flatMap((r) => cols.map((c) => sqlValue(r[c]))),
+    );
+    done += batch.length;
+  }
+  return done;
 }
 
 /** Drop every `gen_` projection table and recreate the current model's entity
  * tables. Prisma-managed tables (control plane + EventLog) are NEVER touched.
- * In-process, synchronous, no restart — the destructive "drop tables on swap". */
-export async function applyModelTables(ontology: Ontology): Promise<ApplyResult> {
+ * In-process, synchronous, no restart — the destructive "drop tables on swap".
+ *
+ * `preserve` names tables whose rows must SURVIVE the rebuild. A projection is
+ * normally disposable because re-running its connector reproduces it — but an
+ * actuator's rows record actions it performed in another system, so re-running
+ * would perform them again and the rows are the only thing that stops it. Their
+ * rows are carried across (columns the new model still declares), and if the
+ * entity left the model entirely the table is left standing rather than dropped,
+ * because this is the one kind of data nothing can rebuild. */
+export async function applyModelTables(
+  ontology: Ontology,
+  opts: { preserve?: readonly string[] } = {},
+): Promise<ApplyResult> {
   orgColCache.clear(); // tables are being rebuilt — drop the column-presence cache
+  const preserve = new Set(opts.preserve ?? []);
+  const modelled = new Set(ontology.entities.map((e) => e.name));
   const existing = await listProjectionTables();
-  const dropped: string[] = [];
+
+  // Read BEFORE any drop — after it there is nothing left to read. Deliberately
+  // NOT findMany(): that filters by organization_id, so a row with none (legacy,
+  // or inserted off-context) would be silently left behind and dropped with the
+  // table. The table is already workflow-namespaced, so everything in it belongs
+  // here, and losing a subset is the exact failure this is meant to prevent.
+  const carried = new Map<string, Array<Record<string, unknown>>>();
   for (const t of existing) {
+    if (preserve.has(t) && modelled.has(t)) {
+      carried.set(t, await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(`SELECT * FROM ${phys(t)}`));
+    }
+  }
+
+  const dropped: string[] = [];
+  const orphaned: string[] = [];
+  for (const t of existing) {
+    if (preserve.has(t) && !modelled.has(t)) {
+      orphaned.push(t);
+      continue;
+    }
     await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS ${phys(t)}`);
     dropped.push(t);
   }
+
   const created: string[] = [];
   for (const entity of ontology.entities) {
     await prisma.$executeRawUnsafe(createTableSql(entity));
     created.push(entity.name);
   }
-  return { dropped, created };
+
+  // Prisma caches a raw query's COLUMN NAMES against its SQL text, so after a
+  // table is recreated with a different shape, `SELECT *` keeps returning the
+  // old names with the new values behind them — reading a row's `status` out of
+  // its `supplierId`. Dropping the connection is what forgets that, and it has
+  // to happen before anything reads a rebuilt table.
+  await prisma.$disconnect();
+
+  const preserved: Record<string, number> = {};
+  for (const [t, rows] of carried) {
+    const n = await restoreRows(t, rows, await tableColumns(t));
+    if (n) preserved[t] = n;
+  }
+  return { dropped, created, orphaned, preserved };
 }
 
 /** Drop every projection table in a SPECIFIC workflow's namespace

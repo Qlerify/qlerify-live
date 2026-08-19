@@ -9,6 +9,8 @@ const WRITE_TOOLS = new Set([
   "create_connector",
   "build_connector",
   "ingest_connector",
+  "set_connector_schedule",
+  "set_connector_behavior",
   "remove_connector",
 ])
 

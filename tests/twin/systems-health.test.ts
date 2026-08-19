@@ -128,3 +128,38 @@ describe("buildSystemsHealth — multiple adapters on one table", () => {
     expect(order.adapterId).toBe("order-live");
   });
 });
+
+// The Systems sidebar lists tables from EVERY system, but the per-system adapter
+// list it used to read only ever holds the SELECTED one — so an actuator in any
+// other system silently lost its badge, and a missing badge reads as "safe".
+// Carrying the type on this board, which already spans every system, is the fix.
+describe("buildSystemsHealth — the connector's type travels with the table", () => {
+  // The Systems sidebar lists tables from EVERY system, but the per-system
+  // adapter list it used to read only ever holds the SELECTED one — so an
+  // actuator in any other system silently lost its badge, and a missing badge
+  // reads as "safe". Carrying the type on this board, which already spans every
+  // system, is the fix.
+  const adapters: AdapterRef[] = [
+    { id: "sales-sync", boundedContext: "Sales", targetEntity: "Order", mode: "live", behavior: "sync" },
+    { id: "hs-actuator", boundedContext: "Billing", targetEntity: "Receipt", mode: "live", behavior: "actuator" },
+  ];
+  const board = buildSystemsHealth(ont, adapters, new Map([["Order", 5], ["Receipt", 7]]));
+
+  it("reports the type for every system in one payload, not just one", () => {
+    expect(tbl(sys(board, "Sales"), "Order").behavior).toBe("sync");
+    expect(tbl(sys(board, "Billing"), "Receipt").behavior).toBe("actuator");
+  });
+
+  it("reports null where no adapter is wired", () => {
+    expect(tbl(sys(board, "Sales"), "Invoice").behavior).toBeNull();
+  });
+
+  it("reports null for a connector that predates the type, never a guess", () => {
+    const b = buildSystemsHealth(
+      ont,
+      [{ id: "untyped", boundedContext: "Sales", targetEntity: "Order", mode: "live" }],
+      new Map([["Order", 1]]),
+    );
+    expect(tbl(sys(b, "Sales"), "Order").behavior).toBeNull();
+  });
+});

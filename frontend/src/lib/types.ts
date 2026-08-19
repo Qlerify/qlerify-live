@@ -236,7 +236,7 @@ export type OrgMapping = {
 }
 
 export type ExpField = { name: string; dataType?: string }
-export type ExpTable = { name: string; kind: string; status: string; fields?: ExpField[] }
+export type ExpTable = { name: string; kind: string; status: string; behavior?: AdapterBehavior | null; fields?: ExpField[] }
 export type ExpSystem = { name: string; tables: ExpTable[] }
 export type ExpHealth = { gaps: number; systems: ExpSystem[] }
 

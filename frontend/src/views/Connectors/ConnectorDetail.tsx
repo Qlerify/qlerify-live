@@ -7,14 +7,16 @@ import {
   connDelete,
   connExport,
   connRepoint,
+  connSaveBehavior,
   connSaveDateRoles,
   connTest,
   connVerify,
   connectorName,
 } from "@/lib/connectorsData.ts"
-import { nothingWrittenText, performsActions, testHint, testLabel } from "@/lib/connectorBehavior.ts"
-import type { Connector } from "@/lib/types.ts"
+import { BEHAVIORS, behaviorVerb, nothingWrittenText, performsActions, testHint, testLabel } from "@/lib/connectorBehavior.ts"
+import type { AdapterBehavior, Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
+import { BehaviorBadge } from "./BehaviorBadge.tsx"
 import { CodeEditor } from "./CodeEditor.tsx"
 import { RuleEditor } from "./RuleEditor.tsx"
 import { ManifestSections } from "./ManifestSections.tsx"
@@ -102,6 +104,72 @@ const Diagnostics = ({ c }: { c: Connector }) => {
   )
 }
 
+const BehaviorPanel = ({ c }: { c: Connector }) => {
+  const connBusy = useStore((s) => s.connBusy)
+  const current = c.behavior ?? "sync"
+  // Stamped with the connector it belongs to, so selecting a different one falls
+  // back to that connector's saved type without resetting state during render.
+  const [pending, setPending] = useState<{ id: string; behavior: AdapterBehavior } | null>(null)
+  const picked = pending?.id === c.id ? pending.behavior : current
+
+  const losingProtection = current === "actuator" && picked !== "actuator"
+  const gainingProtection = current !== "actuator" && picked === "actuator"
+
+  return (
+    <div className="mt-5 rounded-lg border border-stone-200 p-4">
+      <div className="text-sm font-medium text-stone-800">Type</div>
+      <div className="text-xs text-stone-500 mt-0.5">
+        What re-running this connector costs. It decides whether a model rebuild is allowed to run it again, and
+        whether the read-only buttons above will execute its code.
+      </div>
+      <div className="flex items-center gap-2 mt-3 flex-wrap">
+        <select
+          value={picked}
+          onChange={(e) => setPending({ id: c.id, behavior: e.target.value as AdapterBehavior })}
+          disabled={connBusy}
+          className="text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white disabled:opacity-40"
+        >
+          {BEHAVIORS.map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-stone-500">{behaviorVerb(picked)}</span>
+        <button
+          onClick={() => connSaveBehavior(picked)}
+          disabled={connBusy || picked === current}
+          className="ml-auto px-4 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium"
+        >
+          Save type
+        </button>
+      </div>
+      {losingProtection && (
+        <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+          This connector performs actions in {c.boundedContext}. Changing it away from <b>actuator</b> removes its
+          protection: a model rebuild will run it again, and the test button will execute it for real.
+        </div>
+      )}
+      {gainingProtection && (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 space-y-1">
+          <div>
+            Marking it <b>actuator</b> stops model rebuilds re-running it, and the test button goes away — an actuator
+            has no read-only pull. Its rows stay the only record that its actions happened.
+          </div>
+          {c.hasCode && (
+            <div>
+              This changes what the platform does, not what the code does. Existing code written for a read-only
+              connector won&apos;t have the actuator disciplines — checking the other system before acting, bounding
+              actions by the run limit, exporting a read-only <code>probe()</code>. Without that probe, Verify can
+              only report &quot;not checked&quot;. Ask the assistant to rebuild it if it should act safely.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const DetailsBody = ({ c }: { c: Connector }) => {
   const { connectors, connBusy } = useStore()
   const [target, setTarget] = useState(c.targetEntity)
@@ -137,6 +205,8 @@ const DetailsBody = ({ c }: { c: Connector }) => {
       </div>
 
       <ManifestSections connectorId={c.id} />
+
+      <BehaviorPanel c={c} />
 
       <Diagnostics c={c} />
 
@@ -312,6 +382,7 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
           >
             {orphan ? "orphaned" : "active"}
           </span>
+          <BehaviorBadge behavior={c.behavior} />
         </div>
         <div className="flex items-center gap-3 mt-1 text-[11px]">
           {name !== c.id && (

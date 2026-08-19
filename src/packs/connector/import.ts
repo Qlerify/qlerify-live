@@ -26,7 +26,7 @@ import { listSidecars, writeSidecar } from "../sidecar.js";
 import { createConnectorAdapter, resolveTargetSchema } from "../adapters/connector.js";
 import { writeModule, writeRuleFile, installDeps, scanImports, type InstallResult } from "./runtime.js";
 import { appendNote } from "./journal.js";
-import { connectorInWorkflow, regenerateConnectorSummary } from "./orchestrate.js";
+import { BEHAVIORS, connectorInWorkflow, regenerateConnectorSummary } from "./orchestrate.js";
 import { ruleScan } from "./rules.js";
 import {
   CONNECTOR_EXPORT_FORMAT, CONNECTOR_EXPORT_VERSION,
@@ -259,8 +259,13 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
   const lim = limits(src.limits);
   const discovered = discoveredFields(src.discoveredFields);
   const discoveredAtStr = str(src.discoveredAt);
+  // An unrecognised value is dropped rather than trusted: an import is
+  // attacker-influenced input, and a bad string here would read as "not an
+  // actuator" everywhere downstream.
+  const behavior = BEHAVIORS.find((b) => b === src.behavior);
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: str(src.boundedContext) ?? "", targetEntity: target, targetKind,
+    ...(behavior ? { behavior } : {}),
     phase: code ? "built" : "draft", mode: provMode(src.mode),
     workflowId: ix.workflowId, organizationId: ix.organizationId,
     ...(instructions !== undefined ? { instructions } : {}),

@@ -4,6 +4,7 @@ import { useStore } from "@/lib/store.ts"
 import { connExportAll, connImportFile, connectorName, loadConnectors } from "@/lib/connectorsData.ts"
 import type { Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
+import { BehaviorBadge } from "./BehaviorBadge.tsx"
 import { ConnectorDetail } from "./ConnectorDetail.tsx"
 
 const ListRow = ({ c, selected, onSelect }: { c: Connector; selected: boolean; onSelect: () => void }) => (
@@ -14,6 +15,7 @@ const ListRow = ({ c, selected, onSelect }: { c: Connector; selected: boolean; o
     <div className="flex items-center gap-2">
       <StatusDot status={c.status} />
       <span className="text-sm font-medium text-stone-800 truncate">{connectorName(c)}</span>
+      <BehaviorBadge behavior={c.behavior} className="ml-auto" />
     </div>
     <div className="text-[11px] text-stone-500 mt-0.5 truncate">
       {c.boundedContext} → {c.targetEntity}

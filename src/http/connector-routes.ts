@@ -21,6 +21,7 @@ import {
   connectorsInWorkflow, connectorForTarget, connectorOwner, connectorInfo,
   regenerateConnectorSummary, removeConnector, setConnectorDateRoles,
   readConnectorCode, saveConnectorCode, eventsForTarget,
+  BEHAVIORS, setConnectorBehavior,
 } from "../packs/connector/orchestrate.js";
 import { resolveTargetSchema, createConnectorAdapter } from "../packs/adapters/connector.js";
 import { registerAdapter } from "../packs/registry.js";
@@ -319,6 +320,27 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       const discoveryNote = droppedDiscovery ? ` The discovered source-field sample was dropped — re-run discovery against the new target.` : "";
       appendNote(id, "repointed", `Re-pointed from ${previous} to ${target}.${ruleNote}${discoveryNote}`);
       return { id, target, previousTarget: previous, targetKind, droppedRules: droppedRules.length };
+    } catch (err) {
+      if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
+      throw err;
+    }
+  });
+
+  // Reclassify what re-running this connector costs. `connector.build` rather than
+  // `connector.edit`: the same class of consequence as the schedule route, since
+  // marking something NOT an actuator lets a model rebuild fire its writes again.
+  app.post("/api/connectors/:id/behavior", async (req, reply) => {
+    try {
+      await guardData("connector.build");
+      const wf = currentWorkflowId();
+      const id = String((req.params as any).id ?? "");
+      const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
+      if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
+      const behavior = String((req.body as any)?.behavior ?? "");
+      if (!(BEHAVIORS as readonly string[]).includes(behavior)) {
+        return reply.code(400).send({ error: "BAD_BEHAVIOR", message: `behavior must be one of: ${BEHAVIORS.join(", ")}` });
+      }
+      return { id, behavior: setConnectorBehavior(id, behavior as any) };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });
       throw err;

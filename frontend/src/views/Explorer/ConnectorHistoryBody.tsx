@@ -1,4 +1,5 @@
 import { NOTE_BADGE, connectorName } from "@/lib/connectorsData.ts"
+import { BehaviorBadge } from "@/views/Connectors/BehaviorBadge.tsx"
 import { kindOf } from "@/lib/explorerData.ts"
 import { formatVersionDate } from "@/lib/modelData.ts"
 import { useStore } from "@/lib/store.ts"
@@ -12,7 +13,10 @@ const ConnectorCard = ({ a, bc }: { a: ExpAdapter; bc: string }) => {
   const notes = (a.doc?.notes || []).slice(-6).reverse()
   return (
     <div className="rounded-md border border-stone-200 p-2.5">
-      <div className="text-sm font-medium text-stone-800">{connectorName(a, bc)}</div>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium text-stone-800">{connectorName(a, bc)}</span>
+        <BehaviorBadge behavior={a.behavior} />
+      </div>
       <div className="text-xs text-stone-500 mt-0.5">
         {a.kind} · {a.mode} → {a.targetEntity}
       </div>

@@ -12,7 +12,8 @@
 
 import { getOntology, type Ontology } from "../ontology/model.js";
 import { entitiesForBc, valueObjectsForBc } from "../ontology/bc-helpers.js";
-import type { ProvMode, SourceAdapter } from "../packs/types.js";
+import type { AdapterBehavior, ProvMode, SourceAdapter } from "../packs/types.js";
+import { readSidecar } from "../packs/sidecar.js";
 import { listOwnedAdapters } from "../packs/ownership.js";
 import * as store from "./projection-store.js";
 
@@ -29,6 +30,10 @@ interface TableHealth {
   mode: ProvMode | null;
   /** The adapter whose status this row reflects, or null when none is wired. */
   adapterId: string | null;
+  /** That adapter's type. Carried here because this payload spans EVERY system,
+   * while the per-system adapter list does not — a table fed by an actuator has
+   * to be flagged even when a different system is selected. */
+  behavior: AdapterBehavior | null;
   /** Pre-formatted right-aligned detail, e.g. "live · 1,200 rows". */
   detail: string;
 }
@@ -49,7 +54,12 @@ interface SystemsHealth {
 
 /** Just the adapter fields the board needs — SourceAdapter is assignable to it,
  * and tests can pass plain objects. */
-export type AdapterRef = Pick<SourceAdapter, "id" | "boundedContext" | "targetEntity" | "mode">;
+/** What the health board needs of an adapter. `behavior` is NOT on SourceAdapter
+ * (it lives on the sidecar), so the async orchestrator resolves it and passes it
+ * in — keeping buildSystemsHealth free of I/O. */
+export type AdapterRef = Pick<SourceAdapter, "id" | "boundedContext" | "targetEntity" | "mode"> & {
+  behavior?: AdapterBehavior | null;
+};
 
 const MODE_RANK: Record<ProvMode, number> = { live: 3, recorded: 2, simulated: 1 };
 
@@ -66,18 +76,19 @@ function classify(
 ): TableHealth {
   const wired = adapters.filter((a) => a.boundedContext === bc && a.targetEntity === name);
   if (wired.length === 0) {
-    return { name, kind, status: "no_adapter", rows, mode: null, adapterId: null, detail: "no adapter" };
+    return { name, kind, status: "no_adapter", rows, mode: null, adapterId: null, behavior: null, detail: "no adapter" };
   }
   // Several adapters can target one table; the highest mode wins the dot.
   const top = wired.reduce((best, a) => (MODE_RANK[a.mode] > MODE_RANK[best.mode] ? a : best));
+  const behavior = top.behavior ?? null;
   if (rows === 0) {
-    return { name, kind, status: "wired_empty", rows: 0, mode: top.mode, adapterId: top.id, detail: "adapter set · no data" };
+    return { name, kind, status: "wired_empty", rows: 0, mode: top.mode, adapterId: top.id, behavior, detail: "adapter set · no data" };
   }
   if (top.mode === "live") {
-    return { name, kind, status: "live", rows, mode: "live", adapterId: top.id, detail: `live · ${fmt(rows)} rows` };
+    return { name, kind, status: "live", rows, mode: "live", adapterId: top.id, behavior, detail: `live · ${fmt(rows)} rows` };
   }
   // simulated or recorded — real rows, but synthetic/replayed (the ◐ dot).
-  return { name, kind, status: "simulated", rows, mode: top.mode, adapterId: top.id, detail: `${top.mode} · ${fmt(rows)} rows` };
+  return { name, kind, status: "simulated", rows, mode: top.mode, adapterId: top.id, behavior, detail: `${top.mode} · ${fmt(rows)} rows` };
 }
 
 /** PURE: classify every bounded context's entities + value objects into the
@@ -104,7 +115,13 @@ export function buildSystemsHealth(
  * build the board. Used by GET /api/bc/health. */
 export async function computeSystemsHealth(): Promise<SystemsHealth> {
   const ont = getOntology();
-  const adapters = listOwnedAdapters(); // tenant-scoped: never surface another tenant's connector ids/modes
+  // One read per OWNED adapter, not per table (several tables can share one) and
+  // not the whole sidecar directory (which spans every tenant). This runs on
+  // every GET /api/bc/health, so the builder itself stays free of it.
+  const adapters: AdapterRef[] = listOwnedAdapters().map((a) => ({
+    id: a.id, boundedContext: a.boundedContext, targetEntity: a.targetEntity, mode: a.mode,
+    behavior: readSidecar(a.id)?.behavior ?? null,
+  }));
   const rowCounts = new Map<string, number>();
   for (const bc of ont.boundedContexts) {
     for (const t of [...entitiesForBc(ont, bc), ...valueObjectsForBc(ont, bc)]) {

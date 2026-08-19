@@ -26,7 +26,7 @@ export const CONNECTOR_EXPORT_VERSION = 1;
  * absent. */
 export type ExportedConnectorConfig = Pick<AdapterConfig,
   | "id" | "kind" | "boundedContext" | "targetEntity" | "targetKind"
-  | "behavior" | "phase" | "mode" | "instructions" | "deps" | "dateRoles"
+  | "behavior" | "targetSystem" | "phase" | "mode" | "instructions" | "deps" | "dateRoles"
   | "fieldMap" | "limits" | "endpoint" | "connectionOptionId"
   | "discoveredFields" | "discoveredAt">;
 
@@ -71,6 +71,7 @@ export function exportConnectorEntry(cfg: AdapterConfig): ConnectorExportEntry {
     // Without this an exported actuator returns untyped, and untyped means sync
     // — the import would silently strip its protection.
     behavior: cfg.behavior,
+    targetSystem: cfg.targetSystem,
     phase: cfg.phase,
     mode: cfg.mode,
     instructions: cfg.instructions,

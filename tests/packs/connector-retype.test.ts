@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
 import { runTool, TOOLS } from "../../src/chat/tools.js";
 import { setConnectorBehavior } from "../../src/packs/connector/orchestrate.js";
-import { performsActions } from "../../src/packs/behavior.js";
+import { assertActionsConfirmed, performsActions, systemName } from "../../src/packs/behavior.js";
 import { reingestAll } from "../../src/packs/ingest.js";
 import { registerAdapter, unregisterAdapter, getAdapter } from "../../src/packs/registry.js";
 import { readSidecar, writeSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
@@ -189,7 +189,9 @@ describe("set_connector_behavior (chat)", () => {
   it("is offered to the model with the arguments it needs", () => {
     const tool = TOOLS.find((t) => t.name === "set_connector_behavior");
     expect(tool).toBeTruthy();
-    expect(Object.keys(tool!.input_schema.properties ?? {}).sort()).toEqual(["adapterId", "behavior", "confirmed"]);
+    expect(Object.keys(tool!.input_schema.properties ?? {}).sort()).toEqual(
+      ["adapterId", "behavior", "confirmed", "targetSystem"],
+    );
     expect(tool!.input_schema.required).toContain("confirmed");
   });
 
@@ -209,6 +211,35 @@ describe("set_connector_behavior (chat)", () => {
     expect(r.behavior).toBe("actuator");
     expect(r.note).toMatch(/skip it/i);
     expect(readSidecar(id)?.behavior).toBe("actuator");
+  });
+
+  // There is no UI for this, so if the assistant does not set it nobody does,
+  // and every warning keeps naming the bounded context instead of the product.
+  it("names the product it writes to, so warnings stop saying the bounded context", async () => {
+    const id = `chat-sys-${SFX}`;
+    spyAdapter(id, "sync", []);
+    const r = parse(await asBuilder(() => runTool("set_connector_behavior", {
+      adapterId: id, behavior: "actuator", targetSystem: "Slack", confirmed: true,
+    })));
+    expect(r.targetSystem).toBe("Slack");
+    expect(readSidecar(id)?.targetSystem).toBe("Slack");
+    // The gate is what the operator actually reads: it must say Slack, not the
+    // bounded context this connector happens to sit under.
+    expect(() => assertActionsConfirmed(readSidecar(id)!, "a dry run", undefined)).toThrow(/Slack/);
+  });
+
+  it("clears the name when handed an empty string", async () => {
+    const id = `chat-sys-clear-${SFX}`;
+    spyAdapter(id, "actuator", []);
+    await asBuilder(() => runTool("set_connector_behavior", { adapterId: id, behavior: "actuator", targetSystem: "Slack", confirmed: true }));
+    await asBuilder(() => runTool("set_connector_behavior", { adapterId: id, behavior: "actuator", targetSystem: "", confirmed: true }));
+    expect(readSidecar(id)?.targetSystem).toBeUndefined();
+  });
+
+  it("falls back to the bounded context when no product is recorded", () => {
+    expect(systemName({ boundedContext: "Hubspot" })).toBe("Hubspot");
+    expect(systemName({ boundedContext: "Notifications", targetSystem: "Slack" })).toBe("Slack");
+    expect(systemName({ boundedContext: "Notifications", targetSystem: "   " })).toBe("Notifications");
   });
 
   it("reports the current type through get_adapter_config", async () => {

@@ -17,7 +17,7 @@ import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js"
 import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
   connectorInfo, readConnectorCode, removeConnector, discoverSourceFields,
-  setConnectorBehavior,
+  setConnectorBehavior, setConnectorTargetSystem,
 } from "../packs/connector/orchestrate.js";
 import { fetchDocs } from "./fetch-docs.js";
 import { readDoc, connectorChatId } from "../packs/connector/journal.js";
@@ -355,6 +355,11 @@ export const TOOLS: Anthropic.Tool[] = [
           description:
             "What running this connector COSTS. sync (default) = it mirrors a system of record; re-running is free. generator = it computes its rows (an AI call, a paid API per row); re-running costs money. actuator = it PERFORMS AN ACTION in another system (creates a record there, sends a message) and then lands the result; re-running changes the outside world. extractor = it reads an unstructured source (a document, a sheet) and interprets it with AI; re-running is safe but pays for the extraction again. If the connector will write anything anywhere, it is actuator — ASK the user to confirm that before creating, never infer it silently.",
         },
+        targetSystem: {
+          type: "string",
+          description:
+            "The PRODUCT this connector talks to (\"Slack\", \"HubSpot\", \"Stripe\"), when the bounded context is not already its name. Every warning names the system it is about to write to, and the bounded context is the MODEL's word for it — a Slack connector modelled under \"Notifications\" would otherwise warn about writing to \"Notifications\". There is no UI for this, so it is on you: set it whenever you can tell what the product is, which you usually can from the credential or the URL you were given. Omit when the bounded context IS the product name.",
+        },
         confirmed: { type: "boolean" },
       },
       required: ["boundedContext", "target", "confirmed"],
@@ -520,6 +525,11 @@ export const TOOLS: Anthropic.Tool[] = [
       properties: {
         adapterId: { type: "string" },
         behavior: { type: "string", enum: ["sync", "generator", "actuator", "extractor"] },
+        targetSystem: {
+          type: "string",
+          description:
+            "Optional. The PRODUCT it writes to (\"Slack\"), when the bounded context is the model's word rather than the product's. Pass an empty string to clear it.",
+        },
         confirmed: { type: "boolean" },
       },
       required: ["adapterId", "behavior", "confirmed"],
@@ -781,6 +791,7 @@ function handleGetAdapterConfig(adapterId: string) {
   return {
     id: cfg.id, kind: cfg.kind, boundedContext: cfg.boundedContext, targetEntity: cfg.targetEntity,
     behavior: cfg.behavior ?? "sync",
+    targetSystem: cfg.targetSystem ?? null,
     mode: cfg.mode, endpoint: cfg.endpoint ?? null, credentialsRef: cfg.credentialsRef ?? null,
     hasBody: !!cfg.bodyPath, bodyPath: cfg.bodyPath ?? null,
     schedule: cfg.schedule ?? null,
@@ -958,6 +969,7 @@ function handleCreateConnector(args: Record<string, any>) {
     target,
     id: typeof args.id === "string" ? args.id : undefined,
     behavior: behavior as AdapterBehavior | undefined,
+    targetSystem: typeof args.targetSystem === "string" ? args.targetSystem : undefined,
   });
   return ok({
     created: true, adapterId: cfg.id, boundedContext: cfg.boundedContext, target: cfg.targetEntity, targetKind: cfg.targetKind,
@@ -1169,10 +1181,14 @@ function handleSetConnectorBehavior(args: Record<string, any>) {
   const was = adapterCfg(id)?.behavior ?? "sync";
   try {
     const behavior = setConnectorBehavior(id, args.behavior);
+    const targetSystem = typeof args.targetSystem === "string"
+      ? setConnectorTargetSystem(id, args.targetSystem)
+      : (adapterCfg(id)?.targetSystem ?? null);
     return ok({
       adapterId: id,
       was,
       behavior,
+      targetSystem,
       note:
         behavior === "actuator"
           ? "Typed as an actuator: model rebuilds now skip it, and the dry-run and field-discovery tools refuse rather than performing its action. This changed what the PLATFORM does, not what the code does — code written for a read-only connector still lacks the actuator disciplines (check the other system before acting, bound actions by ctx.limit, export a read-only probe()). Tell the user, and offer a build_connector rebuild so its code matches its type."

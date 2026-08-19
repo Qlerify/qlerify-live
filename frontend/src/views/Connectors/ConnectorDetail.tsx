@@ -13,7 +13,7 @@ import {
   connVerify,
   connectorName,
 } from "@/lib/connectorsData.ts"
-import { BEHAVIORS, behaviorVerb, nothingWrittenText, performsActions, testHint, testLabel } from "@/lib/connectorBehavior.ts"
+import { BEHAVIORS, behaviorVerb, nothingWrittenText, performsActions, systemName, testHint, testLabel } from "@/lib/connectorBehavior.ts"
 import type { AdapterBehavior, Connector } from "@/lib/types.ts"
 import { StatusDot } from "./StatusDot.tsx"
 import { BehaviorBadge } from "./BehaviorBadge.tsx"
@@ -146,7 +146,7 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
       </div>
       {losingProtection && (
         <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-          This connector performs actions in {c.boundedContext}. Changing it away from <b>actuator</b> removes its
+          This connector performs actions in {systemName(c)}. Changing it away from <b>actuator</b> removes its
           protection: a model rebuild will run it again, and the test button will execute it for real.
         </div>
       )}

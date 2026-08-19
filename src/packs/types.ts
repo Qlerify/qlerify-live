@@ -132,6 +132,13 @@ export interface AdapterConfig {
   id: string;
   kind: string;
   behavior?: AdapterBehavior;
+  /** The product this connector actually talks to ("Slack", "HubSpot"), when it
+   * differs from the bounded context. Every warning names the system it is about
+   * to write to, and the bounded context is the MODEL's word for it: a Slack
+   * connector modelled under "Notifications" would warn about writing to
+   * "Notifications". Set by the assistant at build time, which knows the URL and
+   * the credential; absent = the bounded context is already the right name. */
+  targetSystem?: string;
   boundedContext: string;
   targetEntity: string;
   phase: AdapterPhase;

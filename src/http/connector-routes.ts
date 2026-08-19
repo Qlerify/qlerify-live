@@ -178,6 +178,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           mode: cfg.mode,
           phase: cfg.phase,
           behavior: cfg.behavior ?? "sync",
+          targetSystem: cfg.targetSystem ?? null,
           status: live ? "active" : "orphaned",
           hasCode: info?.hasCode ?? false,
           credentialKeys: info?.credentialKeys ?? [],

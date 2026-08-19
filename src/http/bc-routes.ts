@@ -56,6 +56,7 @@ function serializeAdapter(a: ReturnType<typeof listAdapters>[number]) {
     targetEntity: a.targetEntity,
     mode: a.mode,
     behavior: readSidecar(a.id)?.behavior ?? "sync",
+    targetSystem: readSidecar(a.id)?.targetSystem ?? null,
     doc: readDoc(a.id),
   };
 }

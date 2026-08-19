@@ -247,6 +247,7 @@ export type ExpAdapter = {
   targetEntity: string
   boundedContext?: string
   behavior?: AdapterBehavior
+  targetSystem?: string | null
   doc?: { summary?: string; notes?: { kind: string; text: string; at: string }[] }
 }
 
@@ -367,6 +368,7 @@ export type Connector = {
   targetKind: string
   mode: string
   behavior?: AdapterBehavior
+  targetSystem?: string | null
   rowCount: number
   hasCode: boolean
   credentialKeys: string[]

@@ -1,5 +1,5 @@
 import { showOverlay, hideOverlay } from "@/components/Overlay.tsx"
-import { pullConfirmText } from "@/lib/connectorBehavior.ts"
+import { performsActions, pullConfirmText, systemName } from "@/lib/connectorBehavior.ts"
 import { api } from "./api.ts"
 import { formatDuration } from "./format.ts"
 import { useStore } from "./store.ts"
@@ -239,9 +239,15 @@ export const clearRows = async () => {
   if (e.busy || !e.entity || !e.system) {
     return
   }
+  // On an actuator these rows are the record that its actions already happened,
+  // so deleting them is also deleting what stops the next run repeating them.
+  const runner = adaptersForEntity(e)[0] ?? null
+  const acts = performsActions(runner)
+    ? `\n\nThese rows record actions "${runner!.id}" already performed in ${systemName({ ...runner!, boundedContext: runner!.boundedContext || e.system })}. Deleting them means its next run performs them again.`
+    : ""
   if (
     !confirm(
-      `Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table AND the simulated events derived from it. Connectors are kept.`,
+      `Delete ALL rows in table "${e.entity}"?\n\nThis clears the ingested data for this table AND the simulated events derived from it. Connectors are kept.${acts}`,
     )
   ) {
     return

@@ -29,6 +29,23 @@ export const formatVersionDate = (iso?: string): string => {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
 }
 
+// What a rebuild KEPT rather than re-ingested. An actuator's rows record actions
+// it performed elsewhere, and nothing re-runs it, so carrying them across is the
+// difference between remembering and repeating — say so rather than leave it silent.
+type ApplyResponse = { rebuild?: RebuildInfo; preserved?: Record<string, number>; orphaned?: string[] }
+
+export const preservedSummaryText = (preserved?: Record<string, number>, orphaned?: string[]): string => {
+  const kept = Object.entries(preserved || {})
+  const parts: string[] = []
+  if (kept.length) {
+    parts.push(` Kept ${kept.map(([t, n]) => `${n} row(s) in ${t}`).join(", ")} — they record actions already performed elsewhere.`)
+  }
+  if (orphaned?.length) {
+    parts.push(` ${orphaned.join(", ")} left standing: no longer in the model, but its rows can't be rebuilt.`)
+  }
+  return parts.join("")
+}
+
 // One-line tail describing the post-rebuild re-ingest + derive. Empty when the
 // workflow has no connectors — the rebuilt tables just start empty.
 export const rebuildSummaryText = (rebuild?: RebuildInfo): string => {
@@ -97,10 +114,10 @@ export const reloadWorkflowModel = async () => {
   s.set({ modelBusy: true })
   showOverlay("Reloading model…")
   try {
-    const res = await api<{ rebuild?: RebuildInfo }>("/v1/workflow/model/reload", { method: "POST", body: "{}" })
+    const res = await api<ApplyResponse>("/v1/workflow/model/reload", { method: "POST", body: "{}" })
     useStore.getState().showToast({
       ok: true,
-      text: "Reloaded the latest model from the source link — rebuilt this workflow." + rebuildSummaryText(res.rebuild),
+      text: "Reloaded the latest model from the source link — rebuilt this workflow." + rebuildSummaryText(res.rebuild) + preservedSummaryText(res.preserved, res.orphaned),
     })
     await afterModelChange()
   } catch (e) {
@@ -120,13 +137,13 @@ export const restoreWorkflowVersion = async (versionId: string) => {
   s.set({ modelBusy: true })
   showOverlay("Restoring model…")
   try {
-    const res = await api<{ rebuild?: RebuildInfo }>("/v1/workflow/model/restore", {
+    const res = await api<ApplyResponse>("/v1/workflow/model/restore", {
       method: "POST",
       body: JSON.stringify({ versionId }),
     })
     useStore.getState().showToast({
       ok: true,
-      text: "Restored that version — rebuilt this workflow." + rebuildSummaryText(res.rebuild),
+      text: "Restored that version — rebuilt this workflow." + rebuildSummaryText(res.rebuild) + preservedSummaryText(res.preserved, res.orphaned),
     })
     await afterModelChange()
   } catch (e) {
@@ -142,14 +159,14 @@ export const applyWorkflowModel = async (payload: Record<string, string>) => {
   s.set({ projModelBusy: true, projModelErr: null })
   showOverlay("Loading model…")
   try {
-    const res = await api<{ rebuild?: RebuildInfo }>("/v1/workflow/model", {
+    const res = await api<ApplyResponse>("/v1/workflow/model", {
       method: "PUT",
       body: JSON.stringify(payload),
     })
     useStore.getState().set({ projModelOpen: false, projModelBusy: false })
     useStore.getState().showToast({
       ok: true,
-      text: "Workflow model updated — rebuilt this workflow." + rebuildSummaryText(res.rebuild),
+      text: "Workflow model updated — rebuilt this workflow." + rebuildSummaryText(res.rebuild) + preservedSummaryText(res.preserved, res.orphaned),
     })
     await afterModelChange()
     return true

@@ -2,9 +2,16 @@ import { DomainError } from "../errors.js";
 import type { AdapterBehavior, AdapterConfig } from "./types.js";
 
 type BehaviorOf = Pick<AdapterConfig, "behavior">;
-type GateTarget = Pick<AdapterConfig, "id" | "boundedContext" | "behavior">;
+type Named = Pick<AdapterConfig, "boundedContext" | "targetSystem">;
+type GateTarget = Pick<AdapterConfig, "id" | "boundedContext" | "targetSystem" | "behavior">;
 
 export const performsActions = (cfg: BehaviorOf | null | undefined): boolean => cfg?.behavior === "actuator";
+
+/** What to CALL the system a connector talks to. The bounded context is the
+ * model's word for it, which is often the process step rather than the product —
+ * a Slack connector modelled under "Notifications" must still warn about writing
+ * to Slack. */
+export const systemName = (cfg: Named): string => cfg.targetSystem?.trim() || cfg.boundedContext;
 
 const VERB: Record<AdapterBehavior, string> = {
   sync: "reads a system of record",
@@ -23,7 +30,7 @@ export function assertActionsConfirmed(cfg: GateTarget, what: string, confirmed:
     return;
   }
   throw new DomainError(
-    `"${cfg.id}" performs actions in ${cfg.boundedContext}, so ${what} would create records there for real — ` +
+    `"${cfg.id}" performs actions in ${systemName(cfg)}, so ${what} would create records there for real — ` +
       `an actuator has no read-only pull. Verify the connection to check it is reachable, or confirm the actions to run it on purpose.`,
   );
 }

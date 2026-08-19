@@ -110,6 +110,8 @@ interface CreateConnectorInput {
   target: string;
   id?: string;
   behavior?: AdapterBehavior;
+  /** The product it talks to, when the bounded context is not already its name. */
+  targetSystem?: string;
 }
 
 /** Bootstrap a connector for a system + kind. No code yet — build it next. */
@@ -133,6 +135,7 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: bc, targetEntity: input.target, targetKind,
     behavior: input.behavior ?? "sync",
+    ...(input.targetSystem?.trim() ? { targetSystem: input.targetSystem.trim().slice(0, 60) } : {}),
     phase: "draft", mode: "live", workflowId, organizationId,
   };
   writeSidecar(cfg);
@@ -478,6 +481,26 @@ export function setConnectorBehavior(id: string, behavior: AdapterBehavior): Ada
         : "";
   appendNote(id, "note", `Type changed from ${from} to ${behavior}.${consequence}`);
   return behavior;
+}
+
+/** Name the product this connector talks to, when the bounded context is the
+ * model's word rather than the product's. Deliberately has no UI: the assistant
+ * knows the URL and the credential it was handed, so it fills this in without
+ * making the operator think about it. Empty clears it. */
+export function setConnectorTargetSystem(id: string, name: string | null): string | null {
+  const cfg = readSidecar(id);
+  if (!cfg) throw new Error(`no connector "${id}"`);
+  const clean = (name ?? "").trim().slice(0, 60) || null;
+  if ((cfg.targetSystem ?? null) === clean) return clean;
+  const next: AdapterConfig = { ...cfg };
+  if (clean) next.targetSystem = clean;
+  else delete next.targetSystem;
+  writeSidecar(next);
+  registerAdapter(createConnectorAdapter(next));
+  appendNote(id, "note", clean
+    ? `Writes to ${clean}. Warnings and buttons now name it instead of the "${cfg.boundedContext}" bounded context.`
+    : `Cleared the system name; warnings fall back to the "${cfg.boundedContext}" bounded context.`);
+  return clean;
 }
 
 // --- Source-field discovery (the introspect() seam, made real) ---------------

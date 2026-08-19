@@ -71,21 +71,28 @@ export const BEHAVIORS: readonly AdapterBehavior[] = ["sync", "generator", "actu
 
 export const performsActions = (c: { behavior?: AdapterBehavior } | null | undefined) => c?.behavior === "actuator"
 
-export const pullLabel = (c: Pick<Connector, "behavior" | "boundedContext">) =>
-  wordingFor(c.behavior).pull(c.boundedContext)
+/** What to CALL the system this connector writes to. The bounded context is the
+ * model's word for it, often the process step rather than the product — a Slack
+ * connector modelled under "Notifications" must still say Slack. Set by the
+ * assistant when it builds the connector; there is no field for it here. */
+export const systemName = (c: { boundedContext?: string | null; targetSystem?: string | null }) =>
+  c.targetSystem?.trim() || c.boundedContext || "the source system"
+
+export const pullLabel = (c: Pick<Connector, "behavior" | "boundedContext" | "targetSystem">) =>
+  wordingFor(c.behavior).pull(systemName(c))
 
 export const testLabel = (c: Pick<Connector, "behavior">) => wordingFor(c.behavior).test
 
-export const testHint = (c: Pick<Connector, "behavior" | "boundedContext">) =>
-  wordingFor(c.behavior).testHint(c.boundedContext)
+export const testHint = (c: Pick<Connector, "behavior" | "boundedContext" | "targetSystem">) =>
+  wordingFor(c.behavior).testHint(systemName(c))
 
-export const scheduleTickText = (c: Pick<Connector, "behavior" | "boundedContext">) =>
-  wordingFor(c.behavior).tick(c.boundedContext)
+export const scheduleTickText = (c: Pick<Connector, "behavior" | "boundedContext" | "targetSystem">) =>
+  wordingFor(c.behavior).tick(systemName(c))
 
 /** The whole confirm() body for running a connector, warning first so it is read
  * before the mechanics. */
-export const pullConfirmText = (c: Pick<Connector, "id" | "behavior" | "boundedContext">) => {
-  const warning = wordingFor(c.behavior).pullWarning(c.boundedContext)
+export const pullConfirmText = (c: Pick<Connector, "id" | "behavior" | "boundedContext" | "targetSystem">) => {
+  const warning = wordingFor(c.behavior).pullWarning(systemName(c))
   const mechanics =
     "New rows are inserted; changed rows are updated in place; unchanged rows are skipped."
   const head = performsActions(c)
@@ -96,5 +103,5 @@ export const pullConfirmText = (c: Pick<Connector, "id" | "behavior" | "boundedC
 
 /** Shown where the result of a suppressed-write run is reported. An actuator's
  * run wrote nothing HERE, but it did act over there. */
-export const nothingWrittenText = (c: Pick<Connector, "behavior" | "boundedContext">) =>
-  performsActions(c) ? `nothing landed here — the actions in ${c.boundedContext} were real` : "nothing written"
+export const nothingWrittenText = (c: Pick<Connector, "behavior" | "boundedContext" | "targetSystem">) =>
+  performsActions(c) ? `nothing landed here — the actions in ${systemName(c)} were real` : "nothing written"

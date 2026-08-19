@@ -24,6 +24,24 @@ const RESHAPED = (() => {
   return JSON.stringify(m);
 })();
 
+// A model carrying a VALUE OBJECT. Connectors can target these, and their tables
+// are normally created lazily rather than by applyModelTables — a preserved one
+// still has to be rebuilt and intersected like an entity. `gained` adds a column
+// so the intersect is exercised too.
+const withVo = (gained: boolean) => {
+  const m = JSON.parse(PURCHASE_ORDER_MODEL);
+  const fields: Array<Record<string, unknown>> = [
+    { name: "id", dataType: "string" },
+    { name: "carrier", dataType: "string" },
+  ];
+  if (gained) fields.push({ name: "note", dataType: "string" });
+  m.schemas.valueObjects = { Shipment: { required: ["id"], fields } };
+  m.schemas.entities.PurchaseOrder.fields.push({
+    name: "shipment", relatedEntity: { $ref: "#/schemas/valueObjects/Shipment" },
+  });
+  return JSON.stringify(m);
+};
+
 // A model with no PurchaseOrder at all — the entity-was-removed case.
 const WITHOUT_PO = JSON.stringify({
   version: 1,
@@ -147,6 +165,33 @@ describe("applyModelTables — preserving what a connector already did", () => {
       // no owner has to be back, not merely uncounted.
       const raw = await prisma.$queryRawUnsafe<Array<{ n: number }>>(`SELECT COUNT(*) AS n FROM ${PO_TABLE}`);
       expect(Number(raw[0]!.n)).toBe(2);
+    }));
+
+  it("rebuilds and carries a preserved VALUE OBJECT, not just an entity", () =>
+    model.run(async () => {
+      const before = loadOntologyFromStrings(withVo(false), null);
+      await store.ensureTable(before.valueObject("Shipment")!);
+      await store.insert("Shipment", { id: "shp-1", carrier: "DHL" });
+
+      const after = loadOntologyFromStrings(withVo(true), null);
+      const r = await store.applyModelTables(after, { preserve: ["Shipment"] });
+
+      // Rebuilt like an entity rather than abandoned as "orphaned".
+      expect(r.orphaned).toEqual([]);
+      expect(r.created).toContain("Shipment");
+      expect(r.preserved).toEqual({ Shipment: 1 });
+      const row = (await store.findById("Shipment", "shp-1"))!;
+      expect(row.carrier).toBe("DHL"); // the row survived
+      expect(Object.keys(row)).toContain("note"); // and the shape followed the model
+    }));
+
+  it("leaves an UNpreserved value object to be created lazily, as before", () =>
+    model.run(async () => {
+      const ont = loadOntologyFromStrings(withVo(false), null);
+      await store.ensureTable(ont.valueObject("Shipment")!);
+      const r = await store.applyModelTables(ont);
+      expect(r.created).not.toContain("Shipment");
+      expect(await store.tableExists("Shipment")).toBe(false);
     }));
 
   it("carries a batch bigger than SQLite's parameter ceiling", () =>

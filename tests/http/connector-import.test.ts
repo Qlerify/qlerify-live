@@ -260,6 +260,7 @@ describe("POST /api/connectors/import", () => {
           instructions: 42,                // non-string — buildConnector calls .trim() on this
           limits: { pageSize: "9" },       // non-numeric — dropped
           behavior: "destroyer",           // not an AdapterBehavior — dropped, never trusted
+          targetSystem: "   ",             // whitespace-only — must not land as ""
           dateRoles: { created: 7, updated: "updatedAt" },
         },
         code: null, credentialKeys: [],
@@ -273,6 +274,7 @@ describe("POST /api/connectors/import", () => {
     expect(cfg).not.toHaveProperty("limits");
     expect(cfg.targetKind).toBe("entity");
     expect(cfg).not.toHaveProperty("behavior"); // absent reads as sync, never as a bogus type
+    expect(cfg).not.toHaveProperty("targetSystem"); // absent, not an empty string
     expect(cfg.dateRoles).toEqual({ updated: "updatedAt" });
   });
 

@@ -263,7 +263,7 @@ async function importEntry(entry: ConnectorExportEntry, ix: ImportIndex): Promis
   // attacker-influenced input, and a bad string here would read as "not an
   // actuator" everywhere downstream.
   const behavior = BEHAVIORS.find((b) => b === src.behavior);
-  const targetSystem = str(src.targetSystem)?.slice(0, 60);
+  const targetSystem = str(src.targetSystem)?.trim().slice(0, 60);
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: str(src.boundedContext) ?? "", targetEntity: target, targetKind,
     ...(behavior ? { behavior } : {}),

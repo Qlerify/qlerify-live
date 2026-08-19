@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
 import { runTool, TOOLS } from "../../src/chat/tools.js";
-import { setConnectorBehavior } from "../../src/packs/connector/orchestrate.js";
+import { createConnector, setConnectorBehavior, setConnectorTargetSystem } from "../../src/packs/connector/orchestrate.js";
 import { assertActionsConfirmed, performsActions, systemName } from "../../src/packs/behavior.js";
 import { reingestAll } from "../../src/packs/ingest.js";
 import { registerAdapter, unregisterAdapter, getAdapter } from "../../src/packs/registry.js";
@@ -235,6 +235,35 @@ describe("set_connector_behavior (chat)", () => {
     await asBuilder(() => runTool("set_connector_behavior", { adapterId: id, behavior: "actuator", targetSystem: "", confirmed: true }));
     expect(readSidecar(id)?.targetSystem).toBeUndefined();
   });
+
+  // A whitespace-only name must never persist as "": it would serialize to
+  // clients as an empty string rather than being absent, so "no name recorded"
+  // and "recorded as nothing" would look different while meaning the same.
+  it("treats a whitespace-only name as no name at all", () =>
+    model.run(async () => {
+      const id = `ws-${SFX}`;
+      spyAdapter(id, "actuator", []);
+      setConnectorTargetSystem(id, "   ");
+      expect(readSidecar(id)?.targetSystem).toBeUndefined();
+    }));
+
+  it("does not persist a whitespace-only name given at creation either", () =>
+    model.run(async () => {
+      const created = createConnector({
+        boundedContext: "SAP", target: "PurchaseOrder", id: `ws-create-${SFX}`,
+        behavior: "actuator", targetSystem: "   ",
+      });
+      ids.push(created.id);
+      expect(readSidecar(created.id)?.targetSystem).toBeUndefined();
+    }));
+
+  it("trims a name it does keep", () =>
+    model.run(async () => {
+      const id = `trim-${SFX}`;
+      spyAdapter(id, "actuator", []);
+      setConnectorTargetSystem(id, "  Slack  ");
+      expect(readSidecar(id)?.targetSystem).toBe("Slack");
+    }));
 
   it("falls back to the bounded context when no product is recorded", () => {
     expect(systemName({ boundedContext: "Hubspot" })).toBe("Hubspot");

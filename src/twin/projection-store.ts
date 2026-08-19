@@ -214,7 +214,12 @@ export async function applyModelTables(
 ): Promise<ApplyResult> {
   orgColCache.clear(); // tables are being rebuilt — drop the column-presence cache
   const preserve = new Set(opts.preserve ?? []);
-  const modelled = new Set(ontology.entities.map((e) => e.name));
+  // Value objects count as modelled: applyModelTables normally leaves their
+  // tables to be created lazily by ensureTable, but a PRESERVED one has rows to
+  // put back, so it has to be rebuilt here like an entity — otherwise its shape
+  // would never follow the model.
+  const byName = new Map([...ontology.entities, ...ontology.valueObjects].map((e) => [e.name, e]));
+  const modelled = new Set(byName.keys());
   const existing = await listProjectionTables();
 
   // Read BEFORE any drop — after it there is nothing left to read. Deliberately
@@ -244,6 +249,13 @@ export async function applyModelTables(
   for (const entity of ontology.entities) {
     await prisma.$executeRawUnsafe(createTableSql(entity));
     created.push(entity.name);
+  }
+  // Preserved value objects only — every other VO table stays lazily created,
+  // as before.
+  for (const name of carried.keys()) {
+    if (created.includes(name)) continue;
+    await prisma.$executeRawUnsafe(createTableSql(byName.get(name)!));
+    created.push(name);
   }
 
   // Prisma caches a raw query's COLUMN NAMES against its SQL text, so after a

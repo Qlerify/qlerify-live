@@ -135,7 +135,7 @@ export function createConnector(input: CreateConnectorInput): AdapterConfig {
   const cfg: AdapterConfig = {
     id, kind: "connector", boundedContext: bc, targetEntity: input.target, targetKind,
     behavior: input.behavior ?? "sync",
-    ...(input.targetSystem ? { targetSystem: input.targetSystem.trim().slice(0, 60) } : {}),
+    ...(input.targetSystem?.trim() ? { targetSystem: input.targetSystem.trim().slice(0, 60) } : {}),
     phase: "draft", mode: "live", workflowId, organizationId,
   };
   writeSidecar(cfg);

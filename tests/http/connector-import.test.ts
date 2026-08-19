@@ -20,6 +20,8 @@ import { ensureOntologyResource, createVersion } from "../../src/platform/ontolo
 import { writeSidecar, readSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
 import { deleteConnectorFiles, readModule } from "../../src/packs/connector/runtime.js";
 import { deleteDoc } from "../../src/packs/connector/journal.js";
+import { exportConnectorEntry } from "../../src/packs/connector/export.js";
+import type { AdapterConfig } from "../../src/packs/types.js";
 
 const SFX = `cimp${Date.now().toString(36)}`;
 const ADMIN_SUBJECT = `conn-import-${SFX}`;
@@ -43,7 +45,8 @@ const HOSTILE_SLUG = `evil-path-${SFX}`;
 const LONG_RAW = `imp-long-${SFX}-` + "x".repeat(300);
 const LONG_SLUG = LONG_RAW.slice(0, 80);
 const ID_TYPES = `imp-types-${SFX}`;
-const CLEANUP_IDS = [ID_BUILT, ID_DRAFT, ID_ORPHAN, ID_TAKEN, `${ID_TAKEN}-2`, ID_DUP_TARGET, HOSTILE_SLUG, LONG_SLUG, ID_TYPES];
+const ID_BEHAVIOR = `imp-behavior-${SFX}`;
+const CLEANUP_IDS = [ID_BUILT, ID_DRAFT, ID_ORPHAN, ID_TAKEN, `${ID_TAKEN}-2`, ID_DUP_TARGET, HOSTILE_SLUG, LONG_SLUG, ID_TYPES, ID_BEHAVIOR];
 
 const CODE = `export async function pull(ctx) { return { rows: [] }; }`;
 
@@ -256,6 +259,7 @@ describe("POST /api/connectors/import", () => {
           mode: "evil",                    // not a ProvMode — must fall back to "live"
           instructions: 42,                // non-string — buildConnector calls .trim() on this
           limits: { pageSize: "9" },       // non-numeric — dropped
+          behavior: "destroyer",           // not an AdapterBehavior — dropped, never trusted
           dateRoles: { created: 7, updated: "updatedAt" },
         },
         code: null, credentialKeys: [],
@@ -268,7 +272,29 @@ describe("POST /api/connectors/import", () => {
     expect(cfg).not.toHaveProperty("instructions");
     expect(cfg).not.toHaveProperty("limits");
     expect(cfg.targetKind).toBe("entity");
+    expect(cfg).not.toHaveProperty("behavior"); // absent reads as sync, never as a bogus type
     expect(cfg.dateRoles).toEqual({ updated: "updatedAt" });
+  });
+
+  // The export used to drop `behavior` entirely, so an exported actuator came
+  // back untyped — and untyped means sync, silently removing the protection that
+  // stops a model rebuild re-firing its writes.
+  it("carries an actuator's type through export and back", async () => {
+    const source: AdapterConfig = {
+      id: ID_BEHAVIOR, kind: "connector", behavior: "actuator",
+      boundedContext: "TestBC", targetEntity: "BehaviorEntity", targetKind: "entity",
+      phase: "built", mode: "live", workflowId: wfId, organizationId: orgId,
+    };
+    const exported = exportConnectorEntry(source);
+    expect(exported.config.behavior).toBe("actuator");
+
+    const res = await app.inject({
+      method: "POST", url: "/api/connectors/import", headers: AUTHED,
+      payload: envelope([exported]),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().skipped).toEqual([]);
+    expect(readSidecar(ID_BEHAVIOR)?.behavior).toBe("actuator");
   });
 
   it("caps the entry count per upload", async () => {

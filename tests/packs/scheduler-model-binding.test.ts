@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
 import { runOne } from "../../src/packs/scheduler.js";
-import { writeSidecar, readSidecar } from "../../src/packs/sidecar.js";
+import { writeSidecar, readSidecar, deleteSidecar } from "../../src/packs/sidecar.js";
 import { ingestPull } from "../../src/packs/ingest.js";
 import { ensureWorkflowModelLoaded } from "../../src/platform/ontology-store/ontology-store.js";
 import { getOntology, setWorkflowModel } from "../../src/ontology/model.js";
@@ -13,8 +13,9 @@ vi.mock("../../src/platform/ontology-store/ontology-store.js", { spy: true });
 
 const SFX = `schedmodel${Date.now().toString(36)}`;
 
-/** A due connector on a workflow whose model is NOT bound in memory — exactly the
- * state a freshly restarted process is in. */
+/** Model deliberately NOT bound: the state a freshly restarted process is in. */
+const created: string[] = [];
+
 function dueConnector(): AdapterConfig {
   const cfg = {
     id: `sched-${SFX}-${newId().slice(0, 8)}`,
@@ -28,8 +29,15 @@ function dueConnector(): AdapterConfig {
     schedule: { enabled: true, everyMinutes: 60 },
   } as AdapterConfig;
   writeSidecar(cfg);
+  created.push(cfg.id);
   return cfg;
 }
+
+afterAll(() => {
+  for (const id of created) {
+    deleteSidecar(id);
+  }
+});
 
 /** Stand in for the DB read the real loader does, for one workflow only. */
 function modelExistsFor(workflowId: string): void {

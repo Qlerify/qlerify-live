@@ -50,8 +50,12 @@ const COLUMNS: ColumnUpgrade[] = [
 ];
 
 // Indexes are already idempotent via IF NOT EXISTS — no existence check needed.
+// The dashboard indexes stay OUT of schema.prisma on purpose: a schema-hash
+// change makes the entrypoint's db push fallback drop populated gen_ tables.
 const INDEXES: string[] = [
   `CREATE INDEX IF NOT EXISTS "EventLog_workflowId_actorKind_idx" ON "EventLog"("workflowId", "actorKind")`,
+  `CREATE INDEX IF NOT EXISTS "EventLog_workflowId_caseId_eventRef_idx" ON "EventLog"("workflowId", "caseId", "eventRef")`,
+  `CREATE INDEX IF NOT EXISTS "EventLog_workflowId_caseId_occurredAt_idx" ON "EventLog"("workflowId", "caseId", "occurredAt")`,
 ];
 
 // Whole new tables (with their indexes), idempotent via IF NOT EXISTS. Mirrors

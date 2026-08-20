@@ -13,7 +13,7 @@ import { startConnectorScheduler, stopConnectorScheduler } from "./packs/schedul
 import { warnIfModellerUrlsDisagree } from "./ontology/sync.js";
 import { getMeta, setMeta } from "./twin/projection-store.js";
 import { dataModelSignature } from "./twin/sim.js";
-import { prisma } from "./db.js";
+import { applySqliteTuning, prisma } from "./db.js";
 import { registerTenantPlugin } from "./platform/http/tenant-plugin.js";
 import { assertLlmBootConfig } from "./llm/anthropic.js";
 import { registerControlRoutes } from "./platform/http/control-routes.js";
@@ -162,6 +162,7 @@ export async function buildServer() {
   // Apply additive schema upgrades (new columns on EventLog / the audit log)
   // before anything reads or writes them — seedPlatform may record audit rows.
   // Idempotent + push-free, so it never drops the runtime gen_ tables.
+  await applySqliteTuning();
   await ensureSchemaUpgrades();
   // Fail-safe for a locked LLM deployment: LLM_SETTINGS_LOCKED=true with no
   // working platform provider would disable AI for every org with no override —

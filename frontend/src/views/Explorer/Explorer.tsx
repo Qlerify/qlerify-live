@@ -79,7 +79,7 @@ const rowEntries = (e: ExpState): Entry[] => {
 
 export const Explorer = () => {
   const route = useRoute()
-  const { exp: e, chatOpen, expPanelMode, set } = useStore()
+  const { exp: e, chatOpen, set } = useStore()
   const sysBody = useRef<HTMLDivElement>(null)
   const tblBody = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
@@ -132,11 +132,11 @@ export const Explorer = () => {
   }
 
   const toggleConnectorPanel = () => {
-    if (chatOpen && expPanelMode === "history") {
+    if (chatOpen) {
       set({ chatOpen: false })
       return
     }
-    set({ expPanelMode: "history" })
+    set({ expPanelMode: "chat" })
     openChat()
   }
 
@@ -299,7 +299,7 @@ export const Explorer = () => {
               </button>
               <button
                 onClick={toggleConnectorPanel}
-                className={`px-4 py-1.5 text-sm rounded-full border font-medium ${chatOpen && expPanelMode === "history" ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"}`}
+                className={`px-4 py-1.5 text-sm rounded-full border font-medium ${chatOpen ? "border-sky-400 bg-sky-50 text-sky-700" : "border-sky-300 bg-white text-sky-700 hover:bg-sky-50"}`}
               >
                 Configure connector
               </button>

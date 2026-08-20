@@ -17,6 +17,7 @@ import { readSidecar } from "../packs/sidecar.js";
 import { readDoc, readChat, writeChat, deleteChat, connectorChatKey, appendNote } from "../packs/connector/journal.js";
 import { ownsAdapterId, listOwnedAdapters } from "../packs/ownership.js";
 import { purgeEntityData } from "../twin/purge.js";
+import { isPeriodScoped, periodKeyOf } from "../twin/period.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
 import { guardData } from "../platform/authz.js";
 import { provenanceMeta } from "../twin/provenance.js";
@@ -151,11 +152,20 @@ export function registerBcRoutes(app: FastifyInstance): void {
     const cmdNames = new Set(events.map((e) => e.commandName).filter(Boolean));
     const commands = o.commands.filter((c) => cmdNames.has(c.name));
     const prov = (await provenanceMeta(o.boundedContexts, o.events, await eventCounts())).byContext[bc];
+    // Role annotations for the explorer/builder UI: which table roots the
+    // workflow's cases, and which is a period-scoped cycle table — computed here
+    // so the client never re-implements the period-key heuristic.
+    const annotate = (e: EntitySchema) => ({
+      ...e,
+      isRoot: e.name === o.rootAggregate,
+      periodScoped: isPeriodScoped(e),
+      periodGranularity: periodKeyOf(e)?.granularity,
+    });
     return {
       name: bc,
       events: events.map(slimEvent),
-      entities: entitiesForBc(o, bc),
-      valueObjects: valueObjectsForBc(o, bc),
+      entities: entitiesForBc(o, bc).map(annotate),
+      valueObjects: valueObjectsForBc(o, bc).map(annotate),
       commands,
       // Owned-only: serializeAdapter embeds the connector journal doc (summary +
       // credential field names + ingest notes), so the global registry must be

@@ -236,7 +236,18 @@ export type OrgMapping = {
 }
 
 export type ExpField = { name: string; dataType?: string }
-export type ExpTable = { name: string; kind: string; status: string; behavior?: AdapterBehavior | null; fields?: ExpField[] }
+export type ExpTable = {
+  name: string
+  kind: string
+  status: string
+  behavior?: AdapterBehavior | null
+  fields?: ExpField[]
+  // Role annotations from /api/bc/:bc (absent on /api/bc/health tables): the
+  // workflow's root/case table, and period-scoped cycle tables.
+  isRoot?: boolean
+  periodScoped?: boolean
+  periodGranularity?: string
+}
 export type ExpSystem = { name: string; tables: ExpTable[] }
 export type ExpHealth = { gaps: number; systems: ExpSystem[] }
 

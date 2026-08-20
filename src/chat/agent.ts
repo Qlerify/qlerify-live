@@ -21,6 +21,11 @@ const TOOL_TIMEOUT_MS = Number(process.env.CHAT_TOOL_TIMEOUT_MS ?? 300_000);
 interface ChatTurnResult {
   messages: Anthropic.MessageParam[];
   toolCalls: Array<{ name: string; input: unknown; isError: boolean; preview: string }>;
+  /** One-click replies the assistant proposed for its closing question (the
+   * `[suggest: …]` marker, stripped from the message text). Rides on the RESULT
+   * only — never on a message object, because the stateless client round-trips
+   * the full message array back to the API and persists it verbatim. */
+  suggestedReplies?: string[];
   usage: {
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
@@ -28,6 +33,59 @@ interface ChatTurnResult {
     outputTokens: number;
     iterations: number;
   };
+}
+
+// The assistant ends a question-turn with a final `[suggest: a | b | c]` line
+// (see system-prompt "Suggested replies"). It is a UI hint, not content: strip
+// it from the message text and lift the replies onto the turn result.
+const SUGGEST_RE = /\n?\s*\[suggest:\s*([^\]]+)\]\s*$/i;
+
+/** Strip an end-anchored marker off ONE message's final text block. Returns the
+ * same message reference when there is nothing to strip — including when
+ * stripping would leave the message with no non-empty visible content: an empty
+ * text block is API-invalid on the round-trip (the stateless client resends and
+ * persists messages verbatim), so a marker-only message keeps its raw marker —
+ * cosmetic beats a wedged thread. */
+function stripSuggestMarker(msg: Anthropic.MessageParam): { message: Anthropic.MessageParam; replies?: string[] } {
+  if (msg.role !== "assistant" || !Array.isArray(msg.content)) return { message: msg };
+  const blocks = msg.content;
+  const lastText = [...blocks].reverse().find((b) => b.type === "text");
+  if (!lastText || typeof (lastText as Anthropic.TextBlock).text !== "string") return { message: msg };
+  const m = (lastText as Anthropic.TextBlock).text.match(SUGGEST_RE);
+  if (!m) return { message: msg };
+  const stripped = (lastText as Anthropic.TextBlock).text.replace(SUGGEST_RE, "").trimEnd();
+  const others = blocks.filter((b) => b !== lastText && b.type !== "thinking" && b.type !== "redacted_thinking");
+  if (stripped === "" && others.length === 0) return { message: msg };
+  const replies = m[1]!
+    .split("|")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((s) => (s.length > 80 ? s.slice(0, 80) : s));
+  const content = blocks
+    .map((b) => (b === lastText ? { ...b, text: stripped } : b))
+    .filter((b) => !(b.type === "text" && (b as Anthropic.TextBlock).text === ""));
+  return { message: { ...msg, content }, replies: replies.length ? replies : undefined };
+}
+
+/** Pure (exported for tests): sweep the marker off EVERY assistant message —
+ * a marker can land mid-turn when the model emits it alongside tool_use blocks,
+ * and an unswept one renders raw in the transcript — but lift replies only from
+ * the turn's LAST message. Mutates nothing; returns the same array when nothing
+ * changed. */
+export function extractSuggestedReplies(messages: Anthropic.MessageParam[]): {
+  messages: Anthropic.MessageParam[];
+  suggestedReplies?: string[];
+} {
+  let suggestedReplies: string[] | undefined;
+  let changed = false;
+  const out = messages.map((msg, i) => {
+    const { message, replies } = stripSuggestMarker(msg);
+    if (message !== msg) changed = true;
+    if (i === messages.length - 1) suggestedReplies = replies;
+    return message;
+  });
+  return { messages: changed ? out : messages, ...(suggestedReplies ? { suggestedReplies } : {}) };
 }
 
 // Streamed to the client as SSE "progress" events — one per model call and per
@@ -144,5 +202,6 @@ export async function runAgentTurn(
     updated.push({ role: "user", content: toolResults });
   }
 
-  return { messages: updated, toolCalls, usage };
+  const { messages: finalMessages, suggestedReplies } = extractSuggestedReplies(updated);
+  return { messages: finalMessages, toolCalls, ...(suggestedReplies ? { suggestedReplies } : {}), usage };
 }

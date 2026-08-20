@@ -98,6 +98,48 @@ describe("connector subprocess sandbox", () => {
     expect(r.rows).toEqual([{ id: "1", names: "Quarter", exact: 2, ci: "q1", missing: 0 }]);
   });
 
+  // Event-log snapshots: the host serializes read-only COPIES of the workflow's
+  // domain-event log into the ctx file; the module reads them via ctx.readEvents.
+  // Truncation is VISIBLE (ctx.eventsTruncated) — a clipped log must never read
+  // as "those events never happened".
+  it("exposes host-provided events via ctx.readEvents (filters, case-insensitive) and ctx.eventsTruncated", async () => {
+    mk("sbx-events", `export async function fetchRows(ctx) {
+      return [{
+        id: "1",
+        total: ctx.readEvents().length,
+        byName: ctx.readEvents({ event: "order shipped" }).length,
+        byRef: ctx.readEvents({ event: "#/domainEvents/OrderShipped" }).length,
+        byEntity: ctx.readEvents({ entity: "order" }).length,
+        byCase: ctx.readEvents({ caseId: "c1" }).length,
+        byAggregate: ctx.readEvents({ aggregateId: "i1" })[0].eventName,
+        truncated: ctx.eventsTruncated,
+      }];
+    }`);
+    const events = {
+      rows: [
+        { eventName: "Order Placed", eventRef: "#/domainEvents/OrderPlaced", aggregateRoot: "Order", aggregateId: "o1", caseId: "c1" },
+        { eventName: "Order Shipped", eventRef: "#/domainEvents/OrderShipped", aggregateRoot: "Order", aggregateId: "o1", caseId: "c1" },
+        { eventName: "Invoice Sent", eventRef: "#/domainEvents/InvoiceSent", aggregateRoot: "Invoice", aggregateId: "i1", caseId: "c2" },
+      ],
+      truncated: true,
+    };
+    const r = await runConnector("sbx-events", { entity: ENTITY, limit: 5, events });
+    expect(r.ok).toBe(true);
+    expect(r.rows).toEqual([{
+      id: "1", total: 3, byName: 1, byRef: 1, byEntity: 2, byCase: 2,
+      byAggregate: "Invoice Sent", truncated: true,
+    }]);
+  });
+
+  it("a run without events sees an empty, un-truncated log", async () => {
+    mk("sbx-events-none", `export async function fetchRows(ctx) {
+      return [{ id: "1", total: ctx.readEvents().length, truncated: ctx.eventsTruncated }];
+    }`);
+    const r = await runConnector("sbx-events-none", { entity: ENTITY, limit: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.rows).toEqual([{ id: "1", total: 0, truncated: false }]);
+  });
+
   it("a run without tables sees none — a previous run's snapshot never leaks", async () => {
     mk("sbx-tables-leak", `export async function fetchRows(ctx) { return [{ id: "1", names: ctx.tables.join(",") }]; }`);
     const first = await runConnector("sbx-tables-leak", { entity: ENTITY, limit: 1, tables: { Quarter: [{ id: "q1" }] } });

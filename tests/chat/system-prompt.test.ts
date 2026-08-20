@@ -28,6 +28,27 @@ describe("chat system prompt", () => {
     expect(a).toBe(b);
   });
 
+  it("carries the pre-build checklist: cadence question, case-linkage gate, actuator-schedule consent, readEvents", () => {
+    const dump = systemBlocks().map((b) => b.text).join("\n");
+    expect(dump).toContain("Pre-build checklist");
+    // Cadence is a standard question now, with the schedule-as-clock doctrine.
+    expect(dump).toContain("the schedule is only the polling clock");
+    // Case linkage: ask until concrete; orphan-case failure mode named.
+    expect(dump).toContain("KEEP ASKING until the answer is concrete");
+    expect(dump).toContain("one-row orphan case");
+    // Scheduling an actuator needs explicit consent.
+    expect(dump).toContain("fires unattended every interval");
+    // Event-reactive connectors: trigger from the log, gate on own rows.
+    expect(dump).toContain("ctx.readEvents");
+    expect(dump).toContain("a trigger signal, never a ledger");
+  });
+
+  it("carries the suggested-replies marker convention", () => {
+    const dump = systemBlocks().map((b) => b.text).join("\n");
+    expect(dump).toContain("## Suggested replies");
+    expect(dump).toContain("[suggest: <reply 1> | <reply 2> | <reply 3>]");
+  });
+
   it("carries the connector re-run ritual (settle re-run behavior before building)", () => {
     const dump = systemBlocks().map((b) => b.text).join("\n");
     expect(dump).toContain("Re-run behavior — settle it BEFORE building");

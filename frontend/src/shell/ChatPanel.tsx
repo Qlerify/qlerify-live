@@ -22,11 +22,36 @@ const DETAIL_EXAMPLES = [
 
 const MAX_INPUT_PX = 260
 
-const BUILDER_EXAMPLES = [
-  "Simulate content",
-  "Fill this table from our DynamoDB users table",
-  "Connect this to a REST API and pull the records",
-  "Populate this from a Postgres query",
+// What the selected table IS, from the /api/bc/:bc role annotations — shapes
+// which chips appear (cycle table → cycle-start chip, value object → shape
+// choice). Case linkage for downstream tables gets NO chip: it is a constraint
+// the builder's pre-build checklist enforces on every fill, not a user goal.
+type TableRole = { periodScoped?: boolean; periodGranularity?: string; isValueObject?: boolean }
+
+// Chip logic: every connector shares three universals (it is code, it lands its
+// results in the SELECTED table, events fire from what landed) — those live in
+// the intro text, never as choices. What actually distinguishes entry points is
+// where the landed rows ORIGINATE, and there are exactly four origins:
+// fabricated (demo) · read from an external source · computed from data already
+// in the workflow · results of actions performed on another system. One chip
+// per origin, plus repair, plus the role-specific chips (cycle table / value
+// object). The remaining axes — trigger (timer / workflow event / calendar
+// date), AI use, and which events fire — are interview questions, not chips.
+// Chips are ANSWERS to the "How do you want to fill <table>?" question rendered
+// above them, so they never repeat the table name — the hidden [Context: …]
+// block names the selected table on every message anyway.
+const builderExamples = (role?: TableRole) => [
+  `Generate demo data so I can try the workflow`,
+  ...(role?.periodScoped
+    ? [`Create a row for each new ${role.periodGranularity || "period"} automatically`]
+    : []),
+  ...(role?.isValueObject
+    ? [`Fill it as its own table, or embed it on the parent — help me choose`]
+    : []),
+  `Fetch data from an external source — a database, an app, an API, or a sheet`,
+  `Build it from data already in this workflow — e.g. an AI summary per customer`,
+  `Act on another system and record the results here — e.g. create HubSpot contacts`,
+  `The data isn't updating — find out why and fix it`,
 ]
 
 export const ChatPanel = ({ view }: { view: string }) => {
@@ -37,6 +62,7 @@ export const ChatPanel = ({ view }: { view: string }) => {
     chatInput,
     chatBusy,
     chatError,
+    chatSuggestions,
     detailPanelMode,
     expPanelMode,
     exp,
@@ -117,8 +143,8 @@ export const ChatPanel = ({ view }: { view: string }) => {
       </div>
       {builder && (
         <div className="flex gap-1 mt-2 bg-stone-100 rounded-md p-0.5">
-          {tabBtn("history", "History")}
           {tabBtn("chat", "Chat")}
+          {tabBtn("history", "History")}
         </div>
       )}
       {detail && (
@@ -144,7 +170,14 @@ export const ChatPanel = ({ view }: { view: string }) => {
     return shell(<EventLogBody />)
   }
 
-  const examples = detail ? DETAIL_EXAMPLES : builder ? BUILDER_EXAMPLES : ADVISOR_EXAMPLES
+  const selEntity = exp.entities.find((t) => t.name === exp.entity)
+  const selVo = selEntity ? undefined : exp.valueObjects.find((t) => t.name === exp.entity)
+  const role: TableRole | undefined = selEntity
+    ? { periodScoped: selEntity.periodScoped, periodGranularity: selEntity.periodGranularity }
+    : selVo
+      ? { isValueObject: true }
+      : undefined
+  const examples = detail ? DETAIL_EXAMPLES : builder ? builderExamples(role) : ADVISOR_EXAMPLES
   const empty = chatMessages.length === 0
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -169,14 +202,19 @@ export const ChatPanel = ({ view }: { view: string }) => {
           <div className="text-stone-500 text-sm">
             {builder ? (
               <>
-                Describe any source — DynamoDB, a REST API, Postgres, a Google Sheet — and I'll write a connector to
-                fill <b>{exp.entity || "this table"}</b>, test it, fix any errors, and populate it. I'll confirm before
-                each change. Past activity for this connector is on the <b>History</b> tab.
+                Every connector is code I write and test: each run fills <b>{exp.entity || "this table"}</b>, and the
+                workflow's events fire from what landed. I'll confirm before each change; past activity is on the{" "}
+                <b>History</b> tab.
               </>
             ) : (
               "Ask about cases, the workflow, or have me advance a step. I'll always confirm before changing anything."
             )}
-            <div className="mt-3 flex flex-col gap-1.5">
+            {builder && (
+              <div className="mt-3 text-[13px] font-medium text-stone-700">
+                How do you want to fill {exp.entity || "this table"}?
+              </div>
+            )}
+            <div className={`${builder ? "mt-1.5" : "mt-3"} flex flex-col gap-1.5`}>
               {examples.map((q) => (
                 <button
                   key={q}
@@ -193,21 +231,45 @@ export const ChatPanel = ({ view }: { view: string }) => {
         )}
         {chatBusy && <ChatProgress />}
         {chatError && <div className="text-rose-700 text-xs">⚠ {chatError}</div>}
-        {!empty && !chatBusy && lastAssistantAsksConfirmation(chatMessages) && (
+        {!empty && !chatBusy && chatSuggestions.length > 0 ? (
+          // The assistant's own one-click replies for its closing question
+          // (server-stripped [suggest: …] marker), most likely first.
           <div className="flex flex-wrap gap-2 pt-1">
-            <button
-              onClick={() => sendChat("Yes, proceed.")}
-              className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
-            >
-              Yes, proceed
-            </button>
-            <button
-              onClick={() => sendChat("No, don't proceed.")}
-              className="px-3 py-1.5 text-xs rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-stone-100 font-medium"
-            >
-              No
-            </button>
+            {chatSuggestions.map((q, i) => (
+              <button
+                key={q}
+                onClick={() => sendChat(q)}
+                className={
+                  i === 0
+                    ? "px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
+                    : "px-3 py-1.5 text-xs rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-stone-100 font-medium"
+                }
+              >
+                {q}
+              </button>
+            ))}
           </div>
+        ) : (
+          // Fallback for turns without a marker: the confirmation-phrase
+          // heuristic still offers Yes/No on "Shall I proceed?" pauses.
+          !empty &&
+          !chatBusy &&
+          lastAssistantAsksConfirmation(chatMessages) && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                onClick={() => sendChat("Yes, proceed.")}
+                className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
+              >
+                Yes, proceed
+              </button>
+              <button
+                onClick={() => sendChat("No, don't proceed.")}
+                className="px-3 py-1.5 text-xs rounded-md bg-white border border-stone-300 text-stone-700 hover:bg-stone-100 font-medium"
+              >
+                No
+              </button>
+            </div>
+          )
         )}
       </div>
 
@@ -217,7 +279,11 @@ export const ChatPanel = ({ view }: { view: string }) => {
           value={chatInput}
           onChange={(e) => set({ chatInput: e.target.value })}
           onKeyDown={onKeyDown}
-          placeholder="Ask anything about cases or the workflow…"
+          placeholder={
+            builder
+              ? `Describe a source to fill ${exp.entity || "this table"} — a database, an app, a sheet, or just demo data…`
+              : "Ask anything about cases or the workflow…"
+          }
           className="w-full text-sm border border-stone-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400 resize-none min-h-[96px] overflow-y-auto"
         />
         <div className="flex items-center gap-2 mt-2">

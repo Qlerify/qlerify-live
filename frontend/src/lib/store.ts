@@ -97,6 +97,9 @@ type State = {
   chatInput: string
   chatBusy: boolean
   chatError: string | null
+  // One-click replies the assistant proposed for its last question. Ephemeral —
+  // cleared on send, clear, and every thread swap; never persisted.
+  chatSuggestions: string[]
   // Live progress of the in-flight turn, fed by the /chat SSE stream. null when idle.
   chatProgress: ChatProgress | null
   detailPanelMode: string
@@ -173,9 +176,10 @@ export const useStore = create<State>((set) => ({
   chatInput: "",
   chatBusy: false,
   chatError: null,
+  chatSuggestions: [],
   chatProgress: null,
   detailPanelMode: "chat",
-  expPanelMode: "history",
+  expPanelMode: "chat",
 
   set: (patch) => set(patch),
 

@@ -51,6 +51,19 @@ const CONNECTORS_DIR = join(DATA_ROOT, "connectors");
  * The builder prompt surfaces the value so the author AI knows the ceiling. */
 export const SNAPSHOT_ROWS_PER_TABLE = Number(process.env.QLERIFY_SNAPSHOT_ROWS) || 10_000;
 
+/** Row ceiling for the ctx events snapshot (RunRequest.events) — the NEWEST rows
+ * win when the workflow's EventLog exceeds it. Unlike the tables snapshot,
+ * truncation is VISIBLE to the module (ctx.eventsTruncated), so an
+ * event-reactive connector can detect a clipped log instead of mistaking the
+ * missing oldest events for "never happened". Override with
+ * QLERIFY_SNAPSHOT_EVENTS. */
+export const SNAPSHOT_EVENT_ROWS = Number(process.env.QLERIFY_SNAPSHOT_EVENTS) || 10_000;
+
+/** Byte budget for the events snapshot (payloads dominate — a row cap alone
+ * lets 10k fat payloads balloon the ctx file). Clipping by bytes also sets
+ * `truncated`. Override with QLERIFY_SNAPSHOT_EVENT_BYTES. */
+export const SNAPSHOT_EVENT_BYTES = Number(process.env.QLERIFY_SNAPSHOT_EVENT_BYTES) || 16_000_000;
+
 const RUN_BUDGET_MS = 30_000; // generous — real APIs + cold SDK init can be slow
 const INSTALL_BUDGET_MS = 180_000; // npm install of a fat SDK over the network
 const HEAP_MB = 512;
@@ -180,6 +193,24 @@ function readTable(name) {
   return [];
 }
 
+// Read-only snapshot of the workflow's domain-event log (host-taken copies,
+// oldest→newest). Events answer "did X happen"; whether THIS connector already
+// handled it must be judged from its own output rows (readTable), because the
+// platform rebuilds this log — fresh ids and timestamps — whenever the model
+// changes.
+const eventsSnap = input.events || { rows: [], truncated: false };
+function readEvents(filter) {
+  let out = eventsSnap.rows;
+  if (filter && typeof filter === "object") {
+    const eq = (a, b) => String(a == null ? "" : a).toLowerCase() === String(b).toLowerCase();
+    if (filter.event != null) out = out.filter((e) => eq(e.eventName, filter.event) || eq(e.eventRef, filter.event));
+    if (filter.entity != null) out = out.filter((e) => eq(e.aggregateRoot, filter.entity));
+    if (filter.aggregateId != null) out = out.filter((e) => String(e.aggregateId) === String(filter.aggregateId));
+    if (filter.caseId != null) out = out.filter((e) => String(e.caseId) === String(filter.caseId));
+  }
+  return out;
+}
+
 const ctx = {
   entity: input.entity,
   limit: input.limit,
@@ -191,6 +222,8 @@ const ctx = {
   trace,
   tables: Object.keys(tables),
   readTable,
+  readEvents,
+  eventsTruncated: !!eventsSnap.truncated,
 };
 async function main() {
   const mod = await import(modUrl);
@@ -398,6 +431,14 @@ export async function installDeps(deps: string[]): Promise<InstallResult> {
 // Run — isolated subprocess
 // ---------------------------------------------------------------------------
 
+/** Read-only snapshot of the workflow's domain-event log, oldest→newest, capped
+ * at SNAPSHOT_EVENT_ROWS keeping the NEWEST rows (see collectWorkflowEvents).
+ * `truncated` is set when older events were clipped — never silent. */
+export interface EventsSnapshot {
+  rows: Array<Record<string, unknown>>;
+  truncated: boolean;
+}
+
 interface RunRequest {
   entity: EntitySchema;
   /** Max rows the runner returns; null = full ingest (UNCAPPED_PULL_ROWS ceiling). */
@@ -413,6 +454,9 @@ interface RunRequest {
    * serialized into the ctx file — the child still cannot reach the real DB, so
    * mutating them changes nothing. */
   tables?: Record<string, Array<Record<string, unknown>>>;
+  /** Read-only snapshot of the workflow's domain-event log, exposed to the module
+   * as ctx.readEvents(filter) / ctx.eventsTruncated. COPIES, like `tables`. */
+  events?: EventsSnapshot;
 }
 
 interface RunResult {
@@ -447,6 +491,7 @@ export async function runConnector(id: string, req: RunRequest): Promise<RunResu
     // Always present (empty when the caller sends none) so a run can never see a
     // previous run's snapshot — the ctx file is rewritten wholesale each time.
     tables: req.tables ?? {},
+    events: req.events ?? { rows: [], truncated: false },
   };
   writeFileSync(ctxPath(id), JSON.stringify(input));
   if (!existsSync(credPath(id))) writeFileSync(credPath(id), "{}");

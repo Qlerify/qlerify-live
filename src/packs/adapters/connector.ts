@@ -5,9 +5,11 @@
 // connector/runtime), not in-process. The target may be an entity OR a value
 // object — value objects become their own gen_<VO> table when populated directly.
 
+import { prisma } from "../../db.js";
 import { getOntology, type EntitySchema } from "../../ontology/model.js";
+import { eventLogOrgWhere } from "../../platform/tenancy/event-scope.js";
 import type { AdapterConfig, SourceAdapter } from "../types.js";
-import { runConnector, moduleExists, SNAPSHOT_ROWS_PER_TABLE } from "../connector/runtime.js";
+import { runConnector, moduleExists, SNAPSHOT_ROWS_PER_TABLE, SNAPSHOT_EVENT_ROWS, SNAPSHOT_EVENT_BYTES, type EventsSnapshot } from "../connector/runtime.js";
 import { readSidecar } from "../sidecar.js";
 import * as store from "../../twin/projection-store.js";
 
@@ -32,6 +34,55 @@ export async function collectWorkflowTables(): Promise<Record<string, Array<Reco
     out[e.name] = rows.map(({ organization_id: _org, ...rest }) => rest);
   }
   return out;
+}
+
+function parsePayload(s: string): unknown {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+/** Read-only copy of the workflow's domain-event log — the ctx.readEvents
+ * snapshot. Events are the truthful "did upstream step X happen for case Y"
+ * signal a reactive connector triggers from, and each row carries caseId +
+ * aggregateId so produced rows can copy their case linkage straight off the
+ * triggering event. COPIES via the ctx file, like collectWorkflowTables. The
+ * NEWEST rows win the cap, and truncation is flagged — never silent — because a
+ * clipped log must not read as "those events never happened". Note the log is
+ * wiped + rebuilt (fresh ids/timestamps) on every model apply, so the module
+ * doctrine is: trigger from events, gate "already handled" on own output rows.
+ * During that rebuild (reingestAll pulls first, derives once at the end) this
+ * snapshot is EMPTY — an event-reactive connector then correctly returns [] and
+ * repopulates on its next run after derive; delayed, never duplicated. */
+export async function collectWorkflowEvents(): Promise<EventsSnapshot> {
+  const recent = await prisma.eventLog.findMany({
+    where: eventLogOrgWhere(),
+    orderBy: { occurredAt: "desc" },
+    take: SNAPSHOT_EVENT_ROWS + 1,
+    select: {
+      eventName: true, eventRef: true, boundedContext: true, aggregateRoot: true,
+      aggregateId: true, caseId: true, occurredAt: true, businessAt: true,
+      provenance: true, actorKind: true, payload: true,
+    },
+  });
+  const overRowCap = recent.length > SNAPSHOT_EVENT_ROWS;
+  const capped = overRowCap ? recent.slice(0, SNAPSHOT_EVENT_ROWS) : recent;
+  // Byte budget on top of the row cap: payloads dominate, and 10k fat ones
+  // would balloon the ctx file. Newest-first, so the newest rows win here too;
+  // always keep at least one row.
+  let bytes = 0;
+  const kept: typeof capped = [];
+  for (const e of capped) {
+    bytes += e.payload.length + 256; // 256 ≈ the fixed columns' share per row
+    if (kept.length > 0 && bytes > SNAPSHOT_EVENT_BYTES) break;
+    kept.push(e);
+  }
+  const truncated = overRowCap || kept.length < capped.length;
+  const rows = kept.reverse().map((e) => ({
+    ...e,
+    occurredAt: e.occurredAt.toISOString(),
+    businessAt: e.businessAt?.toISOString() ?? null,
+    payload: parsePayload(e.payload),
+  }));
+  return { rows, truncated };
 }
 
 export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
@@ -65,7 +116,13 @@ export function createConnectorAdapter(cfg: AdapterConfig): SourceAdapter {
       const e = target();
       // null = uncapped (pull everything); only an OMITTED limit falls back.
       const limit = opts.limit === null ? null : opts.limit ?? cfg.limits?.limit ?? 25;
-      const r = await runConnector(cfg.id, { entity: e, limit, endpoint: cfg.endpoint, tables: await collectWorkflowTables() });
+      const r = await runConnector(cfg.id, {
+        entity: e,
+        limit,
+        endpoint: cfg.endpoint,
+        tables: await collectWorkflowTables(),
+        events: await collectWorkflowEvents(),
+      });
       if (!r.ok) {
         const trace = r.trace?.length ? `\nTrace:\n${r.trace.slice(-12).join("\n")}` : "";
         throw new Error(`${r.error ?? "connector run failed"}${trace}`);

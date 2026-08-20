@@ -8,7 +8,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { EntitySchema, SchemaField } from "../../ontology/model.js";
 import { getAnthropicClient } from "../../llm/anthropic.js";
-import { scanImports, SNAPSHOT_ROWS_PER_TABLE } from "./runtime.js";
+import { scanImports, SNAPSHOT_ROWS_PER_TABLE, SNAPSHOT_EVENT_ROWS } from "./runtime.js";
 
 /** A schema one of the target's fields points at via `relatedEntity`. Its example
  * values are the model's allowed vocabulary for that field when data is fabricated. */
@@ -228,6 +228,20 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
       ]
     : [];
 
+  // Event-reactive guidance is platform-generic (ctx.readEvents is always
+  // there): when the operator conditions the connector on something that
+  // HAPPENED in the workflow, the event log is the truthful signal — but the
+  // log is wiped + rebuilt on every model apply, so "already handled" must
+  // never be judged from it. Trigger from events, gate on own rows.
+  const eventsCtxSection = [
+    ``,
+    `## Reacting to workflow events (ctx.readEvents)`,
+    `When the operator's instructions condition this connector on something that HAPPENED in the workflow ("when a case reaches …", "for every X that was approved"), read the domain-event log via ctx.readEvents — that is the truthful "did event X fire for case Y" signal; never reverse-engineer it from status columns when the event itself is available. Rules:`,
+    `- TRIGGER from events, GATE on rows: use events to find what happened, but decide "have I already handled it" ONLY by checking this connector's own output rows via ctx.readTable("${target.name}"). The platform REBUILDS the event log — fresh ids and timestamps — whenever the workflow model changes, so any stored event id/timestamp watermark would re-fire everything. Output rows survive model changes; event ids do not.`,
+    `- COPY linkage off the trigger event: an event carries the aggregateId of the row it happened to and the caseId of its end-to-end case. A row produced in reaction should carry that aggregateId in its parent-reference field so the platform chains it into the same case exactly.`,
+    `- A truncated snapshot (ctx.eventsTruncated) is missing the OLDEST events — do not treat absence there as "never happened"; fall back to the parent table's row state for old items.`,
+  ];
+
   // An actuator's fetchRows PERFORMS the action it then returns. Everything the
   // read-only guidance takes for granted (re-running is free, returning [] is
   // cheap) inverts here, so the rules are emitted only for this behavior.
@@ -272,6 +286,7 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     ...cycleChildSection,
     ...fkSection,
     ...rerunSection,
+    ...eventsCtxSection,
     ...actuatorSection,
     ``,
     `## How to reach the source — you have FULL power`,
@@ -287,12 +302,14 @@ export function buildConnectorPrompt(input: ConnectorGenInput): string {
     `  ctx.log(message)  — append a line to the run trace shown to the operator (do NOT rely on console for diagnostics)`,
     `  ctx.tables        — names of this workflow's data tables available as read-only snapshots${workflowTables?.length ? `: ${workflowTables.join(", ")}` : ""}`,
     `  ctx.readTable(name) — that table's current rows as an array of plain objects (empty array if the table has no data yet; a snapshot capped at ${SNAPSHOT_ROWS_PER_TABLE} rows per table, taken when the run starts — reading is free, mutating it changes nothing)`,
+    `  ctx.readEvents(filter?) — the workflow's domain-event log, oldest→newest, as plain objects { eventName, eventRef, boundedContext, aggregateRoot, aggregateId, caseId, occurredAt, businessAt, provenance, actorKind, payload }. filter (optional): { event, entity, aggregateId, caseId } — event matches eventName or eventRef, case-insensitive. A read-only snapshot capped at the ${SNAPSHOT_EVENT_ROWS} NEWEST rows, taken when the run starts.`,
+    `  ctx.eventsTruncated — true when the event log exceeded the snapshot cap (the snapshot is then missing the OLDEST events)`,
     ``,
     creds,
     ``,
     `## Export contract`,
     `  export async function fetchRows(ctx) { /* … */ }  // returns an array of plain objects — the model field names above plus the source's extra fields — at most ctx.limit of them (all of them when ctx.limit is null)`,
-    `  export async function probe(ctx) { return { ok: true, detail: "…" } }  // OPTIONAL: a cheap reachability check`,
+    `  export async function probe(ctx) { return { ok: true, detail: "…" } }  // OPTIONAL: a cheap reachability check. Export it whenever fetchRows depends on ctx.readTable/ctx.readEvents or does paid per-row work — the platform's healthcheck otherwise falls back to RUNNING fetchRows with EMPTY snapshots (limit 1, nothing landed).`,
     ``,
     `## Rules`,
     `- Coerce the MODEL fields' values to the target dataTypes (numbers as numbers, dates as ISO strings, booleans as booleans). Extra (non-model) fields ride along AS-IS — keep the source's own names and value shapes, do not coerce or rename them.`,

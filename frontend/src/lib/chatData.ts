@@ -35,7 +35,7 @@ export const stopChat = () => {
 // here instead of in its finally.
 const disownChatTurn = () => {
   chatTurnGen++
-  useStore.getState().set({ chatBusy: false, chatProgress: null })
+  useStore.getState().set({ chatBusy: false, chatProgress: null, chatSuggestions: [] })
   chatAbort?.abort()
 }
 
@@ -120,7 +120,7 @@ export const activateConnectorChat = (system?: string | null, entity?: string | 
   inConnectorMode = true
   activeKey = key
   activeScope = chatScope()
-  useStore.getState().set({ chatMessages: connectorChats[key] || [], chatError: null })
+  useStore.getState().set({ chatMessages: connectorChats[key] || [], chatError: null, chatSuggestions: [] })
   if (system && entity) {
     hydrateConnectorChat(system, entity, key)
   }
@@ -135,7 +135,7 @@ export const deactivateConnectorChat = () => {
   inConnectorMode = false
   activeKey = null
   activeScope = chatScope()
-  useStore.getState().set({ chatMessages: advisorChats[activeScope] || [], chatError: null })
+  useStore.getState().set({ chatMessages: advisorChats[activeScope] || [], chatError: null, chatSuggestions: [] })
 }
 
 // The org/workflow changed: stash the live thread under the scope it belongs to,
@@ -152,13 +152,13 @@ export const syncChatScope = () => {
     // Still in the explorer: re-point at the SAME table in the NEW workflow.
     const key = connectorChatKey(e.system, e.entity)
     activeKey = key
-    useStore.getState().set({ chatMessages: connectorChats[key] || [], chatError: null })
+    useStore.getState().set({ chatMessages: connectorChats[key] || [], chatError: null, chatSuggestions: [] })
     hydrateConnectorChat(e.system, e.entity, key)
     return
   }
   inConnectorMode = false
   activeKey = null
-  useStore.getState().set({ chatMessages: advisorChats[scope] || [], chatError: null })
+  useStore.getState().set({ chatMessages: advisorChats[scope] || [], chatError: null, chatSuggestions: [] })
 }
 
 // Logout: a different identity may sign in next on this page — drop every thread.
@@ -170,7 +170,7 @@ export const resetChatState = () => {
   inConnectorMode = false
   activeKey = null
   activeScope = null
-  useStore.getState().set({ chatMessages: [], chatInput: "", chatError: null })
+  useStore.getState().set({ chatMessages: [], chatInput: "", chatError: null, chatSuggestions: [] })
 }
 
 // Persist the active connector thread (fire-and-forget) so it survives a reload.
@@ -198,7 +198,7 @@ export const clearChat = () => {
       method: "DELETE",
     }).catch(() => {})
   }
-  s.set({ chatMessages: [], chatError: null })
+  s.set({ chatMessages: [], chatError: null, chatSuggestions: [] })
 }
 
 // The assistant never sees the URL, so phrases like "this case" or "this table"
@@ -262,12 +262,14 @@ export const sendChat = async (override?: string) => {
     return
   }
 
-  const messages = [...s.chatMessages, { role: "user", content: contextualContent(text) }]
+  const prevMessages = s.chatMessages
+  const messages = [...prevMessages, { role: "user", content: contextualContent(text) }]
   s.set({
     chatMessages: messages,
     chatInput: "",
     chatBusy: true,
     chatError: null,
+    chatSuggestions: [],
     chatProgress: { startedAt: Date.now(), tool: null, iteration: 1, toolsDone: 0 },
   })
 
@@ -287,7 +289,7 @@ export const sendChat = async (override?: string) => {
   const keyAtSend = activeKey
 
   try {
-    const resp = await apiStream<{ messages: ChatMessage[] }>("/chat", {
+    const resp = await apiStream<{ messages: ChatMessage[]; suggestedReplies?: string[] }>("/chat", {
       body: JSON.stringify({ messages }),
       signal: myAbort.signal,
       onEvent: onChatProgress,
@@ -308,7 +310,7 @@ export const sendChat = async (override?: string) => {
       }
       return
     }
-    useStore.getState().set({ chatMessages: resp.messages })
+    useStore.getState().set({ chatMessages: resp.messages, chatSuggestions: resp.suggestedReplies || [] })
 
     // Write tools may have moved the data the current view is showing.
     const route = parseHash()
@@ -327,8 +329,16 @@ export const sendChat = async (override?: string) => {
       // failure that happens to arrive while the flag is set — e.g. the 401
       // session-expiry path, which resets chat state mid-flight.
       const stopped = chatStopRequested && (e as Error)?.name === "AbortError"
+      // A failed turn never happened: roll back the optimistic user message so
+      // the thread (and, when it was empty, its example chips) returns to the
+      // pre-send state, and put the text back in the box for a resend. Skip the
+      // rollback when the user switched threads mid-flight (the message lives
+      // in that thread's stash now), and never clobber text they typed since.
+      const swapped = activeScope !== scopeAtSend || inConnectorMode !== wasConnector || activeKey !== keyAtSend
       useStore.getState().set({
         chatError: stopped ? "Stopped — the reply was cancelled before it finished." : (e as Error).message,
+        ...(swapped ? {} : { chatMessages: prevMessages }),
+        ...(!swapped && !useStore.getState().chatInput.trim() ? { chatInput: text } : {}),
       })
     }
   } finally {

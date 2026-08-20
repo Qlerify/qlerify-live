@@ -79,6 +79,27 @@ describe("buildConnectorPrompt workflow-table snapshots", () => {
   });
 });
 
+// ctx.readEvents is platform-generic: every prompt documents the event-log
+// snapshot and the reactive doctrine — trigger from events, but gate "already
+// handled" on the connector's OWN output rows, because the platform rebuilds the
+// event log (fresh ids/timestamps) on every model apply. An event-id watermark
+// would re-fire everything.
+describe("buildConnectorPrompt workflow-event snapshots", () => {
+  it("documents ctx.readEvents/ctx.eventsTruncated and the trigger-from-events, gate-on-rows doctrine", () => {
+    const prompt = buildConnectorPrompt(demandInput([]));
+    expect(prompt).toContain("ctx.readEvents(filter?)");
+    expect(prompt).toContain("ctx.eventsTruncated");
+    expect(prompt).toContain("## Reacting to workflow events");
+    // The gate binds to the connector's own target table by name.
+    expect(prompt).toContain('TRIGGER from events, GATE on rows');
+    expect(prompt).toContain('ctx.readTable("MarketDemand")');
+    // The rebuild warning that forbids event-id watermarks.
+    expect(prompt).toContain("REBUILDS the event log");
+    // Case-linkage inheritance off the trigger event.
+    expect(prompt).toContain("COPY linkage off the trigger event");
+  });
+});
+
 // Event-chain (FK) guidance mirrors the cycle sections: model-conditional, and
 // grounded in the parent table's REAL id values so the author AI matches the
 // exact format case correlation will compare against (Order.customerId must

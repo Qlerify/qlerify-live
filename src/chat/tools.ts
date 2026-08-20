@@ -217,7 +217,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_adapter_config",
     description:
-      "Return an adapter's configuration WITHOUT any secret: kind, bounded context, target entity, type, mode, endpoint, the credential KEY name (credentialsRef), whether a generated body exists, the current description, and `instructions` — the brief its code was authored from. Use to inspect how an adapter is wired before diagnosing, and ALWAYS before a build_connector that adds to an existing connector, since that call replaces the brief wholesale and you need the old text to resend it complete.",
+      "Return an adapter's configuration WITHOUT any secret: `kind`, `boundedContext`, `targetEntity`, `behavior` (the connector's type) and `targetSystem`, `mode`, `endpoint`, the credential KEY name (`credentialsRef`), whether a generated body exists, the current `description`, and `instructions` — the brief its code was authored from. Use to inspect how an adapter is wired before diagnosing, and ALWAYS before a build_connector that adds to an existing connector, since that call replaces the brief wholesale and you need the old text to resend it complete.",
     input_schema: {
       type: "object",
       properties: { adapterId: { type: "string" } },

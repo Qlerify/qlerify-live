@@ -143,6 +143,20 @@ describe("a description that could not be written by AI says so", () => {
       expect(doc?.notes.some((n) => /Could not describe this connector with AI/.test(n.text))).toBe(true);
     }));
 
+  it("keeps the raw provider error out of the operator-visible journal", () =>
+    model.run(async () => {
+      const id = connector(`leak-${SFX}`);
+      vi.mocked(describeConnectorStructured).mockRejectedValue(
+        new Error("connect ECONNREFUSED 10.0.3.14:443 while POSTing sk-ant-secret to internal-proxy"),
+      );
+
+      await asBuilder(() => regenerateConnectorSummary(id));
+
+      const notes = (readDoc(id)?.notes ?? []).map((n) => n.text).join("\n");
+      expect(notes).toMatch(/Could not describe this connector with AI/);
+      expect(notes).not.toMatch(/ECONNREFUSED|10\.0\.3\.14|sk-ant-secret|internal-proxy/);
+    }));
+
   it("keeps the previous facets rather than wiping them on failure", () =>
     model.run(async () => {
       const id = connector(`facets-${SFX}`);

@@ -34,6 +34,7 @@ import { TOOLS } from "../chat/tools.js";
 import { getCommandByRoute, listRegisteredCommands } from "../commands/registry.js";
 import { codegenStatus } from "../kernel/codegen/status.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { cachedRead } from "../platform/read-cache.js";
 import { guardData } from "../platform/authz.js";
 import { ownsAdapterId } from "../packs/ownership.js";
 import "../commands/registry.generated.js"; // side-effect: registers generated commands
@@ -166,17 +167,19 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/event-log", async (req) => {
     const limit = Number((req.query as any)?.limit ?? 200);
     const caseId = (req.query as any)?.caseId as string | undefined;
-    return prisma.eventLog.findMany({
-      where: caseId ? { caseId, ...eventLogOrgWhere() } : eventLogOrgWhere(),
-      orderBy: { occurredAt: "desc" },
-      take: limit,
-    });
+    return cachedRead(`event-log?limit=${limit}&caseId=${caseId ?? ""}`, () =>
+      prisma.eventLog.findMany({
+        where: caseId ? { caseId, ...eventLogOrgWhere() } : eventLogOrgWhere(),
+        orderBy: { occurredAt: "desc" },
+        take: limit,
+      }),
+    );
   });
   app.get("/sim/health", async () => ({ ok: true, ts: new Date().toISOString() }));
 
   // Model-derived UI labels for the dashboard — so the header/buttons follow the
   // loaded model instead of hardcoded domain strings. Hot-reloads with the model.
-  app.get("/sim/meta", async () => {
+  app.get("/sim/meta", async () => cachedRead("meta", async () => {
     const o = getOntology();
     const singular = o.rootAggregate;
     // Per-BC event counts feed the provenance rollup ("X of N steps real").
@@ -204,7 +207,7 @@ export function registerRoutes(app: FastifyInstance) {
       // rollup. Drives the dashboard provenance badges + legend (Part 2.1).
       provenance: await provenanceMeta(o.boundedContexts, o.events, eventCountByContext),
     };
-  });
+  }));
   // Per-run detail (root row + events + rows created in the run) — used by the
   // dashboard detail view.
   app.get("/sim/instance/:id", async (req) => genericInstanceDetail((req.params as any).id));
@@ -213,7 +216,7 @@ export function registerRoutes(app: FastifyInstance) {
   // active workflow. Drives the aggregate flow view — one counter badge per event
   // = how many times that event fired across all cases. Workflow-scoped like the
   // rest of the simulator reads (eventLogOrgWhere folds in org + workflow).
-  app.get("/sim/flow-aggregate", async () => {
+  app.get("/sim/flow-aggregate", async () => cachedRead("flow-aggregate", async () => {
     const byRef = await prisma.eventLog.groupBy({
       by: ["eventRef"],
       where: eventLogOrgWhere(),
@@ -233,7 +236,7 @@ export function registerRoutes(app: FastifyInstance) {
       distinct: ["caseId"],
     });
     return { counts, totalFirings, totalCases: cases.length };
-  });
+  }));
 
   // Per-case breakdown of the same firings the flow-aggregate folds together:
   // one entry per case with that case's own ref→count map. Powers the "By case"
@@ -246,6 +249,8 @@ export function registerRoutes(app: FastifyInstance) {
     // lift it and return every case.
     const q = Number((req.query as any)?.limit ?? 50);
     const ROW_CAP = Number.isFinite(q) && q > 0 ? q : Infinity;
+
+    return cachedRead(`flow-by-case?limit=${ROW_CAP}`, async () => {
     const rows = await prisma.eventLog.groupBy({
       by: ["caseId", "eventRef"],
       where: { caseId: { not: null }, ...eventLogOrgWhere() },
@@ -300,6 +305,7 @@ export function registerRoutes(app: FastifyInstance) {
     const all = [...byCase.values()].sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0));
     const capped = ROW_CAP === Infinity ? all : all.slice(0, ROW_CAP);
     return { cases: capped, totalCases: all.length, cap: ROW_CAP === Infinity ? all.length : ROW_CAP };
+    });
   });
 
   // ---------------- Source adapters (Part 2.2) ----------------
@@ -488,7 +494,9 @@ export function registerRoutes(app: FastifyInstance) {
   // and searches/sorts/pages client-side.
   app.get("/sim/cases", async (req) => {
     const q = Number((req.query as any)?.limit ?? 200);
-    return genericListInstances(Number.isFinite(q) && q > 0 ? q : null);
+    const limit = Number.isFinite(q) && q > 0 ? q : null;
+
+    return cachedRead(`cases?limit=${limit}`, () => genericListInstances(limit));
   });
 
   // Create a fresh run of the loaded model (instantiates the root aggregate).

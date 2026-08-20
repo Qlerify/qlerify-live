@@ -15,6 +15,7 @@ import { withScope } from "../events/bus.js";
 import { provenanceFor } from "./provenance.js";
 import { currentOrgId, currentWorkflowId, isSystemWorkflow } from "../platform/tenancy/context.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { invalidateCurrentReads } from "../platform/read-cache.js";
 import { DomainError } from "../errors.js";
 import { getOntology, type Ontology, type OntologyEvent, type EntitySchema } from "../ontology/model.js";
 import { genericApply } from "../commands/base.js";
@@ -267,6 +268,7 @@ async function logSkippedStep(instanceId: string, event: OntologyEvent, caption:
       workflowId: currentWorkflowId(),
     },
   });
+  invalidateCurrentReads();
 }
 
 /** Advance one step: fire the next unfired event's command for this run, plus
@@ -339,12 +341,14 @@ export async function genericDeleteInstance(instanceId: string): Promise<void> {
     } catch { /* one bad row must not abort the whole delete */ }
   }
   await prisma.eventLog.deleteMany({ where: { caseId: instanceId, ...eventLogOrgWhere() } });
+  invalidateCurrentReads();
 }
 
 /** Clear all runs: every projection row + the whole event log. */
 export async function genericDeleteAll(): Promise<void> {
   await prisma.eventLog.deleteMany({ where: eventLogOrgWhere() }); // scoped to the active workflow
   await store.clearAll(); // listProjectionTables is workflow-scoped → clears only this workflow's tables
+  invalidateCurrentReads();
 }
 
 /** Steps on ONE run's own path through the model: the length of the

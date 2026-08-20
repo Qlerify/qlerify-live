@@ -6,6 +6,7 @@ import type { AdapterConfig } from "./types.js";
 import { listSidecars, readSidecar, writeSidecar } from "./sidecar.js";
 import { ingestPull, isPullInFlight } from "./ingest.js";
 import { appendNote } from "./connector/journal.js";
+import { ensureWorkflowModelLoaded } from "../platform/ontology-store/ontology-store.js";
 
 const TICK_MS = 60_000;
 
@@ -90,7 +91,7 @@ function patchSchedule(id: string, patch: Partial<AdapterConfig["schedule"] & ob
   writeSidecar({ ...cfg, schedule: { ...cfg.schedule, ...patch } });
 }
 
-async function runOne(cfg: AdapterConfig, log?: FastifyBaseLogger): Promise<void> {
+export async function runOne(cfg: AdapterConfig, log?: FastifyBaseLogger): Promise<void> {
   patchSchedule(cfg.id, { lastAttemptAt: new Date().toISOString() });
 
   const ctx = {
@@ -101,7 +102,12 @@ async function runOne(cfg: AdapterConfig, log?: FastifyBaseLogger): Promise<void
 
   try {
     // currentActorKind() answers "human" for any bound tenant context.
-    await runWithTenant(ctx, () => withActorKind("system", () => ingestPull(cfg.id, { limit: null })));
+    await runWithTenant(ctx, () =>
+      withActorKind("system", async () => {
+        await ensureWorkflowModelLoaded(ctx.organizationId, ctx.workflowId);
+        return ingestPull(cfg.id, { limit: null });
+      }),
+    );
     patchSchedule(cfg.id, { failures: 0, disabledReason: undefined });
     log?.info({ connector: cfg.id }, "scheduled connector pull completed");
   } catch (err: any) {

@@ -2,10 +2,7 @@ name: Deploy to AWS
 
 on:
   push:
-    # The feature-branch entry exists only to build the bootstrap image before
-    # the first merge; remove it (and its line in the deploy role's trust
-    # policy) at cutover.
-    branches: [main, feat/aws-migration-prep]
+    branches: [main]
   workflow_dispatch:
 
 # Never two deploys at once - single machine, single SQLite writer.

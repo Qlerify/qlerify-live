@@ -28,17 +28,17 @@ const Chip = ({ label, value }: { label: string; value: string }) => (
   </div>
 )
 
-const Diagnostics = ({ c }: { c: Connector }) => {
+const Diagnostics = ({ connector }: { connector: Connector }) => {
   const { connBusy, connVerify: v, connTest: t } = useStore()
-  const verify = v?.id === c.id ? v : null
-  const test = t?.id === c.id ? t : null
-  const label = testLabel(c)
-  const acts = performsActions(c)
+  const verify = v?.id === connector.id ? v : null
+  const test = t?.id === connector.id ? t : null
+  const label = testLabel(connector)
+  const acts = performsActions(connector)
 
   return (
     <div className="mt-5 rounded-lg border border-stone-200 p-4">
       <div className="text-sm font-medium text-stone-800">Connection</div>
-      <div className={`text-xs mt-0.5 ${acts ? "text-amber-700" : "text-stone-500"}`}>{testHint(c)}</div>
+      <div className={`text-xs mt-0.5 ${acts ? "text-amber-700" : "text-stone-500"}`}>{testHint(connector)}</div>
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <button
           onClick={connVerify}
@@ -80,7 +80,7 @@ const Diagnostics = ({ c }: { c: Connector }) => {
               <span className="text-rose-600 font-medium">✗ shape mismatch</span>
             )}{" "}
             <span className="text-stone-500">
-              · {test.count} row(s) pulled, {nothingWrittenText(c)}
+              · {test.count} row(s) pulled, {nothingWrittenText(connector)}
             </span>
           </div>
           {!!test.diff?.requiredStatus?.length && (
@@ -104,13 +104,13 @@ const Diagnostics = ({ c }: { c: Connector }) => {
   )
 }
 
-const BehaviorPanel = ({ c }: { c: Connector }) => {
+const BehaviorPanel = ({ connector }: { connector: Connector }) => {
   const connBusy = useStore((s) => s.connBusy)
-  const current = c.behavior ?? "sync"
+  const current = connector.behavior ?? "sync"
   // Stamped with the connector it belongs to, so selecting a different one falls
   // back to that connector's saved type without resetting state during render.
   const [pending, setPending] = useState<{ id: string; behavior: AdapterBehavior } | null>(null)
-  const picked = pending?.id === c.id ? pending.behavior : current
+  const picked = pending?.id === connector.id ? pending.behavior : current
 
   const losingProtection = current === "actuator" && picked !== "actuator"
   const gainingProtection = current !== "actuator" && picked === "actuator"
@@ -125,7 +125,7 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <select
           value={picked}
-          onChange={(e) => setPending({ id: c.id, behavior: e.target.value as AdapterBehavior })}
+          onChange={(e) => setPending({ id: connector.id, behavior: e.target.value as AdapterBehavior })}
           disabled={connBusy}
           className="text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white disabled:opacity-40"
         >
@@ -146,7 +146,7 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
       </div>
       {losingProtection && (
         <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-          This connector performs actions in {systemName(c)}. Changing it away from <b>actuator</b> removes its
+          This connector performs actions in {systemName(connector)}. Changing it away from <b>actuator</b> removes its
           protection: a model rebuild will run it again, and the test button will execute it for real.
         </div>
       )}
@@ -156,7 +156,7 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
             Marking it <b>actuator</b> stops model rebuilds re-running it, and the test button goes away — an actuator
             has no read-only pull. Its rows stay the only record that its actions happened.
           </div>
-          {c.hasCode && (
+          {connector.hasCode && (
             <div>
               This changes what the platform does, not what the code does. Existing code written for a read-only
               connector won&apos;t have the actuator disciplines — checking the other system before acting, bounding
@@ -170,47 +170,47 @@ const BehaviorPanel = ({ c }: { c: Connector }) => {
   )
 }
 
-const DetailsBody = ({ c }: { c: Connector }) => {
+const DetailsBody = ({ connector }: { connector: Connector }) => {
   const { connectors, connBusy } = useStore()
-  const [target, setTarget] = useState(c.targetEntity)
-  const [created, setCreated] = useState(c.dateRoles?.created || "")
-  const [updated, setUpdated] = useState(c.dateRoles?.updated || "")
+  const [target, setTarget] = useState(connector.targetEntity)
+  const [created, setCreated] = useState(connector.dateRoles?.created || "")
+  const [updated, setUpdated] = useState(connector.dateRoles?.updated || "")
 
   // Re-point options: tables free in this workflow, plus the current target.
-  const free = (connectors?.tables || []).filter((t) => !t.occupiedBy || t.occupiedBy === c.id)
-  const notes = (c.notes || []).slice(-8).reverse()
-  const dateFields = c.dateFields || []
+  const free = (connectors?.tables || []).filter((t) => !t.occupiedBy || t.occupiedBy === connector.id)
+  const notes = (connector.notes || []).slice(-8).reverse()
+  const dateFields = connector.dateFields || []
 
   return (
     <div className="p-6 overflow-y-auto flex-1">
       <div className="grid grid-cols-2 gap-x-6 gap-y-1">
-        <Chip label="System" value={c.boundedContext} />
-        <Chip label="Table" value={`${c.targetEntity} (${c.targetKind})`} />
-        <Chip label="Mode" value={c.mode} />
-        <Chip label="Rows" value={String(c.rowCount)} />
-        <Chip label="Code" value={c.hasCode ? "built" : "none"} />
-        <Chip label="Credentials" value={c.credentialKeys.length ? c.credentialKeys.join(", ") : "none"} />
-        <Chip label="Packages" value={c.deps.length ? c.deps.join(", ") : "none"} />
-        <Chip label="Endpoint" value={c.endpoint || "—"} />
+        <Chip label="System" value={connector.boundedContext} />
+        <Chip label="Table" value={`${connector.targetEntity} (${connector.targetKind})`} />
+        <Chip label="Mode" value={connector.mode} />
+        <Chip label="Rows" value={String(connector.rowCount)} />
+        <Chip label="Code" value={connector.hasCode ? "built" : "none"} />
+        <Chip label="Credentials" value={connector.credentialKeys.length ? connector.credentialKeys.join(", ") : "none"} />
+        <Chip label="Packages" value={connector.deps.length ? connector.deps.join(", ") : "none"} />
+        <Chip label="Endpoint" value={connector.endpoint || "—"} />
         <Chip
           label="Last pull"
           value={
-            c.lastPullAt
-              ? formatVersionDate(c.lastPullAt) +
-                (c.lastPullDurationMs != null ? ` · ${formatDuration(c.lastPullDurationMs)}` : "")
+            connector.lastPullAt
+              ? formatVersionDate(connector.lastPullAt) +
+                (connector.lastPullDurationMs != null ? ` · ${formatDuration(connector.lastPullDurationMs)}` : "")
               : "never"
           }
         />
-        {!c.owned && <Chip label="Owner" value="legacy (unassigned)" />}
+        {!connector.owned && <Chip label="Owner" value="legacy (unassigned)" />}
       </div>
 
-      <ManifestSections connectorId={c.id} />
+      <ManifestSections connectorId={connector.id} />
 
-      <BehaviorPanel c={c} />
+      <BehaviorPanel connector={connector} />
 
-      <Diagnostics c={c} />
+      <Diagnostics connector={connector} />
 
-      <SchedulePanel c={c} />
+      <SchedulePanel connector={connector} />
 
       <div className="mt-5 rounded-lg border border-stone-200 p-4">
         <div className="text-sm font-medium text-stone-800">Re-point</div>
@@ -228,7 +228,7 @@ const DetailsBody = ({ c }: { c: Connector }) => {
               <option key={t.name} value={t.name}>
                 {t.name}
                 {t.kind === "valueObject" ? " (value object)" : ""}
-                {t.name === c.targetEntity ? " — current" : ""}
+                {t.name === connector.targetEntity ? " — current" : ""}
               </option>
             ))}
           </select>
@@ -334,16 +334,16 @@ const DetailsBody = ({ c }: { c: Connector }) => {
   )
 }
 
-export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
+export const ConnectorDetail = ({ connector }: { connector: Connector | null }) => {
   const { connTab, connBusy, set } = useStore()
 
-  if (!c) {
+  if (!connector) {
     return <div className="p-8 text-sm text-stone-400">Select a connector to see its details.</div>
   }
 
-  const name = connectorName(c)
-  const orphan = c.status === "orphaned"
-  const rules = c.triggerRules || []
+  const name = connectorName(connector)
+  const orphan = connector.status === "orphaned"
+  const rules = connector.triggerRules || []
   // Tab state: "details" | "code" | "rule:<eventKey>". A rule tab whose rule was
   // deleted (or another connector selected) falls back to details.
   const tab =
@@ -375,41 +375,41 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
     <div className="flex flex-col flex-1 min-h-0">
       <div className="px-6 pt-6 pb-3 border-b border-stone-200">
         <div className="flex items-center gap-2">
-          <StatusDot status={c.status} />
+          <StatusDot status={connector.status} />
           <h2 className="text-xl font-semibold text-stone-900">{name}</h2>
           <span
             className={`px-2 py-0.5 text-[11px] rounded-full ${orphan ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`}
           >
             {orphan ? "orphaned" : "active"}
           </span>
-          <BehaviorBadge behavior={c.behavior} />
+          <BehaviorBadge behavior={connector.behavior} />
         </div>
         <div className="flex items-center gap-3 mt-1 text-[11px]">
-          {name !== c.id && (
+          {name !== connector.id && (
             <span
               className="text-stone-400"
               title="The connector's immutable id (its storage key). Re-pointing renamed it above, but the id never changes."
             >
-              key <span className="font-mono text-stone-500">{c.id}</span>
+              key <span className="font-mono text-stone-500">{connector.id}</span>
             </span>
           )}
           {!orphan && (
             <a
-              href={`#bcs/${encodeURIComponent(c.boundedContext)}/${encodeURIComponent(c.targetEntity)}`}
+              href={`#bcs/${encodeURIComponent(connector.boundedContext)}/${encodeURIComponent(connector.targetEntity)}`}
               className="text-sky-700 hover:underline"
             >
               Open table &amp; data →
             </a>
           )}
         </div>
-        {c.summary ? (
-          <div className="text-sm text-stone-600 mt-2 italic">{c.summary}</div>
+        {connector.summary ? (
+          <div className="text-sm text-stone-600 mt-2 italic">{connector.summary}</div>
         ) : (
           <div className="text-sm text-stone-400 mt-2 italic">No description yet — build the connector to generate one.</div>
         )}
         {orphan && (
           <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-            Its target table <b>{c.targetEntity}</b> no longer exists in the model — likely renamed or removed. It can't
+            Its target table <b>{connector.targetEntity}</b> no longer exists in the model — likely renamed or removed. It can't
             ingest until you <b>re-point</b> it at a current table (or delete it).
           </div>
         )}
@@ -436,11 +436,12 @@ export const ConnectorDetail = ({ c }: { c: Connector | null }) => {
       </div>
 
       {tab === "code" ? (
-        <CodeEditor connector={c} />
+        <CodeEditor connector={connector} />
       ) : tab.startsWith("rule:") ? (
-        <RuleEditor connector={c} eventKey={tab.slice("rule:".length)} />
+        <RuleEditor connector={connector} eventKey={tab.slice("rule:".length)} />
       ) : (
-        <DetailsBody c={c} />
+        // Keyed to remount: the panels below seed form state with useState, which reads only on mount.
+        <DetailsBody key={connector.id} connector={connector} />
       )}
     </div>
   )

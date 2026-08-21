@@ -135,7 +135,7 @@ export const Connectors = () => {
         <Section title="Active" items={active} tone="text-stone-500" />
       </div>
       <div className="flex-1 flex flex-col min-w-0 bg-white">
-        <ConnectorDetail c={selected} />
+        <ConnectorDetail connector={selected} />
       </div>
     </main>
   )

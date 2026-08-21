@@ -79,6 +79,9 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
   const valid = Number.isFinite(everyMinutes) && everyMinutes >= MIN_MINUTES
   const savedStart = toLocalInput(s?.startAt)
   const unchanged = everyMinutes === s?.everyMinutes && startAt === savedStart
+  // Only a start time the user just CHANGED has to be in the future; a stored one
+  // going stale must not lock the panel.
+  const startPast = startAt !== "" && startAt !== savedStart && Date.parse(startAt) < Date.now()
   const save = (enabled: boolean) => connSaveSchedule(enabled, everyMinutes, toIso(startAt))
 
   const pick = (v: string) => {
@@ -136,10 +139,11 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
           <input
             type="datetime-local"
             value={startAt}
+            min={toLocalInput(new Date().toISOString())}
             onChange={(e) => setStartAt(e.target.value)}
             disabled={connBusy}
             aria-label="First run time"
-            className="text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white disabled:opacity-40"
+            className={`text-sm rounded-md border px-2 py-1.5 bg-white disabled:opacity-40 ${startPast ? "border-rose-300 bg-rose-50" : "border-stone-300"}`}
           />
           {startAt && (
             <button
@@ -156,7 +160,7 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
           <>
             <button
               onClick={() => save(true)}
-              disabled={connBusy || !valid || unchanged}
+              disabled={connBusy || !valid || unchanged || startPast}
               className="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium"
             >
               Update schedule
@@ -172,7 +176,7 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
         ) : (
           <button
             onClick={() => save(true)}
-            disabled={connBusy || !valid}
+            disabled={connBusy || !valid || startPast}
             className="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium"
           >
             Turn on
@@ -191,11 +195,18 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
         </span>
       </div>
 
-      <div className="mt-2 text-xs text-stone-500">
-        {savedStart
-          ? "Runs sit on a fixed grid from the first run, so a gap you set between two connectors keeps its width."
-          : "Leave the start time empty and the interval is counted from whenever this connector last ran, which may be long before you turned polling on. Set it when connectors have to run in order."}
-      </div>
+      {startPast ? (
+        <div className="mt-2 text-xs text-rose-600">
+          That time has already passed, so this would run at the next tick rather than waiting. Pick a time in the
+          future.
+        </div>
+      ) : (
+        <div className="mt-2 text-xs text-stone-500">
+          {savedStart
+            ? "Runs sit on a fixed grid from the first run, so a gap you set between two connectors keeps its width."
+            : "Leave the start time empty and the interval is counted from whenever this connector last ran, which may be long before you turned polling on. Set it when connectors have to run in order."}
+        </div>
+      )}
 
       {custom && !valid && (
         <div className="mt-2 text-xs text-rose-600">

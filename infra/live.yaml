@@ -402,6 +402,8 @@ Resources:
             - { Name: TRUST_PROXY, Value: "true" }
             # Must exceed the ALB idle timeout (900 s).
             - { Name: KEEP_ALIVE_TIMEOUT_MS, Value: "920000" }
+            # SQLite page cache; without it every scan re-reads the DB over EFS
+            - { Name: SQLITE_CACHE_MB, Value: "128" }
             - { Name: LLM_PROVIDER, Value: bedrock }
             - { Name: BEDROCK_REGION, Value: !Ref "AWS::Region" }
             - { Name: BEDROCK_MODEL, Value: !Ref BedrockModel }

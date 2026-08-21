@@ -15,6 +15,7 @@ import { prisma } from "../db.js";
 import { DomainError } from "../errors.js";
 import { isSystemWorkflow, requireTenant } from "../platform/tenancy/context.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { invalidateCurrentReads } from "../platform/read-cache.js";
 import { createVersion, ensureOntologyResource } from "../platform/ontology-store/ontology-store.js";
 import { getOntology, loadOntologyFromStrings, setWorkflowModel } from "../ontology/model.js";
 import { reingestAll, type ReingestSummary } from "../packs/ingest.js";
@@ -115,6 +116,7 @@ export async function applyWorkflowModel(
   // Newly-added entities with no connector stay unpopulated. Best-effort: a
   // connector that can't pull doesn't fail the model update (see reingestAll).
   const rebuild = await reingestAll();
+  invalidateCurrentReads();
 
   return {
     versionId: v.versionId, seq: v.seq, changed: v.changed, rebuild,

@@ -8,6 +8,7 @@
 
 import { prisma } from "../db.js";
 import { eventLogOrgWhere } from "../platform/tenancy/event-scope.js";
+import { invalidateCurrentReads } from "../platform/read-cache.js";
 import * as store from "./projection-store.js";
 
 export async function purgeEntityData(entity: string): Promise<{ rows: number; events: number; tableExisted: boolean }> {
@@ -16,5 +17,7 @@ export async function purgeEntityData(entity: string): Promise<{ rows: number; e
   const { count: events } = await prisma.eventLog.deleteMany({
     where: { aggregateRoot: entity, ...eventLogOrgWhere() },
   });
+  invalidateCurrentReads();
+
   return { rows, events, tableExisted };
 }

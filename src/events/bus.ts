@@ -9,6 +9,7 @@ import { getOntology } from "../ontology/model.js";
 import { provenanceFor, type ProvMode } from "../twin/provenance.js";
 import { currentOrgId, currentWorkflowId, tenantContext } from "../platform/tenancy/context.js";
 import { currentActorKind } from "../platform/tenancy/actor.js";
+import { invalidateReads } from "../platform/read-cache.js";
 import { correlateCaseId } from "../twin/correlate.js";
 import type { Role } from "../auth.js";
 
@@ -161,7 +162,9 @@ export async function emit(ev: EmittedEvent): Promise<void> {
   // into back to the case its FK references (instead of starting a new case).
   const caseId = scopeOverride ?? (await correlateCaseId(def.aggregateRoot, ev.aggregateId, ev.payload, businessAt));
   const provenance = ev.provenance ?? (await provenanceFor(def.boundedContext));
-  await prisma.eventLog.create({ data: eventRow(ev, def, caseId, provenance, businessAt) });
+  const row = eventRow(ev, def, caseId, provenance, businessAt);
+  await prisma.eventLog.create({ data: row });
+  invalidateReads(row.organizationId, row.workflowId);
 }
 
 /** An event for the batch path, with the two per-event decisions emit() makes
@@ -202,4 +205,5 @@ export async function emitMany(evs: BatchEvent[]): Promise<void> {
   for (let i = 0; i < rows.length; i += EMIT_CHUNK) {
     await prisma.eventLog.createMany({ data: rows.slice(i, i + EMIT_CHUNK) });
   }
+  invalidateReads(rows[0]!.organizationId, rows[0]!.workflowId);
 }

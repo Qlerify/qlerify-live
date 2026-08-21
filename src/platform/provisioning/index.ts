@@ -35,6 +35,7 @@ import {
 import { invalidateQlerifyCache, qlerifyEndpointUrl } from "../../llm/qlerify.js";
 import { validateQlerifyCreds } from "../../ontology/sync.js";
 import { encryptSecret, maskSecret } from "../secrets/secret-box.js";
+import { invalidateReads } from "../read-cache.js";
 import { SYSTEM_ORG_ID, SYSTEM_STACK_ID, SYSTEM_WORKFLOW_ID, newId, slugify } from "../ids.js";
 import type { BuiltinRoleKey, PrincipalType, ScopeType } from "../types.js";
 
@@ -238,6 +239,7 @@ export async function deleteWorkflow(
     prisma.eventLog.deleteMany({ where: { organizationId, workflowId } }),
     prisma.platWorkflow.deleteMany({ where: { id: workflowId, organizationId } }),
   ]);
+  invalidateReads(organizationId, workflowId);
 
   // The workflow's stored AI recommendations live in _app_meta (key convention,
   // no org/workflow column). Cleaned right after the metadata commit — BEFORE
@@ -614,6 +616,7 @@ export async function deleteOrganization(
     prisma.platAuditEvent.deleteMany({ where: { organizationId } }),
     prisma.platOrganization.deleteMany({ where: { id: organizationId } }),
   ]);
+  invalidateReads(organizationId);
 
   // (3) The org's dedicated customer account — only if no other org references it.
   {

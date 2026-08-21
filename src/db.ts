@@ -18,3 +18,17 @@ export const prisma: PrismaClient =
   new PrismaClient({ log: ["warn", "error"], datasources: { db: { url } } });
 
 if (process.env.NODE_ENV !== "production") global.__prisma = prisma;
+
+// SQLite's default page cache is ~2 MB per connection, so over EFS every scan
+// re-reads the file across the network. The pragma is per-connection: fan out a
+// few concurrent statements to reach the pool (best-effort).
+export async function applySqliteTuning(): Promise<void> {
+  const mb = Number(process.env.SQLITE_CACHE_MB);
+  if (!Number.isFinite(mb) || mb <= 0) {
+    return;
+  }
+  const kib = Math.round(mb * 1024);
+  await Promise.all(
+    Array.from({ length: 8 }, () => prisma.$queryRawUnsafe(`PRAGMA cache_size = -${kib}`).catch(() => null)),
+  );
+}

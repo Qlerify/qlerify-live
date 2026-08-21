@@ -8,6 +8,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { requireTenant } from "../platform/tenancy/context.js";
+import { cachedOrgRead } from "../platform/read-cache.js";
 import { ensureAllowed } from "../platform/authz.js";
 import { DomainError } from "../errors.js";
 import { computePortfolio, mappingConfig, setWorkflowMapping } from "../twin/org-dashboard.js";
@@ -24,7 +25,7 @@ export function registerOrgRoutes(app: FastifyInstance) {
   app.get("/org/portfolio", async (_req, reply) => {
     try {
       const ctx = requireTenant();
-      return await computePortfolio(ctx.organizationId);
+      return await cachedOrgRead("portfolio", () => computePortfolio(ctx.organizationId));
     } catch (err) {
       return fail(reply, err);
     }

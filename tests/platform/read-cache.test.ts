@@ -1,6 +1,6 @@
 // The cache is off by default under test — these tests opt in explicitly.
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runWithTenant } from "../../src/platform/tenancy/context.js";
 import type { RequestContext } from "../../src/platform/types.js";
 import {
@@ -16,8 +16,6 @@ const ctx = (organizationId: string, workflowId: string): RequestContext => ({
   workflowId,
   principal: { id: "cache-test-principal", type: "identity" },
 });
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let savedEnabled: string | undefined;
 let savedTtl: string | undefined;
@@ -104,13 +102,18 @@ describe("cachedRead", () => {
   });
 
   it("expires entries after the TTL", async () => {
-    process.env.READ_CACHE_TTL_MS = "30";
-    let calls = 0;
-    const compute = async () => ++calls;
-    await runWithTenant(ctx("orgA", "wf1"), () => cachedRead("r", compute));
-    await sleep(45);
-    await runWithTenant(ctx("orgA", "wf1"), () => cachedRead("r", compute));
-    expect(calls).toBe(2);
+    vi.useFakeTimers();
+    try {
+      process.env.READ_CACHE_TTL_MS = "30";
+      let calls = 0;
+      const compute = async () => ++calls;
+      await runWithTenant(ctx("orgA", "wf1"), () => cachedRead("r", compute));
+      await vi.advanceTimersByTimeAsync(45);
+      await runWithTenant(ctx("orgA", "wf1"), () => cachedRead("r", compute));
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bypasses when disabled and when no tenant is bound", async () => {

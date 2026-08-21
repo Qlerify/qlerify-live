@@ -249,8 +249,7 @@ export function registerRoutes(app: FastifyInstance) {
     // lift it and return every case.
     const q = Number((req.query as any)?.limit ?? 50);
     const ROW_CAP = Number.isFinite(q) && q > 0 ? q : Infinity;
-
-    return cachedRead(`flow-by-case?limit=${ROW_CAP}`, async () => {
+    const compute = async () => {
     const rows = await prisma.eventLog.groupBy({
       by: ["caseId", "eventRef"],
       where: { caseId: { not: null }, ...eventLogOrgWhere() },
@@ -305,7 +304,9 @@ export function registerRoutes(app: FastifyInstance) {
     const all = [...byCase.values()].sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0));
     const capped = ROW_CAP === Infinity ? all : all.slice(0, ROW_CAP);
     return { cases: capped, totalCases: all.length, cap: ROW_CAP === Infinity ? all.length : ROW_CAP };
-    });
+    };
+
+    return ROW_CAP === Infinity ? compute() : cachedRead(`flow-by-case?limit=${ROW_CAP}`, compute);
   });
 
   // ---------------- Source adapters (Part 2.2) ----------------
@@ -495,6 +496,9 @@ export function registerRoutes(app: FastifyInstance) {
   app.get("/sim/cases", async (req) => {
     const q = Number((req.query as any)?.limit ?? 200);
     const limit = Number.isFinite(q) && q > 0 ? q : null;
+    if (limit === null) {
+      return genericListInstances(limit);
+    }
 
     return cachedRead(`cases?limit=${limit}`, () => genericListInstances(limit));
   });

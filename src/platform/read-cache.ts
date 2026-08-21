@@ -10,7 +10,7 @@ interface Entry {
 }
 
 // Pseudo-workflow for org-wide reads: invalidated by a write in ANY workflow.
-const ORG_SCOPE = "org";
+const ORG_SCOPE = "\u0001org";
 
 const MAX_ENTRIES = 500;
 const store = new Map<string, Entry>();

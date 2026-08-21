@@ -79,6 +79,9 @@ export interface AdapterSchedule {
   failures?: number;
   /** Every attempt, unlike lastPullAt which only advances on success. */
   lastAttemptAt?: string;
+  /** First run, and thereafter the grid every later run sits on (startAt + n ×
+   * everyMinutes). Kept after the first run because it is the anchor. */
+  startAt?: string;
   disabledReason?: string;
 }
 

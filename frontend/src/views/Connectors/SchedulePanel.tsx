@@ -33,6 +33,28 @@ const fmtInterval = (m: number): string => {
   return rem ? `${h} h ${rem} min` : `${h} h`
 }
 
+const pad = (n: number): string => String(n).padStart(2, "0")
+
+// datetime-local speaks local wall-clock with no zone; the sidecar stores UTC.
+const toLocalInput = (iso?: string | null): string => {
+  if (!iso) {
+    return ""
+  }
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) {
+    return ""
+  }
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+const toIso = (local: string): string => {
+  if (!local) {
+    return ""
+  }
+  const d = new Date(local)
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString()
+}
+
 const nextRunLabel = (c: Connector): string | null => {
   const at = c.nextRunAt ? Date.parse(c.nextRunAt) : NaN
   if (!Number.isFinite(at)) {
@@ -51,10 +73,13 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
   const saved = s?.everyMinutes ?? 60
   const [everyMinutes, setEveryMinutes] = useState(saved)
   const [custom, setCustom] = useState(() => !PRESETS.some(([m]) => m === saved))
+  const [startAt, setStartAt] = useState(() => toLocalInput(s?.startAt))
 
   const on = !!s?.enabled
   const valid = Number.isFinite(everyMinutes) && everyMinutes >= MIN_MINUTES
-  const unchanged = everyMinutes === s?.everyMinutes
+  const savedStart = toLocalInput(s?.startAt)
+  const unchanged = everyMinutes === s?.everyMinutes && startAt === savedStart
+  const save = (enabled: boolean) => connSaveSchedule(enabled, everyMinutes, toIso(startAt))
 
   const pick = (v: string) => {
     if (v === CUSTOM) {
@@ -106,17 +131,38 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
           </label>
         )}
 
+        <label className="flex items-center gap-1.5 text-sm text-stone-600">
+          starting
+          <input
+            type="datetime-local"
+            value={startAt}
+            onChange={(e) => setStartAt(e.target.value)}
+            disabled={connBusy}
+            aria-label="First run time"
+            className="text-sm rounded-md border border-stone-300 px-2 py-1.5 bg-white disabled:opacity-40"
+          />
+          {startAt && (
+            <button
+              onClick={() => setStartAt("")}
+              disabled={connBusy}
+              className="text-xs text-stone-400 hover:text-stone-600 disabled:opacity-40"
+            >
+              clear
+            </button>
+          )}
+        </label>
+
         {on ? (
           <>
             <button
-              onClick={() => connSaveSchedule(true, everyMinutes)}
+              onClick={() => save(true)}
               disabled={connBusy || !valid || unchanged}
               className="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium"
             >
-              Update interval
+              Update schedule
             </button>
             <button
-              onClick={() => connSaveSchedule(false, everyMinutes)}
+              onClick={() => save(false)}
               disabled={connBusy}
               className="px-3 py-1.5 text-sm rounded-md border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-40 font-medium"
             >
@@ -125,7 +171,7 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
           </>
         ) : (
           <button
-            onClick={() => connSaveSchedule(true, everyMinutes)}
+            onClick={() => save(true)}
             disabled={connBusy || !valid}
             className="px-3 py-1.5 text-sm rounded-md bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-40 font-medium"
           >
@@ -143,6 +189,12 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
             <span className="text-stone-400">not scheduled</span>
           )}
         </span>
+      </div>
+
+      <div className="mt-2 text-xs text-stone-500">
+        {savedStart
+          ? "Runs sit on a fixed grid from the first run, so a gap you set between two connectors keeps its width."
+          : "Leave the start time empty and the interval is counted from whenever this connector last ran, which may be long before you turned polling on. Set it when connectors have to run in order."}
       </div>
 
       {custom && !valid && (

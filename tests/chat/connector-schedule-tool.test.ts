@@ -44,7 +44,7 @@ describe("set_connector_schedule", () => {
     const tool = TOOLS.find((t) => t.name === "set_connector_schedule");
     expect(tool).toBeTruthy();
     expect(Object.keys(tool!.input_schema.properties ?? {}).sort()).toEqual(
-      ["adapterId", "confirmed", "enabled", "everyMinutes"],
+      ["adapterId", "confirmed", "enabled", "everyMinutes", "startAt"],
     );
     expect(tool!.input_schema.required).toContain("confirmed");
   });

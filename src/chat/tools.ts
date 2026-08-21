@@ -506,13 +506,17 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "set_connector_schedule",
     description:
-      "WRITE — Turn a connector's scheduled polling on or off, and set how often it runs. Use whenever the user asks to fetch/refresh/sync on a schedule ('poll this every 6 hours', 'run it nightly', 'stop polling'). everyMinutes is the interval in MINUTES (6 hours = 360, daily = 1440) and must be at least 5; convert the user's words yourself. Enabling means the connector runs unattended against the live source from then on, so it requires confirmation: state the interval you are about to set, ask 'Shall I turn that on?', wait for yes, then call with confirmed:true. Read the current schedule with get_adapter_config.",
+      "WRITE — Turn a connector's scheduled polling on or off, set how often it runs, and set when it first runs. Use whenever the user asks to fetch/refresh/sync on a schedule ('poll this every 6 hours', 'run it nightly', 'stop polling'). everyMinutes is the interval in MINUTES (6 hours = 360, daily = 1440) and must be at least 5; convert the user's words yourself. Pass startAt whenever the user cares WHEN it runs, and always when connectors have to run in order: without it the clock is inherited from whenever that connector last ran, which is invisible to the user and almost never what they meant. To stagger a chain (A fills a table, B reads it), give each connector the same interval and startAt times spaced apart. Enabling means the connector runs unattended against the live source from then on, so it requires confirmation: state the interval AND the first run time you are about to set, ask 'Shall I turn that on?', wait for yes, then call with confirmed:true. Read the current schedule with get_adapter_config.",
     input_schema: {
       type: "object",
       properties: {
         adapterId: { type: "string" },
         enabled: { type: "boolean", description: "true starts scheduled polling, false stops it" },
         everyMinutes: { type: "number", description: "Interval in minutes, minimum 5. Required when enabling; ignored when disabling (the stored interval is kept)." },
+        startAt: {
+          type: "string",
+          description: "When the first run should happen, as an ISO date/time (\"2026-08-21T12:00:00Z\"). Every later run sits on the grid startAt + n × everyMinutes, so gaps between staggered connectors keep their width instead of drifting. Resolve relative words like 'in 10 minutes' or 'tomorrow at 9' into an absolute time yourself. A time already past means run at the next tick. Pass an empty string to clear it and go back to counting from the last run.",
+        },
         confirmed: { type: "boolean" },
       },
       required: ["adapterId", "enabled", "confirmed"],
@@ -1175,15 +1179,21 @@ function handleSetConnectorSchedule(args: Record<string, any>) {
     return err("enabled must be true or false");
   }
   try {
-    const schedule = setConnectorSchedule(id, { enabled: args.enabled, everyMinutes: args.everyMinutes });
+    const schedule = setConnectorSchedule(id, {
+      enabled: args.enabled, everyMinutes: args.everyMinutes,
+      ..."startAt" in args ? { startAt: args.startAt } : {},
+    });
     const cfg = adapterCfg(id);
+    const at = cfg ? nextRunAt({ ...cfg, schedule }) : null;
     return ok({
       adapterId: id,
       schedule,
-      nextRunAt: cfg ? nextRunAt(cfg) : null,
-      note: schedule.enabled
-        ? `Polling is on — this connector now runs every ${schedule.everyMinutes} minute(s) on its own.`
-        : "Polling is off — the connector only runs when pulled manually.",
+      nextRunAt: at,
+      note: !schedule.enabled
+        ? "Polling is off — the connector only runs when pulled manually."
+        : schedule.startAt
+          ? `Polling is on — first run ${schedule.startAt}, then every ${schedule.everyMinutes} minute(s) from that time. Later runs stay on that grid, so a gap you set between two connectors keeps its width.`
+          : `Polling is on — this connector now runs every ${schedule.everyMinutes} minute(s), counted from its last run${at ? `, next ${at}` : ""}. Set startAt if it needs to land at a particular time.`,
     });
   } catch (e: any) {
     if (e instanceof ScheduleError) {

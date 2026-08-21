@@ -320,6 +320,7 @@ export type ConnectorSchedule = {
   everyMinutes: number
   failures?: number
   lastAttemptAt?: string | null
+  startAt?: string | null
   disabledReason?: string | null
 }
 

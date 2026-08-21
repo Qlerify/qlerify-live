@@ -178,7 +178,18 @@ const WorkflowMenu = ({ onClose }: { onClose: () => void }) => {
       return
     }
     AUTH.setWorkflow(id)
-    set({ me: null })
+    set({
+      me: null,
+      dashLoaded: false,
+      cases: [],
+      events: [],
+      flow: null,
+      flowRows: null,
+      nextActions: null,
+      caseNextActions: null,
+      recs: null,
+      instance: null,
+    })
     navigate(id ? "#" : "#org")
   }
 

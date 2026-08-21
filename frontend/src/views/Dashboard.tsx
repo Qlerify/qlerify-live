@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { Loading } from "@/components/Loading.tsx"
 import { Pill } from "@/components/Pill.tsx"
 import { ProvChip } from "@/components/ProvChip.tsx"
 import { AttrCell } from "@/components/AttrCell.tsx"
@@ -173,7 +174,7 @@ const Row = ({ row, plan }: { row: CaseRow; plan: string[] }) => {
 }
 
 export const Dashboard = () => {
-  const { events, meta, busy, ov } = useStore()
+  const { events, meta, busy, ov, dashLoaded } = useStore()
   const plural = prettyEntity(meta.rootAggregatePlural)
   const singular = prettyEntity(meta.rootAggregate)
 
@@ -201,6 +202,10 @@ export const Dashboard = () => {
   useEffect(() => {
     syncOvHash("list")
   }, [ov])
+
+  if (!dashLoaded) {
+    return <Loading />
+  }
 
   return (
     <>

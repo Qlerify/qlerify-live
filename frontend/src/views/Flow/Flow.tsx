@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { Loading } from "@/components/Loading.tsx"
 import { useStore } from "@/lib/store.ts"
 import { prettyEntity } from "@/lib/format.ts"
 import { loadFlow, pollOverview } from "@/lib/workflowData.ts"
@@ -16,7 +17,7 @@ import { TodoPanel } from "./TodoPanel.tsx"
 const POLL_MS = 5000
 
 export const Flow = () => {
-  const { events, meta, ov } = useStore()
+  const { events, meta, ov, dashLoaded } = useStore()
   const plural = prettyEntity(meta.rootAggregatePlural)
 
   useEffect(() => {
@@ -32,6 +33,10 @@ export const Flow = () => {
   useEffect(() => {
     syncOvHash("flow")
   }, [ov])
+
+  if (!dashLoaded) {
+    return <Loading />
+  }
 
   // Search + filters narrow which cases feed EVERY merged counter — coverage
   // badges, pace bar, edge pills, anomaly chips, matrix and burn-ups all

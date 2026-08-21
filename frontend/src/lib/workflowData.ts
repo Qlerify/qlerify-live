@@ -50,7 +50,7 @@ export const loadDashboard = async () => {
     loadRecs(), // freshness is server-computed — keep it current on every tab
   ])
   ovStamp = stampOf(flow)
-  useStore.getState().set({ cases, events, flowRows, flow, nextActions })
+  useStore.getState().set({ cases, events, flowRows, flow, nextActions, dashLoaded: true })
 }
 
 export const loadFlow = async () => {
@@ -65,7 +65,7 @@ export const loadFlow = async () => {
     loadRecs(),
   ])
   ovStamp = stampOf(flow)
-  useStore.getState().set({ flow, events, flowRows, cases, nextActions })
+  useStore.getState().set({ flow, events, flowRows, cases, nextActions, dashLoaded: true })
 }
 
 // Per-case flow (#rows). The old server-side 50-row cap is gone — pagination
@@ -82,7 +82,7 @@ export const loadFlowRows = async () => {
     loadRecs(),
   ])
   ovStamp = stampOf(flow)
-  useStore.getState().set({ flowRows, events, cases, flow, nextActions })
+  useStore.getState().set({ flowRows, events, cases, flow, nextActions, dashLoaded: true })
 }
 
 // The To do tab (#todo) reads the same dataset — the frontier is the star but
@@ -100,7 +100,7 @@ export const loadTodo = async () => {
     loadRecs(),
   ])
   ovStamp = stampOf(flow)
-  useStore.getState().set({ nextActions, events, cases, flowRows, flow })
+  useStore.getState().set({ nextActions, events, cases, flowRows, flow, dashLoaded: true })
 }
 
 // The 5s live-poll body for every Overview tab. Fetches ONLY the tiny flow

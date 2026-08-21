@@ -3,6 +3,11 @@ import { fetchConnectorManifest } from "@/lib/connectorsData.ts"
 import { useStore } from "@/lib/store.ts"
 import type { ConnectorManifest, ManifestSection } from "@/lib/types.ts"
 
+type ManifestState =
+  | { phase: "loading" }
+  | { phase: "ready"; manifest: ConnectorManifest }
+  | { phase: "error"; message: string }
+
 // Colour per trigger-rule status (also used for the rule tab dots).
 export const RULE_STATUS_TONE: Record<string, string> = {
   ok: "bg-emerald-100 text-emerald-700",
@@ -21,27 +26,69 @@ const Section = ({ title, hint, children }: { title: string; hint?: string; chil
   </div>
 )
 
+const Bar = ({ w }: { w: string }) => (
+  <div className={`h-3 rounded bg-stone-200/70 animate-pulse motion-reduce:animate-none ${w}`} />
+)
+
+// Matches the real sections' chrome so nothing jumps when the manifest lands.
+const ManifestSkeleton = () => (
+  <div role="status" aria-busy="true">
+    <span className="sr-only">Loading what this connector does…</span>
+    {[
+      ["w-28", ["w-3/5", "w-2/5"]],
+      ["w-44", ["w-11/12", "w-4/5", "w-9/12"]],
+      ["w-36", ["w-1/2"]],
+    ].map(([title, lines], i) => (
+      <div key={i} className="mt-4 rounded-lg border border-stone-200 p-4" aria-hidden="true">
+        <div className={`h-4 rounded bg-stone-200 animate-pulse motion-reduce:animate-none ${title as string}`} />
+        <div className="mt-3 flex flex-col gap-2">
+          {(lines as string[]).map((w) => (
+            <Bar key={w} w={w} />
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+)
+
 // The manifest's dynamic sections: only what applies to THIS connector appears.
 // Schedule + timestamps stay out — they have dedicated interactive panels on the
 // Details tab; rendering them twice would just drift.
 export const ManifestSections = ({ connectorId }: { connectorId: string }) => {
   const set = useStore((s) => s.set)
-  const [manifest, setManifest] = useState<ConnectorManifest | null>(null)
+  const [state, setState] = useState<ManifestState>({ phase: "loading" })
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let live = true
-    setManifest(null)
+    setState({ phase: "loading" })
     fetchConnectorManifest(connectorId)
-      .then((m) => live && setManifest(m))
-      .catch(() => live && setManifest(null)) // the chips above still describe the connector
+      .then((manifest) => live && setState({ phase: "ready", manifest }))
+      .catch((e: Error) => live && setState({ phase: "error", message: e?.message || "the request failed" }))
     return () => {
       live = false
     }
-  }, [connectorId])
+  }, [connectorId, attempt])
 
-  if (!manifest) {
-    return null
+  if (state.phase === "loading") {
+    return <ManifestSkeleton />
   }
+  if (state.phase === "error") {
+    return (
+      <Section title="What this connector does" hint="This describes the built code. The connector itself is unaffected.">
+        <div className="flex items-center gap-3 flex-wrap text-xs">
+          <span className="text-rose-600">Could not load it — {state.message}.</span>
+          <button
+            onClick={() => setAttempt((n) => n + 1)}
+            className="px-2.5 py-1 rounded-md border border-stone-300 bg-white hover:bg-stone-50 font-medium"
+          >
+            Try again
+          </button>
+        </div>
+      </Section>
+    )
+  }
+  const { manifest } = state
   const section = <K extends ManifestSection["kind"]>(kind: K) =>
     manifest.sections.find((s): s is Extract<ManifestSection, { kind: K }> => s.kind === kind)
 

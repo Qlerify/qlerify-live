@@ -585,9 +585,13 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
       const cfg = connectorsInWorkflow(wf).find((c) => c.id === id);
       if (!cfg) return reply.code(404).send({ error: "UNKNOWN_CONNECTOR", message: `no connector "${id}" in this workflow` });
 
-      const body = (req.body ?? {}) as { enabled?: unknown; everyMinutes?: unknown };
+      const body = (req.body ?? {}) as { enabled?: unknown; everyMinutes?: unknown; startAt?: unknown };
       try {
-        return { id, schedule: setConnectorSchedule(id, { enabled: body.enabled === true, everyMinutes: body.everyMinutes }) };
+        const schedule = setConnectorSchedule(id, {
+          enabled: body.enabled === true, everyMinutes: body.everyMinutes,
+          ...("startAt" in body ? { startAt: body.startAt } : {}),
+        });
+        return { id, schedule, nextRunAt: nextRunAt({ ...cfg, schedule }) };
       } catch (e) {
         if (e instanceof ScheduleError) {
           return reply.code(e.code === "UNKNOWN_CONNECTOR" ? 404 : 400).send({ error: e.code, message: e.message });

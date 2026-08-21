@@ -25,29 +25,34 @@ function backoffFactor(failures: unknown): number {
 }
 
 export function isDue(cfg: AdapterConfig, nowMs: number): boolean {
-  const s = cfg.schedule;
-  if (!s?.enabled) return false;
-  if (!Number.isFinite(s.everyMinutes) || s.everyMinutes < SCHEDULE_MIN_MINUTES) return false;
   if (!cfg.organizationId || !cfg.workflowId) return false;
-
-  const last = s.lastAttemptAt ?? cfg.lastPullAt;
-  if (!last) return true;
-  const lastMs = Date.parse(last);
-  if (!Number.isFinite(lastMs)) return true;
-  const waitMs = s.everyMinutes * 60_000 * backoffFactor(s.failures);
-  return nowMs - lastMs >= waitMs;
+  const at = nextRunAt(cfg, nowMs);
+  return at != null && nowMs >= Date.parse(at);
 }
 
-export function nextRunAt(cfg: AdapterConfig): string | null {
+export function nextRunAt(cfg: AdapterConfig, nowMs: number = Date.now()): string | null {
   const s = cfg.schedule;
   if (!s?.enabled || !Number.isFinite(s.everyMinutes) || s.everyMinutes < SCHEDULE_MIN_MINUTES) return null;
+  const intervalMs = s.everyMinutes * 60_000;
+  const factor = backoffFactor(s.failures);
   const last = s.lastAttemptAt ?? cfg.lastPullAt;
   const lastMs = last ? Date.parse(last) : NaN;
-  if (!Number.isFinite(lastMs)) return new Date().toISOString();
-  return new Date(lastMs + s.everyMinutes * 60_000 * backoffFactor(s.failures)).toISOString();
+  const ran = Number.isFinite(lastMs);
+  const startMs = s.startAt ? Date.parse(s.startAt) : NaN;
+
+  if (!Number.isFinite(startMs)) {
+    return new Date(ran ? lastMs + intervalMs * factor : nowMs).toISOString();
+  }
+  if (nowMs < startMs) return new Date(startMs).toISOString();
+  const slot = startMs + Math.floor((nowMs - startMs) / intervalMs) * intervalMs;
+  const target = ran && lastMs >= slot ? slot + intervalMs : slot;
+  // Only a FAILING connector is held past its slot; flooring on lastMs otherwise
+  // would re-anchor on the late attempt and reintroduce the drift.
+  if (!ran || factor <= 1) return new Date(target).toISOString();
+  return new Date(Math.max(target, lastMs + intervalMs * factor)).toISOString();
 }
 
-export type ScheduleErrorCode = "BAD_INTERVAL" | "UNKNOWN_CONNECTOR";
+export type ScheduleErrorCode = "BAD_INTERVAL" | "BAD_START_AT" | "UNKNOWN_CONNECTOR";
 
 export class ScheduleError extends Error {
   readonly code: ScheduleErrorCode;
@@ -58,9 +63,20 @@ export class ScheduleError extends Error {
   }
 }
 
+/** `""`/null clears it; an unreadable date is refused, never silently ignored.
+ * Strings only — an epoch number is ambiguous between seconds and milliseconds,
+ * and guessing wrong lands the schedule in 1970 without saying so. */
+function parseStartAt(v: unknown): string | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null || (typeof v === "string" && v.trim() === "")) return null;
+  const ms = typeof v === "string" ? Date.parse(v) : NaN;
+  if (!Number.isFinite(ms)) throw new ScheduleError("startAt must be a date/time string, e.g. 2026-08-21T12:00:00Z", "BAD_START_AT");
+  return new Date(ms).toISOString();
+}
+
 export function setConnectorSchedule(
   id: string,
-  input: { enabled: boolean; everyMinutes?: unknown },
+  input: { enabled: boolean; everyMinutes?: unknown; startAt?: unknown },
 ): NonNullable<AdapterConfig["schedule"]> {
   const cur = readSidecar(id);
   if (!cur) {
@@ -71,16 +87,25 @@ export function setConnectorSchedule(
   if (input.enabled && submitted == null) {
     throw new ScheduleError(`everyMinutes must be a number >= ${SCHEDULE_MIN_MINUTES}`);
   }
-  // Turning polling OFF keeps the chosen interval, so switching back on restores it.
+  const submittedStart = parseStartAt(input.startAt);
+  // Turning polling OFF keeps the interval and start time, so switching back on restores them.
   const everyMinutes = submitted ?? cur.schedule?.everyMinutes ?? SCHEDULE_MIN_MINUTES;
-  const schedule = { enabled: input.enabled, everyMinutes, failures: 0, lastAttemptAt: cur.schedule?.lastAttemptAt };
+  const startAt = submittedStart === undefined ? cur.schedule?.startAt : (submittedStart ?? undefined);
+  const schedule = {
+    enabled: input.enabled, everyMinutes, failures: 0,
+    lastAttemptAt: cur.schedule?.lastAttemptAt,
+    ...(startAt ? { startAt } : {}),
+  };
   writeSidecar({ ...cur, schedule });
 
   const wasEnabled = cur.schedule?.enabled ?? false;
+  const from = startAt ? ` First run ${startAt}.` : "";
   if (input.enabled !== wasEnabled) {
-    appendNote(id, "note", input.enabled ? `Polling enabled — every ${everyMinutes} min.` : "Polling disabled.");
+    appendNote(id, "note", input.enabled ? `Polling enabled — every ${everyMinutes} min.${from}` : "Polling disabled.");
   } else if (input.enabled && everyMinutes !== cur.schedule?.everyMinutes) {
-    appendNote(id, "note", `Polling interval changed to every ${everyMinutes} min.`);
+    appendNote(id, "note", `Polling interval changed to every ${everyMinutes} min.${from}`);
+  } else if (input.enabled && startAt !== cur.schedule?.startAt) {
+    appendNote(id, "note", startAt ? `First run moved to ${startAt}.` : "First run time cleared; polling now follows the last run.");
   }
   return schedule;
 }

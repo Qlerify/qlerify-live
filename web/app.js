@@ -983,7 +983,7 @@ function bindTenantBar() {
 
   // Create-organization dialog (self-service: POST /v1/organizations makes the
   // caller the owner). The new org provisions a default workspace but no workflow,
-  // so switching into it lands on the empty-org "create your first workflow" view.
+  // and no LLM/Qlerify config, so it lands on Org Admin > General to set those up first.
   const createOrg = async () => {
     if (state.newOrgBusy) return;
     const name = (document.getElementById("new-org-name")?.value || state.newOrgName || "").trim();
@@ -994,8 +994,9 @@ function bindTenantBar() {
       AUTH.setOrg(org.id); // switch into the brand-new org (also clears the selected workflow)
       state.newOrgOpen = false; state.newOrgBusy = false; state.newOrgName = "";
       state.me = null; // force a fresh whoami so the breadcrumb + switcher reflect the new org
-      state.modelMsg = { ok: true, text: `Organization "${name}" created — you're its owner. Create your first workflow to get started.` };
-      navigate("#"); // empty new org → the create-first-workflow screen
+      state.admin = null; // reset the admin tab so it opens on General
+      state.modelMsg = { ok: true, text: `Organization "${name}" created — set up its LLM provider and Qlerify API key to get started.` };
+      navigate("#admin");
       setTimeout(() => { state.modelMsg = null; render(); }, 3000);
     } catch (e) {
       state.newOrgBusy = false;
@@ -1275,7 +1276,8 @@ function bindNoOrg() {
       const org = await api("/v1/organizations", { method: "POST", body: JSON.stringify({ name }) });
       AUTH.setOrg(org.id);   // land in the brand-new org (you're its owner)
       state.me = null;       // force a fresh whoami for the new context
-      navigate("#");
+      state.admin = null;    // reset the admin tab so it opens on General
+      navigate("#admin");
     } catch (e) {
       state.newOrgErr = (e && e.message) ? e.message : "Failed to create the organisation.";
       render();

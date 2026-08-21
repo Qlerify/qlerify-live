@@ -29,8 +29,8 @@ export const NewOrgDialog = () => {
       AUTH.setOrg(org.id)
       set({ newOrgOpen: false, newOrgBusy: false, me: null })
       setName("")
-      showToast({ ok: true, text: `Organization "${n}" created — you're its owner.` })
-      navigate("#")
+      showToast({ ok: true, text: `Organization "${n}" created — set up its LLM provider and Qlerify API key to get started.` })
+      navigate("#admin")
     } catch (e) {
       set({ newOrgBusy: false, newOrgErr: (e as Error).message || "Failed to create the organization." })
     }

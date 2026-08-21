@@ -23,7 +23,7 @@ export const NoOrg = () => {
       })
       AUTH.setOrg(org.id)
       set({ me: null })
-      navigate("#")
+      navigate("#admin")
     } catch (e) {
       setErr((e as Error).message || "Failed to create the organisation.")
     }

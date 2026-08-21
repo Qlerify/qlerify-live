@@ -26,6 +26,7 @@ import {
 } from "./journal.js";
 import type { AdapterBehavior, AdapterConfig } from "../types.js";
 import { assertActionsConfirmed } from "../behavior.js";
+import { friendlyLlmError } from "../../llm/anthropic.js";
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "connector";
@@ -70,16 +71,19 @@ function fallbackSummary(cfg: AdapterConfig, keys: string[]): string {
   return `Connector populating ${cfg.targetEntity} in ${cfg.boundedContext}${ep}; ${access}.`;
 }
 
+/** `fallback` means the stored text is the generic one-liner, not a real description. */
+export type DescribeOutcome = "described" | "fallback" | "skipped";
+
 /** (Re)generate the connector's doc summary with the AI and store it. Reads the
  * connector's current code + config so the description reflects the source system,
  * target table, credential/access method, and any filters/sort/limits actually in
  * the code. Best-effort: any failure falls back to a deterministic summary. Pass
  * `codeOverride` right after a build to avoid a redundant disk read. */
-export async function regenerateConnectorSummary(id: string, codeOverride?: string): Promise<void> {
+export async function regenerateConnectorSummary(id: string, codeOverride?: string): Promise<DescribeOutcome> {
   const cfg = readSidecar(id);
-  if (!cfg) return;
+  if (!cfg) return "skipped";
   const target = resolveTargetSchema(cfg.targetEntity);
-  if (!target) return;
+  if (!target) return "skipped";
   const keys = credentialKeys(id);
   try {
     const d = await describeConnectorStructured({
@@ -97,10 +101,19 @@ export async function regenerateConnectorSummary(id: string, codeOverride?: stri
     // JSON; a prose fallback keeps the prior facets (an empty {filters:[]} would
     // silently erase a real "Filters" manifest section the code still enforces).
     setConnectorSummary(id, d.summary, d.structured ? { filters: d.filters, ...(d.incremental ? { incremental: d.incremental } : {}) } : undefined);
-  } catch {
+    return "described";
+  } catch (e: any) {
     // Deterministic fallback keeps a summary present; stale facets are replaced
     // only by a successful describe, never wiped by a failed one.
     setConnectorSummary(id, fallbackSummary(cfg, keys));
+    // Curated reason only: a raw provider error can carry internal detail, and the
+    // journal is operator-visible. The full error goes to the server log.
+    console.warn(`[connector] describe failed for ${id}:`, e);
+    const why = friendlyLlmError(e)?.message ?? "The AI describer was unavailable.";
+    try {
+      appendNote(id, "note", `Could not describe this connector with AI, so its description is a generic summary. ${why}`);
+    } catch { /* journaling must never mask the describe */ }
+    return "fallback";
   }
 }
 

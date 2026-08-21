@@ -17,10 +17,10 @@ import { adapterCfg, authorAdapterBody, resetAdapter } from "../packs/author.js"
 import {
   createConnector, setConnectorCredentials, copyConnectorCredentials, buildConnector,
   connectorInfo, readConnectorCode, removeConnector, discoverSourceFields,
-  setConnectorBehavior, setConnectorTargetSystem,
+  setConnectorBehavior, setConnectorTargetSystem, regenerateConnectorSummary,
 } from "../packs/connector/orchestrate.js";
 import { fetchDocs } from "./fetch-docs.js";
-import { readDoc, connectorChatId } from "../packs/connector/journal.js";
+import { readDoc, connectorChatId, setConnectorSummary, appendNote } from "../packs/connector/journal.js";
 import { previewRule } from "../packs/connector/rules.js";
 import { compileTriggerRule } from "../packs/connector/rules-codegen.js";
 import { ingestPull } from "../packs/ingest.js";
@@ -61,6 +61,8 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
   // Reclassifying is the same class of consequence: marking something NOT an
   // actuator lets a model rebuild fire its writes again.
   set_connector_behavior: "connector.build",
+  // Ships the connector's code to the LLM, the same disclosure build_connector rides.
+  update_connector_description: "connector.build",
   reset_adapter: "connector.administer",
   set_connector_credentials: "connector.edit",
   ingest_connector: "connector.edit",
@@ -81,7 +83,7 @@ const TOOL_WRITE_ACTIONS: Record<string, string> = {
 const TOOL_OWNED_ID: ReadonlySet<string> = new Set([
   "regenerate_adapter_body", "reset_adapter", "set_connector_credentials", "build_connector",
   "build_trigger_rules", "ingest_connector", "remove_connector", "discover_source_fields",
-  "set_connector_schedule", "set_connector_behavior",
+  "set_connector_schedule", "set_connector_behavior", "update_connector_description",
 ]);
 
 // Connector READ / EXEC tools that are NOT in TOOL_WRITE_ACTIONS (so the guardData
@@ -215,7 +217,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "get_adapter_config",
     description:
-      "Return an adapter's configuration WITHOUT any secret: kind, bounded context, target entity, mode, endpoint, the credential KEY name (credentialsRef), and whether a generated body exists. Use to inspect how an adapter is wired before diagnosing.",
+      "Return an adapter's configuration WITHOUT any secret: `kind`, `boundedContext`, `targetEntity`, `behavior` (the connector's type) and `targetSystem`, `mode`, `endpoint`, the credential KEY name (`credentialsRef`), whether a generated body exists, the current `description`, and `instructions` — the brief its code was authored from. Use to inspect how an adapter is wired before diagnosing, and ALWAYS before a build_connector that adds to an existing connector, since that call replaces the brief wholesale and you need the old text to resend it complete.",
     input_schema: {
       type: "object",
       properties: { adapterId: { type: "string" } },
@@ -386,7 +388,7 @@ export const TOOLS: Anthropic.Tool[] = [
       type: "object",
       properties: {
         adapterId: { type: "string" },
-        instructions: { type: "string", description: "Natural-language description of the source and how to read it (which table/endpoint/query, pagination, shape). Persisted; on a repair turn you can omit it to reuse the last one." },
+        instructions: { type: "string", description: "Natural-language description of the source and how to read it (which table/endpoint/query, pagination, shape). REPLACES the stored instructions outright — it is not merged — and the code is re-authored from this text alone, so when the user asks for one more thing ('also filter to emails containing qlerify') you must resend the WHOLE brief with that added, never the new sentence on its own. Read the stored one back with get_adapter_config first if you did not write it yourself. On a repair turn omit it to reuse the last one." },
         errorReport: { type: "string", description: "On a repair turn: the error + redacted trace from the failed adapter_dry_run, so the AI can fix the code." },
         confirmed: { type: "boolean" },
       },
@@ -535,6 +537,22 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["adapterId", "behavior", "confirmed"],
     },
   },
+  {
+    name: "update_connector_description",
+    description:
+      "WRITE — Refresh the description shown on a connector's card so it says what the connector NOW does. Call it whenever you have changed what a connector does in a way a rebuild did not already cover — most often after set_connector_behavior, since retyping never re-describes and the old text keeps naming the old type. Omit `description` to have the AI re-read the connector's current code and config and write it (the normal case). Pass `description` only when the user dictates the wording. No confirmation needed: this changes documentation, never the code or the source system. Read the current description with get_adapter_config.",
+    input_schema: {
+      type: "object",
+      properties: {
+        adapterId: { type: "string" },
+        description: {
+          type: "string",
+          description: "Optional. Exact wording to store. Omit to let the AI derive it from the connector's current code, which is what keeps filters and re-run behaviour accurate.",
+        },
+      },
+      required: ["adapterId"],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -647,6 +665,8 @@ export async function runTool(name: string, input: unknown): Promise<ToolResult>
         return handleSetConnectorSchedule(args);
       case "set_connector_behavior":
         return handleSetConnectorBehavior(args);
+      case "update_connector_description":
+        return await handleUpdateConnectorDescription(args);
       default:
         return err(`unknown tool: ${name}`);
     }
@@ -793,6 +813,9 @@ function handleGetAdapterConfig(adapterId: string) {
     behavior: cfg.behavior ?? "sync",
     targetSystem: cfg.targetSystem ?? null,
     mode: cfg.mode, endpoint: cfg.endpoint ?? null, credentialsRef: cfg.credentialsRef ?? null,
+    // build_connector replaces this wholesale, so it must be readable to resend whole.
+    instructions: cfg.instructions ?? null,
+    description: readDoc(adapterId)?.summary ?? null,
     hasBody: !!cfg.bodyPath, bodyPath: cfg.bodyPath ?? null,
     schedule: cfg.schedule ?? null,
     nextRunAt: nextRunAt(cfg),
@@ -1199,4 +1222,37 @@ function handleSetConnectorBehavior(args: Record<string, any>) {
   } catch (e: any) {
     return err(e?.message ?? String(e));
   }
+}
+
+async function handleUpdateConnectorDescription(args: Record<string, any>) {
+  const id = String(args.adapterId ?? "");
+  if (!id) {
+    return err("adapterId required");
+  }
+  if (!adapterCfg(id)) {
+    return err(`no connector "${id}"`);
+  }
+  const dictated = typeof args.description === "string" ? args.description.trim() : "";
+  if (dictated) {
+    setConnectorSummary(id, dictated);
+    appendNote(id, "note", "Description set by hand; it no longer necessarily matches the code.");
+    return ok({
+      adapterId: id,
+      source: "dictated",
+      description: readDoc(id)?.summary ?? null,
+      note: "Stored the wording you were given. It will be replaced the next time the connector is built, repaired or re-described from its code.",
+    });
+  }
+  const outcome = await regenerateConnectorSummary(id);
+  return ok({
+    adapterId: id,
+    source: outcome === "described" ? "ai" : outcome,
+    degraded: outcome !== "described",
+    description: readDoc(id)?.summary ?? null,
+    note: outcome === "described"
+      ? "Re-read the connector's code and rewrote the description from it."
+      : outcome === "fallback"
+        ? "The AI describer was unavailable, so this is a generic one-liner, NOT a real description. Tell the user it could not be written rather than reading it back as though it were."
+        : "Nothing was written: this connector's target table is not in the loaded model, so there was nothing to describe it against.",
+  });
 }

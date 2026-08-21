@@ -8,19 +8,43 @@ import type { ExpAdapter, ExpHealth, ExpRowEvent, ExpState, ExpTable, Row } from
 const exp = () => useStore.getState().exp
 const patch = (p: Partial<ExpState>) => useStore.getState().set({ exp: { ...useStore.getState().exp, ...p } })
 
+// Not redundant with the abort: a reply already on the wire still lands, and would overwrite the newer table.
+let navSeq = 0
+let navCtrl: AbortController | null = null
+
+const beginNav = () => {
+  navCtrl?.abort()
+  navCtrl = new AbortController()
+  return { seq: ++navSeq, signal: navCtrl.signal }
+}
+
+const superseded = (seq: number) => seq !== navSeq
+
+const isAbort = (e: unknown) => (e as { name?: string })?.name === "AbortError"
+
+export const cancelExplorerLoads = () => {
+  navCtrl?.abort()
+  navCtrl = null
+  navSeq++
+}
+
 // Per-table connection status for every system — the dot on each Tables row.
-export const loadHealth = async () => {
+export const loadHealth = async (signal?: AbortSignal) => {
   try {
-    patch({ health: await api<ExpHealth>("/api/bc/health") })
-  } catch {
+    patch({ health: await api<ExpHealth>("/api/bc/health", { signal }) })
+  } catch (err) {
+    if (isAbort(err)) {
+      return
+    }
     patch({ health: { gaps: 0, systems: [] } })
   }
 }
 
-const fetchRowEvents = async (system: string, entity: string): Promise<Record<string, ExpRowEvent[]>> => {
+const fetchRowEvents = async (system: string, entity: string, signal?: AbortSignal): Promise<Record<string, ExpRowEvent[]>> => {
   try {
     const d = await api<{ byRow?: Record<string, ExpRowEvent[]> }>(
       `/api/bc/${encodeURIComponent(system)}/row-events?entity=${encodeURIComponent(entity)}&limit=2000`,
+      { signal },
     )
     return d.byRow || {}
   } catch {
@@ -35,7 +59,7 @@ export const EXP_PAGE = 25
 
 type RawPage = { rows?: Row[]; matched?: number; total?: number; tableMissing?: boolean }
 
-const fetchExpRows = async (): Promise<void> => {
+const fetchExpRows = async (signal?: AbortSignal): Promise<void> => {
   const e = exp()
   if (!e.system || !e.entity) {
     return
@@ -49,7 +73,7 @@ const fetchExpRows = async (): Promise<void> => {
   if (filters.length) {
     qs.set("filters", JSON.stringify(filters))
   }
-  const d = await api<RawPage>(`/api/bc/${encodeURIComponent(e.system)}/raw?${qs}`)
+  const d = await api<RawPage>(`/api/bc/${encodeURIComponent(e.system)}/raw?${qs}`, { signal })
   const items = d.rows || []
   const matched = d.matched ?? items.length
   patch({ items, matched, total: d.total ?? matched, tableMissing: !!d.tableMissing })
@@ -57,7 +81,7 @@ const fetchExpRows = async (): Promise<void> => {
   // Filtering/deleting can strand the page past the end — snap to the last page.
   if (e.page > 0 && !items.length && matched > 0) {
     patch({ page: Math.max(0, Math.ceil(matched / EXP_PAGE) - 1) })
-    return fetchExpRows()
+    return fetchExpRows(signal)
   }
 }
 
@@ -69,13 +93,16 @@ export const refetchExpRows = async () => {
   if (!e.system || !e.entity) {
     return
   }
+  const nav = beginNav()
   patch({ busy: true })
   try {
-    await fetchExpRows()
+    await fetchExpRows(nav.signal)
   } catch {
     // keep prior rows
   } finally {
-    patch({ busy: false })
+    if (!superseded(nav.seq)) {
+      patch({ busy: false })
+    }
   }
 }
 
@@ -94,7 +121,7 @@ export const resetExpFilters = () => {
   refetchExpRows()
 }
 
-export const selectEntity = async (name: string) => {
+export const selectEntity = async (name: string, nav = beginNav()) => {
   const e = exp()
   const system = e.system
   if (!system) {
@@ -104,46 +131,68 @@ export const selectEntity = async (name: string) => {
   showOverlay("Loading data…")
   try {
     try {
-      await fetchExpRows()
-    } catch {
+      await fetchExpRows(nav.signal)
+    } catch (err) {
+      if (isAbort(err) || superseded(nav.seq)) {
+        return
+      }
       patch({ items: [], matched: 0, total: 0, tableMissing: true })
     }
-    patch({ rowEvents: await fetchRowEvents(system, name) })
+    const rowEvents = await fetchRowEvents(system, name, nav.signal)
+    if (superseded(nav.seq)) {
+      return
+    }
+    patch({ rowEvents })
   } finally {
-    patch({ busy: false })
-    hideOverlay()
+    if (!superseded(nav.seq)) {
+      patch({ busy: false })
+      hideOverlay()
+    }
   }
 }
 
 export const selectSystem = async (name: string, targetEntity?: string | null) => {
-  patch({ system: name, entity: null, items: [], matched: 0, total: 0, filters: [], page: 0 })
+  const nav = beginNav()
+  // busy from the first frame, or the gap before the entity is chosen renders as "nothing selected".
+  patch({ system: name, entity: null, items: [], matched: 0, total: 0, filters: [], page: 0, busy: true })
   try {
     const d = await api<{
       entities?: ExpTable[]
       valueObjects?: ExpTable[]
       adapters?: ExpAdapter[]
       defaultEntity?: string
-    }>(`/api/bc/${encodeURIComponent(name)}`)
+    }>(`/api/bc/${encodeURIComponent(name)}`, { signal: nav.signal })
+    if (superseded(nav.seq)) {
+      return
+    }
     patch({ entities: d.entities || [], valueObjects: d.valueObjects || [], adapters: d.adapters || [] })
     const def =
       targetEntity || d.defaultEntity || (d.entities || [])[0]?.name || (d.valueObjects || [])[0]?.name
     if (def) {
-      await selectEntity(def)
+      await selectEntity(def, nav) // same token, so this stays one navigation
+      return
     }
-  } catch {
+  } catch (err) {
+    if (isAbort(err) || superseded(nav.seq)) {
+      return
+    }
     patch({ entities: [], valueObjects: [], adapters: [] })
   }
+  patch({ busy: false })
 }
 
 export const loadExplorer = async (deepSystem?: string | null, deepEntity?: string | null) => {
   let systems: { name: string }[] = []
   try {
-    systems = await api<{ name: string }[]>("/api/bc")
-  } catch {
+    systems = await api<{ name: string }[]>("/api/bc", { signal: beginNav().signal })
+  } catch (err) {
+    if (isAbort(err)) {
+      return
+    }
     systems = []
   }
   patch({ systems })
-  loadHealth()
+  loadHealth(navCtrl?.signal)
 
   const e = exp()
   const wanted = deepSystem || (e.system && systems.some((s) => s.name === e.system) ? e.system : null)

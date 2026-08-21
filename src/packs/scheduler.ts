@@ -63,12 +63,14 @@ export class ScheduleError extends Error {
   }
 }
 
-/** `""`/null clears it; an unreadable date is refused, never silently ignored. */
+/** `""`/null clears it; an unreadable date is refused, never silently ignored.
+ * Strings only — an epoch number is ambiguous between seconds and milliseconds,
+ * and guessing wrong lands the schedule in 1970 without saying so. */
 function parseStartAt(v: unknown): string | null | undefined {
   if (v === undefined) return undefined;
   if (v === null || (typeof v === "string" && v.trim() === "")) return null;
-  const ms = typeof v === "string" || typeof v === "number" ? Date.parse(String(v)) : NaN;
-  if (!Number.isFinite(ms)) throw new ScheduleError("startAt must be a date/time, e.g. 2026-08-21T12:00:00Z", "BAD_START_AT");
+  const ms = typeof v === "string" ? Date.parse(v) : NaN;
+  if (!Number.isFinite(ms)) throw new ScheduleError("startAt must be a date/time string, e.g. 2026-08-21T12:00:00Z", "BAD_START_AT");
   return new Date(ms).toISOString();
 }
 

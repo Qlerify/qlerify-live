@@ -1181,7 +1181,7 @@ function handleSetConnectorSchedule(args: Record<string, any>) {
   try {
     const schedule = setConnectorSchedule(id, {
       enabled: args.enabled, everyMinutes: args.everyMinutes,
-      ..."startAt" in args ? { startAt: args.startAt } : {},
+      ...("startAt" in args ? { startAt: args.startAt } : {}),
     });
     const cfg = adapterCfg(id);
     const at = cfg ? nextRunAt({ ...cfg, schedule }) : null;

@@ -107,6 +107,15 @@ describe("setConnectorSchedule", () => {
     expect(readSidecar(id)?.schedule?.startAt).toBeUndefined();
   });
 
+  it("refuses an epoch number rather than guessing seconds or milliseconds", () => {
+    const id = connector(`epoch-${SFX}`);
+    expect(() => setConnectorSchedule(id, { enabled: true, everyMinutes: 360, startAt: 1690000000000 }))
+      .toThrow(ScheduleError);
+    expect(() => setConnectorSchedule(id, { enabled: true, everyMinutes: 360, startAt: 1690000000 }))
+      .toThrow(ScheduleError);
+    expect(readSidecar(id)?.schedule?.startAt).toBeUndefined();
+  });
+
   it("keeps the start time when polling is turned off and back on", () => {
     const id = connector(`keep-${SFX}`);
     setConnectorSchedule(id, { enabled: true, everyMinutes: 360, startAt: "2026-08-21T12:00:00.000Z" });

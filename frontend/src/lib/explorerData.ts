@@ -22,21 +22,33 @@ const superseded = (seq: number) => seq !== navSeq
 
 const isAbort = (e: unknown) => (e as { name?: string })?.name === "AbortError"
 
+// The board is not part of a table navigation, so it gets its own controller:
+// on the nav one, the selectSystem() that follows every load aborted it, and the
+// Systems and Tables columns then read "Loading…" with nothing left to fill them.
+let healthCtrl: AbortController | null = null
+
 export const cancelExplorerLoads = () => {
   navCtrl?.abort()
   navCtrl = null
   navSeq++
+  healthCtrl?.abort()
+  healthCtrl = null
 }
 
 // Per-table connection status for every system — the dot on each Tables row.
-export const loadHealth = async (signal?: AbortSignal) => {
+export const loadHealth = async () => {
+  healthCtrl?.abort()
+  const ctrl = new AbortController()
+  healthCtrl = ctrl
   try {
-    patch({ health: await api<ExpHealth>("/api/bc/health", { signal }) })
-  } catch (err) {
-    if (isAbort(err)) {
-      return
+    const health = await api<ExpHealth>("/api/bc/health", { signal: ctrl.signal })
+    if (healthCtrl === ctrl) {
+      patch({ health })
     }
-    patch({ health: { gaps: 0, systems: [] } })
+  } catch {
+    if (healthCtrl === ctrl) {
+      patch({ health: { gaps: 0, systems: [] } })
+    }
   }
 }
 
@@ -144,9 +156,11 @@ export const selectEntity = async (name: string, nav = beginNav()) => {
     }
     patch({ rowEvents })
   } finally {
+    // Ref-counted, so every show needs its own hide even when superseded — the
+    // newer navigation's own show is what keeps the scrim up.
+    hideOverlay()
     if (!superseded(nav.seq)) {
       patch({ busy: false })
-      hideOverlay()
     }
   }
 }
@@ -192,7 +206,7 @@ export const loadExplorer = async (deepSystem?: string | null, deepEntity?: stri
     systems = []
   }
   patch({ systems })
-  loadHealth(navCtrl?.signal)
+  loadHealth()
 
   const e = exp()
   const wanted = deepSystem || (e.system && systems.some((s) => s.name === e.system) ? e.system : null)

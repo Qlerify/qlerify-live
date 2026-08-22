@@ -218,7 +218,7 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
         };
       }));
       const order = tableOrder(o);
-      // Orphaned targets are unranked and settle at the tail, alphabetically.
+      // A target the model no longer has is unranked and settles at the tail.
       const rank = (name: string) => order.get(name) ?? order.size;
       connectors.sort((a, b) => rank(a.targetEntity) - rank(b.targetEntity) || a.id.localeCompare(b.id));
       // The re-point target list: every table in the model, flagged with the

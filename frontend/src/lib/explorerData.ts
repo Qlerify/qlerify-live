@@ -196,14 +196,20 @@ export const selectSystem = async (name: string, targetEntity?: string | null) =
 }
 
 export const loadExplorer = async (deepSystem?: string | null, deepEntity?: string | null) => {
+  const nav = beginNav()
   let systems: { name: string }[] = []
   try {
-    systems = await api<{ name: string }[]>("/api/bc", { signal: beginNav().signal })
+    systems = await api<{ name: string }[]>("/api/bc", { signal: nav.signal })
   } catch (err) {
-    if (isAbort(err)) {
+    if (isAbort(err) || superseded(nav.seq)) {
       return
     }
     systems = []
+  }
+  // A reply that lands after the route moved on would otherwise carry the old
+  // deep-link args into selectSystem, whose beginNav() then aborts the new load.
+  if (superseded(nav.seq)) {
+    return
   }
   patch({ systems })
   loadHealth()

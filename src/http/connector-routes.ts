@@ -15,7 +15,8 @@
 
 import type { FastifyInstance } from "fastify";
 import { isHandledError } from "../errors.js";
-import { getOntology } from "../ontology/model.js";
+import { getOntology, type Ontology } from "../ontology/model.js";
+import { entitiesForBc, valueObjectsForBc } from "../ontology/bc-helpers.js";
 import { currentWorkflowId } from "../platform/tenancy/context.js";
 import {
   connectorsInWorkflow, connectorForTarget, connectorOwner, connectorInfo,
@@ -36,6 +37,18 @@ import { parseConnectorExport, importConnectors } from "../packs/connector/impor
 import { tableExists, countRows } from "../twin/projection-store.js";
 import { purgeEntityData } from "../twin/purge.js";
 import { guardData } from "../platform/authz.js";
+
+/** Table name → its position in the Systems tab's walk, so the Connectors tab
+ * and the re-point picker list in the same workflow order rather than by id. */
+function tableOrder(o: Ontology): Map<string, number> {
+  const order = new Map<string, number>();
+  for (const bc of o.boundedContexts) {
+    for (const t of [...entitiesForBc(o, bc), ...valueObjectsForBc(o, bc)]) {
+      if (!order.has(t.name)) order.set(t.name, order.size);
+    }
+  }
+  return order;
+}
 
 /** `attachment; filename="<stem>-YYYY-MM-DD.json"` — stem sanitized so a hostile
  * connector id can't inject header syntax into Content-Disposition. */
@@ -204,12 +217,18 @@ export function registerConnectorRoutes(app: FastifyInstance): void {
           })),
         };
       }));
+      const order = tableOrder(o);
+      // Orphaned targets are unranked and settle at the tail, alphabetically.
+      const rank = (name: string) => order.get(name) ?? order.size;
+      connectors.sort((a, b) => rank(a.targetEntity) - rank(b.targetEntity) || a.id.localeCompare(b.id));
       // The re-point target list: every table in the model, flagged with the
       // connector (if any) already populating it in this workflow.
       const tables = [
         ...o.entities.map((e) => ({ name: e.name, kind: "entity" as const })),
         ...o.valueObjects.map((v) => ({ name: v.name, kind: "valueObject" as const })),
-      ].map((t) => ({ ...t, occupiedBy: connectorForTarget(t.name, wf)?.id ?? null }));
+      ]
+        .map((t) => ({ ...t, occupiedBy: connectorForTarget(t.name, wf)?.id ?? null }))
+        .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
       return { connectors, tables };
     } catch (err) {
       if (isHandledError(err)) return reply.code(err.status).send({ error: err.code, message: err.message });

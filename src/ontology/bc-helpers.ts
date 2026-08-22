@@ -5,15 +5,43 @@
 
 import type { Ontology, EntitySchema, OntologyEvent } from "./model.js";
 
-/** Events declared in a bounded context. */
-export function eventsForBc(ont: Ontology, bc: string): OntologyEvent[] {
-  return ont.events.filter((e) => e.boundedContext === bc);
+// Memoized: a health board asks every BC for its tables, and each ask would
+// otherwise redo the topological sort.
+const rankCache = new WeakMap<Ontology, Map<string, number>>();
+
+/** Event key → position in the workflow's linear walk. */
+export function eventRank(ont: Ontology): Map<string, number> {
+  let ranks = rankCache.get(ont);
+  if (!ranks) {
+    ranks = new Map(ont.linearOrder().map((k, i) => [k, i]));
+    rankCache.set(ont, ranks);
+  }
+  return ranks;
 }
 
-/** Entities a BC owns = the aggregate roots of its events. */
+/** Events declared in a bounded context, in workflow order. */
+export function eventsForBc(ont: Ontology, bc: string): OntologyEvent[] {
+  const rank = eventRank(ont);
+  return ont.events
+    .filter((e) => e.boundedContext === bc)
+    .sort((a, b) => (rank.get(a.key) ?? 0) - (rank.get(b.key) ?? 0));
+}
+
+/** Entities a BC owns = the aggregate roots of its events, first use first. */
 export function entitiesForBc(ont: Ontology, bc: string): EntitySchema[] {
-  const roots = new Set(eventsForBc(ont, bc).map((e) => e.aggregateRoot).filter(Boolean));
-  return ont.entities.filter((e) => roots.has(e.name));
+  const seen = new Set<string>();
+  const owned: EntitySchema[] = [];
+  for (const e of eventsForBc(ont, bc)) {
+    if (!e.aggregateRoot || seen.has(e.aggregateRoot)) {
+      continue;
+    }
+    const entity = ont.entity(e.aggregateRoot);
+    if (entity) {
+      seen.add(entity.name);
+      owned.push(entity);
+    }
+  }
+  return owned;
 }
 
 /** The entity whose raw rows the workbench shows by default (the first aggregate

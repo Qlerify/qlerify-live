@@ -55,8 +55,8 @@ const toIso = (local: string): string => {
   return Number.isNaN(d.getTime()) ? "" : d.toISOString()
 }
 
-const nextRunLabel = (c: Connector): string | null => {
-  const at = c.nextRunAt ? Date.parse(c.nextRunAt) : NaN
+const nextRunLabel = (connector: Connector): string | null => {
+  const at = connector.nextRunAt ? Date.parse(connector.nextRunAt) : NaN
   if (!Number.isFinite(at)) {
     return null
   }
@@ -67,9 +67,9 @@ const nextRunLabel = (c: Connector): string | null => {
   return mins < 60 ? `in ~${mins} min` : `in ~${Math.round(mins / 60)} h`
 }
 
-export const SchedulePanel = ({ c }: { c: Connector }) => {
+export const SchedulePanel = ({ connector }: { connector: Connector }) => {
   const connBusy = useStore((s) => s.connBusy)
-  const s = c.schedule
+  const s = connector.schedule
   const saved = s?.everyMinutes ?? 60
   const [everyMinutes, setEveryMinutes] = useState(saved)
   const [custom, setCustom] = useState(() => !PRESETS.some(([m]) => m === saved))
@@ -96,9 +96,9 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
   return (
     <div className="mt-5 rounded-lg border border-stone-200 p-4">
       <div className="text-sm font-medium text-stone-800">Automatic polling</div>
-      <div className={`text-xs mt-0.5 ${performsActions(c) ? "text-amber-700" : "text-stone-500"}`}>
+      <div className={`text-xs mt-0.5 ${performsActions(connector) ? "text-amber-700" : "text-stone-500"}`}>
         Run this connector on a schedule, without anyone pressing a button. Each run is the same as pressing{" "}
-        <b>{pullLabel(c)}</b> — {scheduleTickText(c)}
+        <b>{pullLabel(connector)}</b> — {scheduleTickText(connector)}
       </div>
 
       <div className="flex items-center gap-2 mt-3 flex-wrap">
@@ -187,7 +187,7 @@ export const SchedulePanel = ({ c }: { c: Connector }) => {
           {on ? (
             <span className="text-emerald-700">
               ● polling every {fmtInterval(saved)}
-              {nextRunLabel(c) ? <span className="text-stone-500"> · next {nextRunLabel(c)}</span> : null}
+              {nextRunLabel(connector) ? <span className="text-stone-500"> · next {nextRunLabel(connector)}</span> : null}
             </span>
           ) : (
             <span className="text-stone-400">not scheduled</span>

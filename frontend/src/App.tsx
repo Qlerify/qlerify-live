@@ -117,7 +117,8 @@ export const App = () => {
   const emptyOrg = (me.workflows || []).length === 0
   const View = VIEWS[route.view]
 
-  let body = View ? <View /> : <NotPorted view={route.view} />
+  const wf = AUTH.workflow() || "none"
+  let body = View ? <View key={wf} /> : <NotPorted view={route.view} />
   if (emptyOrg && route.view !== "admin") {
     body = <EmptyOrg />
   }

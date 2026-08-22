@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { Loading } from "@/components/Loading.tsx"
 import { EventCard } from "@/components/EventCard.tsx"
 import { FlowEdges } from "@/components/FlowEdges.tsx"
 import { FlowCountBadge } from "@/components/FlowCountBadge.tsx"
@@ -134,7 +135,7 @@ const Gutter = ({ row, attrKeys, caseRow }: { row: FlowCaseRow; attrKeys: string
 }
 
 export const Rows = () => {
-  const { events, cases, meta, ov } = useStore()
+  const { events, cases, meta, ov, dashLoaded } = useStore()
 
   useEffect(() => {
     ensureOvScope()
@@ -159,6 +160,10 @@ export const Rows = () => {
   useEffect(() => {
     syncOvHash("rows")
   }, [ov])
+
+  if (!dashLoaded) {
+    return <Loading />
+  }
 
   // Heat is comparable across rows: relative to the busiest single (case, step).
   let maxCount = 1

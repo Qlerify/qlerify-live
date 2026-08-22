@@ -427,7 +427,17 @@ function buildOntology(wf: RawWorkflow, overlay: RawOverlay): Ontology {
 
   const roles = wf.roles ?? [...new Set(events.map((e) => e.role))].sort();
   const primaryBoundedContext = contexts[0]?.[0] ?? "Workflow";
-  const boundedContexts = contexts.map(([bc]) => bc).sort();
+  // Workflow order, not alphabetical: a context ranks by its earliest event, so
+  // the lists the user reads (Systems, Connectors, the chat's system list) run in
+  // the same direction as the diagram. Event-less contexts keep a stable tail.
+  const bcRank = new Map<string, number>();
+  linearOrder().forEach((k, i) => {
+    const e = eventByKey.get(k)!;
+    if (!bcRank.has(e.boundedContext)) bcRank.set(e.boundedContext, i);
+  });
+  const boundedContexts = contexts
+    .map(([bc]) => bc)
+    .sort((a, b) => (bcRank.get(a) ?? events.length) - (bcRank.get(b) ?? events.length) || a.localeCompare(b));
   // An overlay whose event keys don't match this model belongs to a PREVIOUSLY
   // loaded model — its title/rootAggregate overrides are stale and must be
   // ignored (the model-switch "stale labels" bug). Require a MAJORITY of the

@@ -10,6 +10,7 @@ import {
   runExpFilters,
   resetExpFilters,
   setExpPage,
+  cancelExplorerLoads,
   loadExplorer,
   selectEntity,
   selectSystem,
@@ -89,6 +90,7 @@ export const Explorer = () => {
 
   useEffect(() => {
     loadExplorer(route.expSys, route.expEntity).catch(() => {})
+    return cancelExplorerLoads
   }, [route.expSys, route.expEntity])
 
   // The builder conversation is per (system, table) — follow the selection.
@@ -263,8 +265,8 @@ export const Explorer = () => {
       {!e.system ? (
         <div className="flex-1 flex items-center justify-center text-stone-400 text-sm">Loading systems…</div>
       ) : !e.entity ? (
-        <div className="flex-1 flex items-center justify-center text-stone-400 text-sm">
-          Select a table to explore its items.
+        <div className="flex-1 flex items-center justify-center text-stone-400 text-sm" role="status">
+          {e.busy ? "Opening table…" : "Select a table to explore its items."}
         </div>
       ) : (
         <div className="flex-1 flex flex-col min-w-0 bg-white">

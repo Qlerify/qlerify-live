@@ -33,6 +33,7 @@ type State = {
   booting: boolean
 
   cases: CaseRow[]
+  dashLoaded: boolean
   events: EventDef[]
   meta: Meta
   flow: FlowAggregate | null
@@ -116,6 +117,7 @@ export const useStore = create<State>((set) => ({
   booting: true,
 
   cases: [],
+  dashLoaded: false,
   events: [],
   meta: DEFAULT_META,
   flow: null,
